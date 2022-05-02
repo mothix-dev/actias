@@ -52,21 +52,24 @@ impl IDTEntry {
             reserved: 0,
         }
     }
+
+    /// creates an empty IDT entry
+    const fn new_empty() -> Self {
+        Self { // empty entry
+            isr_low: 0,
+            kernel_cs: 0,
+            reserved: 0,
+            attributes: 0,
+            isr_high: 0,
+        }
+    }
 }
 
 /// how many entries do we want in our IDT
 const IDT_ENTRIES: usize = 256;
 
 /// the IDT itself (aligned to 16 bits for performance)
-static mut IDT_TABLE: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([
-    IDTEntry { // empty entry
-        isr_low: 0,
-        kernel_cs: 0,
-        reserved: 0,
-        attributes: 0,
-        isr_high: 0,
-    }; IDT_ENTRIES
-]);
+static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
 
 /// stores state of cpu prior to running exception handler
 /// this should be the proper stack frame format? it isn't provided by the x86 crate to my knowledge
@@ -96,11 +99,11 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
 /// set up idt(r) and enable interrupts
 pub unsafe fn init() {
     // set up exception handlers
-    IDT_TABLE[3] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
-    IDT_TABLE[8] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
+    IDT[3] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
+    IDT[8] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
     
     // load interrupt handler table
-    let idt_desc = DescriptorTablePointer::new(&IDT_TABLE);
+    let idt_desc = DescriptorTablePointer::new(&IDT);
     lidt(&idt_desc);
 
     asm!("sti"); // just in case lidt() doesn't enable interrupts

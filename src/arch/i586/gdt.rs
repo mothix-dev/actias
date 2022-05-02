@@ -65,7 +65,7 @@ enum GDTFlags {
 
 /// TSS
 #[repr(C, packed(16))]
-struct TSS {
+pub struct TaskStateSegment {
     pub link: u16,
     _reserved0: u16,
     pub esp0: u32,
@@ -106,23 +106,69 @@ struct TSS {
     pub ssp: u32,
 }
 
+impl TaskStateSegment {
+    // 💀
+    pub const fn new() -> Self {
+        Self {
+            link: 0,
+            _reserved0: 0,
+            esp0: 0,
+            ss0: 0,
+            _reserved1: 0,
+            esp1: 0,
+            ss1: 0,
+            _reserved2: 0,
+            esp2: 0,
+            ss2: 0,
+            _reserved3: 0,
+            cr3: 0,
+            eip: 0,
+            eflags: 0,
+            eax: 0,
+            ecx: 0,
+            edx: 0,
+            ebx: 0,
+            esp: 0,
+            ebp: 0,
+            esi: 0,
+            edi: 0,
+            es: 0,
+            _reserved4: 0,
+            cs: 0,
+            _reserved5: 0,
+            ss: 0,
+            _reserved6: 0,
+            ds: 0,
+            _reserved7: 0,
+            fs: 0,
+            _reserved8: 0,
+            gs: 0,
+            _reserved9: 0,
+            ldtr: 0,
+            _reserved10: 0,
+            iopb: 0,
+            ssp: 0,
+        }
+    }
+}
+
 /// how many entries do we want in our GDT
 const GDT_ENTRIES: usize = 5;
 
 /// the GDT itself (aligned to 16 bits for performance)
-static mut GDT_TABLE: Aligned<A16, [GDTEntry; GDT_ENTRIES]> = Aligned([GDTEntry(0); GDT_ENTRIES]);
+static mut GDT: Aligned<A16, [GDTEntry; GDT_ENTRIES]> = Aligned([GDTEntry(0); GDT_ENTRIES]);
 
-static mut TSS_SEG: Aligned<A16, TSS]> = Aligned(TSS)
+static mut TSS: Aligned<A16, TaskStateSegment> = Aligned(TaskStateSegment::new());
 
 pub unsafe fn init() {
     // populate GDT
-    GDT_TABLE[1] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv0);
-    GDT_TABLE[2] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv0);
-    GDT_TABLE[3] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv3);
-    GDT_TABLE[4] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv3);
+    GDT[1] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv0);
+    GDT[2] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv0);
+    GDT[3] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv3);
+    GDT[4] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv3);
     // todo: TSS GDT entry
 
     // load GDT
-    let gdt_desc = DescriptorTablePointer::new(&GDT_TABLE);
+    let gdt_desc = DescriptorTablePointer::new(&GDT);
     lgdt(&gdt_desc);
 }
