@@ -30,12 +30,16 @@ enum IDTFlags {
 struct IDTEntry {
     /// low 16 bits of handler pointer
     isr_low: u16,
+
     /// GDT segment selector to be loaded before calling handler
     kernel_cs: u16,
+
     /// unused
     reserved: u8,
+
     /// type and attributes
     attributes: u8,
+    
     /// high 16 bits of handler pointer
     isr_high: u16,
 }

@@ -4,6 +4,7 @@
 #![no_std]  //< Kernels can't use std
 #![no_main]
 #![crate_name="ockernel"]
+#![allow(clippy::missing_safety_doc)]
 
 /// Macros, need to be loaded before everything else due to how rust parses
 #[macro_use]
@@ -54,22 +55,23 @@ pub extern fn kmain() -> ! {
 
     log!("no crash lfg");
 
-    /*log!("page fault test");
+    log!("page fault test");
 
     // trigger a page fault
     unsafe {
         *(0xdeadbeef as *mut u32) = 42;
-    };*/
+    };
 
-    log!("stack overflow test");
+    /*log!("stack overflow test");
 
+    #[allow(unconditional_recursion)]
     fn stack_overflow() {
         stack_overflow(); // for each recursion, the return address is pushed
         stack_overflow(); // we need this one to actually fuck it up
     }
 
     // trigger a stack overflow
-    stack_overflow();
+    stack_overflow();*/
 
     log!("no crash?");
 

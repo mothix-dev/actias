@@ -13,6 +13,7 @@ struct GDTEntry(u64);
 
 impl GDTEntry {
     /// create a new GDT entry. honestly just yoinked code from osdev wiki because the entry structure is batshit insane
+    #[allow(clippy::needless_late_init)]
     pub fn new(base: u32, limit: u32, flags: GDTFlags) -> Self {
         let mut descriptor: u64;
 
@@ -36,19 +37,44 @@ impl GDTEntry {
 /// GDT flags
 #[bitmask(u32)]
 enum GDTFlags {
-    //DescTypeSys       = Self(0 << 0x04), // system descriptor type (default)
-    DescTypeCodeData    = Self(1 << 0x04), // code/data descriptor type
-    Present             = Self(1 << 0x07), // present
-    SysAvail            = Self(1 << 0x0c), // available for system use
-    //LongMode          = Self(1 << 0x0d), // long mode (lmao why)
-    //Size16            = Self(0 << 0x0e), // 16 bit (default)
-    Size32              = Self(1 << 0x0e), // 32 bit
-    //GranSmall         = Self(0 << 0x0f), // granularity (1b - 1mb, default)
-    GranLarge           = Self(1 << 0x0f), // granularity (4kb - 4gb)
-    //Priv0             = Self(0 << 0x05), // privilege level 0
-    Priv1               = Self(1 << 0x05), // privilege level 1
-    Priv2               = Self(2 << 0x05), // privilege level 2
-    Priv3               = Self(3 << 0x05), // privilege level 3
+    //  system descriptor type (default)
+    //DescTypeSys       = Self(0 << 0x04),
+
+    /// code/data descriptor type
+    DescTypeCodeData    = Self(1 << 0x04),
+
+    /// present
+    Present             = Self(1 << 0x07),
+
+    /// available for system use
+    SysAvail            = Self(1 << 0x0c),
+
+    //  long mode (lmao why)
+    //LongMode          = Self(1 << 0x0d),
+
+    //  16 bit (default)
+    //Size16            = Self(0 << 0x0e),
+
+    /// 32 bit
+    Size32              = Self(1 << 0x0e),
+
+    //  granularity (1b - 1mb, default)
+    //GranSmall         = Self(0 << 0x0f),
+
+    /// granularity (4kb - 4gb)
+    GranLarge           = Self(1 << 0x0f),
+
+    //  privilege level 0
+    //Priv0             = Self(0 << 0x05),
+
+    /// privilege level 1
+    Priv1               = Self(1 << 0x05),
+
+    /// privilege level 2
+    Priv2               = Self(2 << 0x05),
+
+    /// privilege level 3
+    Priv3               = Self(3 << 0x05),
 
     //DataReadOnly      = Self(0x00), // 0b0000 (default)
     DataAccessed        = Self(0x01), // 0b0001
@@ -61,6 +87,7 @@ enum GDTFlags {
     DataPriv0           = Self(Self::DescTypeCodeData.0 | Self::Present.0 | Self::Size32.0 | Self::GranLarge.0 | Self::DataReadWrite.0),
     CodePriv3           = Self(Self::DescTypeCodeData.0 | Self::Present.0 | Self::Size32.0 | Self::GranLarge.0 | Self::Priv3.0 | Self::DataExecute.0 | Self::DataReadWrite.0),
     DataPriv3           = Self(Self::DescTypeCodeData.0 | Self::Present.0 | Self::Size32.0 | Self::GranLarge.0 | Self::Priv3.0 | Self::DataReadWrite.0),
+    TaskStateSegment    = Self(Self::Present.0 | Self::DataExecute.0 | Self::DataAccessed.0 | Self::Size32.0),
 }
 
 /// TSS
@@ -153,20 +180,33 @@ impl TaskStateSegment {
 }
 
 /// how many entries do we want in our GDT
-const GDT_ENTRIES: usize = 5;
+const GDT_ENTRIES: usize = 6;
 
 /// the GDT itself (aligned to 16 bits for performance)
 static mut GDT: Aligned<A16, [GDTEntry; GDT_ENTRIES]> = Aligned([GDTEntry(0); GDT_ENTRIES]);
 
+/// the TSS lmao
 static mut TSS: Aligned<A16, TaskStateSegment> = Aligned(TaskStateSegment::new());
 
+/// size of kernel stack
+const STACK_SIZE: usize = 4096 * 5; // 20k
+
+/// kernel stack
+static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+
+/// initialize GDT and TSS
 pub unsafe fn init() {
+    // populate TSS
+    TSS.ss0 = 0x10; // kernel data segment descriptor
+    TSS.esp0 = (&STACK as *const _) as u32;
+    //TSS.iopb = 0x6c; // size of TSS
+
     // populate GDT
     GDT[1] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv0);
     GDT[2] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv0);
     GDT[3] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv3);
     GDT[4] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv3);
-    // todo: TSS GDT entry
+    GDT[5] = GDTEntry::new((&TSS as *const _) as u32, 0x6c, GDTFlags::TaskStateSegment);
 
     // load GDT
     let gdt_desc = DescriptorTablePointer::new(&GDT);
