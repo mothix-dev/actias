@@ -1,6 +1,7 @@
 // i586 low level interrupt/exception handling
 
 use core::arch::asm;
+use core::fmt;
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
@@ -87,24 +88,164 @@ pub struct ExceptionStackFrame {
     pub stack_segment: u32,
 }
 
-/// exception handler for interrupt 3 (breakpoint)
-unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) {
-    log!("cpu exception 3 (breakpoint) @ {:#x}", frame.instruction_pointer);
+/// list of exceptions
+pub enum Exceptions {
+    /// divide-by-zero error
+    DivideByZero = 0,
+
+    /// debug
+    Debug,
+
+    /// non-maskable interrupt
+    NonMaskableInterrupt,
+
+    /// breakpoint
+    Breakpoint,
+
+    /// overflow
+    Overflow,
+
+    /// bound range exceeded
+    BoundRangeExceeded,
+
+    /// invalid opcode
+    InvalidOpcode,
+
+    /// device not available
+    DeviceNotAvailable,
+
+    /// double fault
+    DoubleFault,
+
+    /// coprocessor segment overrun
+    CoprocessorSegmentOverrun,
+
+    /// invalid TSS
+    InvalidTSS,
+
+    /// segment not present
+    SegmentNotPresent,
+
+    /// stack segment fault
+    StackSegmentFault,
+
+    /// general protection fault
+    GeneralProtectionFault,
+
+    /// page fault
+    PageFault,
+
+    /// x87 floating point exception
+    FloatingPoint = 16,
+
+    /// alignment check
+    AlignmentCheck,
+
+    /// machine check
+    MachineCheck,
+
+    /// SIMD floating point exception
+    SIMDFloatingPoint,
+
+    /// virtualization exception
+    Virtualization,
+
+    /// control protection exception
+    ControlProtection,
+
+    /// hypervisor injection exception
+    HypervisorInjection = 28,
+
+    /// vmm communication exception
+    VMMCommunication,
+
+    /// security exception
+    Security,
 }
 
-/// exception handler for interrupt 8 (double fault)
-unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
-    log!("PANIC: cpu exception 8 (double fault) @ {:#x}, error code {:#x}", frame.instruction_pointer, error_code);
+/// page fault error code wrapper
+#[repr(C)]
+pub struct PageFaultErrorCode(u32);
+
+impl fmt::Display for PageFaultErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PageFaultErrorCode {{")?;
+        
+        if self.0 & (1 << 0) > 0 {
+            write!(f, " present,")?;
+        }
+
+        if self.0 & (1 << 1) > 0 {
+            write!(f, " write")?;
+        } else {
+            write!(f, " read")?;
+        }
+
+        if self.0 & (1 << 2) > 0 {
+            write!(f, ", user")?;
+        } else {
+            write!(f, ", supervisor")?;
+        }
+
+        if self.0 & (1 << 3) > 0 {
+            write!(f, ", reserved")?;
+        }
+
+        if self.0 & (1 << 4) > 0 {
+            write!(f, ", instruction")?;
+        } else {
+            write!(f, ", data")?;
+        }
+        
+        if self.0 & (1 << 5) > 0 {
+            write!(f, ", protection-key")?;
+        }
+
+        if self.0 & (1 << 6) > 0 {
+            write!(f, ", shadow")?;
+        }
+        
+        if self.0 & (1 << 15) > 0 {
+            write!(f, ", sgx")?;
+        }
+        
+        write!(f, " }}")
+    }
+}
+
+/// exception handler for breakpoint
+unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) {
+    log!("breakpoint @ {:#x}", frame.instruction_pointer);
+}
+
+/// exception handler for double fault
+unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, _error_code: u32) {
+    log!("PANIC: double fault @ {:#x}", frame.instruction_pointer);
     log!("{:#?}", frame);
     log!("halting");
     asm!("cli; hlt"); // clear interrupts, halt
 }
 
+/// exception handler for page fault
+unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, error_code: PageFaultErrorCode) {
+    let mut address: u32;
+    asm!("mov {0}, cr2", out(reg) address);
+
+    log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
+    log!("accessed address {:#x}", address);
+    log!("{:#?}", frame);
+    log!("halting");
+    asm!("cli; hlt"); // clear interrupts, halt
+}
+
+// todo: more handlers
+
 /// set up idt(r) and enable interrupts
 pub unsafe fn init() {
     // set up exception handlers
-    IDT[3] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
-    IDT[8] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::DoubleFault as usize] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
     
     // load interrupt handler table
     let idt_desc = DescriptorTablePointer::new(&IDT);

@@ -4,7 +4,7 @@
 #![no_std]  //< Kernels can't use std
 #![no_main]
 #![crate_name="ockernel"]
-#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::missing_safety_doc)] // dont really want to write safety docs yet
 
 /// Macros, need to be loaded before everything else due to how rust parses
 #[macro_use]
@@ -24,6 +24,8 @@ use core::arch::asm;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static TEXT: &[u8] = b"UwU";
 
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
@@ -47,20 +49,20 @@ pub extern fn kmain() -> ! {
     log!("UwU {}", ghjk);
     log!("OwO");*/
 
-    log!("breakpoint test");
+    /*log!("breakpoint test");
 
     unsafe {
         asm!("int3");
     }
 
-    log!("no crash lfg");
+    log!("no crash lfg");*/
 
-    log!("page fault test");
+    /*log!("page fault test");
 
     // trigger a page fault
     unsafe {
         *(0xdeadbeef as *mut u32) = 42;
-    };
+    };*/
 
     /*log!("stack overflow test");
 
@@ -73,7 +75,22 @@ pub extern fn kmain() -> ! {
     // trigger a stack overflow
     stack_overflow();*/
 
+    log!("vga test");
+
+    let vga_buffer = 0xb8000 as *mut u8;
+
+    for (i, &byte) in TEXT.iter().enumerate() {
+        unsafe {
+            *vga_buffer.offset(i as isize * 2) = byte;
+            *vga_buffer.offset(i as isize * 2 + 1) = 0xb;
+        }
+    }
+
     log!("no crash?");
+
+    unsafe {
+        asm!("hlt");
+    }
 
     loop {}
 }
