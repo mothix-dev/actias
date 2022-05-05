@@ -7,7 +7,7 @@ use bitmask_enum::bitmask;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 /// entry in GDT
-#[repr(C, packed(16))]
+#[repr(transparent)]
 #[derive(Copy, Clone)]
 struct GDTEntry(u64);
 

@@ -164,7 +164,7 @@ pub enum Exceptions {
 }
 
 /// page fault error code wrapper
-#[repr(C)]
+#[repr(transparent)]
 pub struct PageFaultErrorCode(u32);
 
 impl fmt::Display for PageFaultErrorCode {

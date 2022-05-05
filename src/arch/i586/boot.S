@@ -85,6 +85,7 @@ start_high:
 	
 	/* If kmain returns, loop forefer */
 .l:
+	cli
 	hlt
 	jmp .l
 

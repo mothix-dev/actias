@@ -20,12 +20,18 @@ pub mod unwind;
 /// Logging code
 mod logging;
 
+/// text mode console
+mod console;
+
 use core::arch::asm;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static TEXT: &[u8] = b"UwU";
+
+use arch::vga::*;
+use console::*;
 
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
@@ -38,6 +44,8 @@ pub extern fn kmain() -> ! {
         arch::gdt::init();
         log!("initializing interrupts");
         arch::ints::init();
+        log!("initializing paging");
+        arch::paging::init();
     }
 
     /*let mut asdf = 123;
@@ -75,9 +83,9 @@ pub extern fn kmain() -> ! {
     // trigger a stack overflow
     stack_overflow();*/
 
-    log!("vga test");
+    //log!("vga test");
 
-    let vga_buffer = 0xb8000 as *mut u8;
+    let vga_buffer = 0xc00b8000 as *mut u8; // first 4 mb is mapped to upper 1 gb, including video ram lmao
 
     for (i, &byte) in TEXT.iter().enumerate() {
         unsafe {
@@ -86,10 +94,30 @@ pub extern fn kmain() -> ! {
         }
     }
 
-    log!("no crash?");
+    //log!("no crash?");
+
+    /*let mut writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::LightGray, Color::Black),
+        buffer: unsafe { &mut *(0xc00b8000 as *mut Buffer) },
+    };
+
+    writer.write_string("UwU OwO");*/
+
+    let mut console = create_console();
+    let color = ColorCode {
+        foreground: Color::LightGray,
+        background: Color::Black,
+    };
+
+    console.clear();
+    console.write_char(0, 0, color, b'U');
+    console.write_char(1, 0, color, b'w');
+    console.write_char(2, 0, color, b'U');
+    console.write_string(4, 0, color, "OwO");
 
     unsafe {
-        asm!("hlt");
+        asm!("cli; hlt");
     }
 
     loop {}
