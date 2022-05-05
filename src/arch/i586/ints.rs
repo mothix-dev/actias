@@ -182,9 +182,9 @@ impl fmt::Display for PageFaultErrorCode {
         }
 
         if self.0 & (1 << 2) > 0 {
-            write!(f, ", user")?;
+            write!(f, ", user mode")?;
         } else {
-            write!(f, ", supervisor")?;
+            write!(f, ", supervisor mode")?;
         }
 
         if self.0 & (1 << 3) > 0 {
@@ -192,9 +192,9 @@ impl fmt::Display for PageFaultErrorCode {
         }
 
         if self.0 & (1 << 4) > 0 {
-            write!(f, ", instruction")?;
+            write!(f, ", instruction fetch")?;
         } else {
-            write!(f, ", data")?;
+            write!(f, ", data access")?;
         }
         
         if self.0 & (1 << 5) > 0 {
