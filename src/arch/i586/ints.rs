@@ -251,5 +251,5 @@ pub unsafe fn init() {
     let idt_desc = DescriptorTablePointer::new(&IDT);
     lidt(&idt_desc);
 
-    asm!("sti"); // just in case lidt() doesn't enable interrupts
+    //asm!("sti"); // just in case lidt() doesn't enable interrupts
 }

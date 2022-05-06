@@ -28,8 +28,6 @@ use core::arch::asm;
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-static TEXT: &[u8] = b"UwU";
-
 use arch::vga::*;
 use console::*;
 
@@ -85,14 +83,14 @@ pub extern fn kmain() -> ! {
 
     //log!("vga test");
 
-    let vga_buffer = 0xc00b8000 as *mut u8; // first 4 mb is mapped to upper 1 gb, including video ram lmao
+    /*let vga_buffer = 0xc00b8000 as *mut u8; // first 4 mb is mapped to upper 1 gb, including video ram lmao
 
     for (i, &byte) in TEXT.iter().enumerate() {
         unsafe {
             *vga_buffer.offset(i as isize * 2) = byte;
             *vga_buffer.offset(i as isize * 2 + 1) = 0xb;
         }
-    }
+    }*/
 
     //log!("no crash?");
 
@@ -104,17 +102,87 @@ pub extern fn kmain() -> ! {
 
     writer.write_string("UwU OwO");*/
 
-    let mut console = create_console();
+    /*let mut console = create_console();
     let color = ColorCode {
         foreground: Color::LightGray,
         background: Color::Black,
     };
 
-    console.clear();
+    console.clear(0, 0, 80, 25);
     console.write_char(0, 0, color, b'U');
     console.write_char(1, 0, color, b'w');
     console.write_char(2, 0, color, b'U');
-    console.write_string(4, 0, color, "OwO");
+    console.write_string(4, 0, color, "OwO");*/
+
+    log!("initializing console");
+    let mut raw = create_console();
+    let mut console = SimpleConsole::new(&mut raw, 80, 25);
+
+    console.clear();
+    console.puts("UwU\n");
+
+    /*loop {
+        for bg in 0..16 {
+            for fg in 0..16 {
+                console.color = ColorCode {
+                    foreground: fg.into(),
+                    background: bg.into()
+                };
+                console.puts("OwO ");
+            }
+        }
+    }*/
+    /*console.puts("binawy uwu\n");
+    console.puts("UwU UwU UwU UwU\n");
+    console.puts("UwU UwU UwU OwO\n");
+    console.puts("UwU UwU OwO UwU\n");
+    console.puts("UwU UwU OwO OwO\n");
+    console.puts("UwU OwO UwU UwU\n");
+    console.puts("UwU OwO UwU OwO\n");
+    console.puts("UwU OwO OwO UwU\n");
+    console.puts("UwU OwO OwO OwO\n");
+    console.puts("OwO UwU UwU UwU\n");
+    console.puts("OwO UwU UwU OwO\n");
+    console.puts("OwO UwU OwO UwU\n");
+    console.puts("OwO UwU OwO OwO\n");
+    console.puts("OwO OwO UwU UwU\n");
+    console.puts("OwO OwO UwU OwO\n");
+    console.puts("OwO OwO OwO UwU\n");
+    console.puts("OwO OwO OwO OwO\n");
+
+    //console.raw.copy(0, 3, console.height - 3);
+
+    console.puts("UwU UwU UwU UwU\n");
+    console.puts("UwU UwU UwU OwO\n");
+    console.puts("UwU UwU OwO UwU\n");
+    console.puts("UwU UwU OwO OwO\n");
+    console.puts("UwU OwO UwU UwU\n");
+    console.puts("UwU OwO UwU OwO\n");
+    console.puts("UwU OwO OwO UwU\n");
+    console.puts("UwU OwO OwO OwO\n");
+    console.puts("OwO UwU UwU UwU\n");
+    console.puts("OwO UwU UwU OwO\n");
+    console.puts("OwO UwU OwO UwU\n");
+    console.puts("OwO UwU OwO OwO\n");
+    console.puts("OwO OwO UwU UwU\n");
+    console.puts("OwO OwO UwU OwO\n");
+    console.puts("OwO OwO OwO UwU\n");
+    console.puts("OwO OwO OwO OwO\n");
+    console.puts("binawy owo\n");*/
+
+    /*for i in 0..16 {
+        for bg in 0..16 {
+            for fg in 0..16 {
+                console.color = ColorCode {
+                    foreground: fg.into(),
+                    background: bg.into()
+                };
+                console.puts("UwU ");
+            }
+        }
+    }
+    console.color = ColorCode::default();
+    console.puts("\nOwO\n");*/
 
     unsafe {
         asm!("cli; hlt");
