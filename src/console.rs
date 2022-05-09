@@ -49,6 +49,12 @@ impl ColorCode {
     }
 }
 
+/// color of panic screens
+pub const PANIC_COLOR: ColorCode = ColorCode {
+    foreground: Color::White,
+    background: Color::Red,
+};
+
 /// trait for a text console
 pub trait TextConsole {
     fn puts(&mut self, string: &str);
@@ -122,5 +128,12 @@ impl TextConsole for SimpleConsole<'_> {
 
     fn clear(&mut self) {
         self.raw.clear(0, 0, self.width, self.height, self.color);
+    }
+}
+
+impl core::fmt::Write for SimpleConsole<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.puts(s);
+        Ok(())
     }
 }

@@ -45,6 +45,18 @@ pub extern fn kmain() -> ! {
         log!("initializing paging");
         arch::paging::init();
     }
+    
+    log!("initializing console");
+    let mut raw = create_console();
+    let mut console = SimpleConsole::new(&mut raw, 80, 25);
+
+    console.clear();
+    console.puts(NAME);
+    console.puts(" v");
+    console.puts(VERSION);
+    console.puts("\n\n");
+
+    console.puts("UwU\n");
 
     /*let mut asdf = 123;
     let mut ghjk = 123;
@@ -61,9 +73,9 @@ pub extern fn kmain() -> ! {
         asm!("int3");
     }
 
-    log!("no crash lfg");*/
+    log!("no crash lfg");
 
-    /*log!("page fault test");
+    log!("page fault test");
 
     // trigger a page fault
     unsafe {
@@ -113,13 +125,6 @@ pub extern fn kmain() -> ! {
     console.write_char(1, 0, color, b'w');
     console.write_char(2, 0, color, b'U');
     console.write_string(4, 0, color, "OwO");*/
-
-    log!("initializing console");
-    let mut raw = create_console();
-    let mut console = SimpleConsole::new(&mut raw, 80, 25);
-
-    console.clear();
-    console.puts("UwU\n");
 
     /*loop {
         for bg in 0..16 {
@@ -184,9 +189,7 @@ pub extern fn kmain() -> ! {
     console.color = ColorCode::default();
     console.puts("\nOwO\n");*/
 
-    unsafe {
-        asm!("cli; hlt");
-    }
+    arch::halt();
 
     loop {}
 }

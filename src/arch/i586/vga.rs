@@ -6,17 +6,15 @@ use core::cmp::Ordering;
 const BUFFER_WIDTH: usize = 80;
 const BUFFER_HEIGHT: usize = 25;
 
+/// describes the layout of video ram, makes casting a pointer to it easier
 #[repr(transparent)]
 pub struct Buffer {
     chars: [[u16; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
+/// raw VGA text console
 pub struct VGAConsole {
     buffer: &'static mut Buffer,
-}
-
-impl VGAConsole {
-
 }
 
 impl RawTextConsole for VGAConsole {
@@ -52,8 +50,9 @@ impl RawTextConsole for VGAConsole {
     }
 }
 
+/// creates a raw console
 pub fn create_console() -> VGAConsole {
     VGAConsole {
-        buffer: unsafe { &mut *(0xc00b8000 as *mut Buffer) }, // currently where video mem is mapped, since apparently kernel starts at 0??? gotta fix that
+        buffer: unsafe { &mut *(0xc00b8000 as *mut Buffer) }, // lowest 4 mb are mapped up to 0xc0000000 (3gb), this includes video ram lmao
     }
 }

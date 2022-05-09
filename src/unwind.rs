@@ -10,20 +10,38 @@
  * its use, and the author takes no liability.
  */
 
+use core::fmt;
+use crate::arch::vga::create_console;
+use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
+
 #[panic_handler]
 pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     let (file,line) = match info.location() {
         Some(loc) => (loc.file(), loc.line(),),
         None => ("", 0),
     };
+
     if let Some(m) = info.message() {
         log!("PANIC file='{}', line={} :: {}", file, line, m);
-    }
-    else if let Some(m) = info.payload().downcast_ref::<&str>() {
+    } else if let Some(m) = info.payload().downcast_ref::<&str>() {
         log!("PANIC file='{}', line={} :: {}", file, line, m);
-    }
-    else {
+    } else {
         log!("PANIC file='{}', line={} :: ?", file, line);
+    }
+
+    // do this after in case anything breaks
+    let mut raw = create_console();
+    let mut console = SimpleConsole::new(&mut raw, 80, 25);
+
+    console.color = PANIC_COLOR;
+    console.clear();
+
+    if let Some(m) = info.message() {
+        fmt::write(&mut console, format_args!("PANIC file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
+    } else if let Some(m) = info.payload().downcast_ref::<&str>() {
+        fmt::write(&mut console, format_args!("PANIC file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
+    } else {
+        fmt::write(&mut console, format_args!("PANIC file='{}', line={} :: ?\n", file, line)).expect("lol. lmao");
     }
     loop {}
 }

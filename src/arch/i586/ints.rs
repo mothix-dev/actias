@@ -5,6 +5,9 @@ use core::fmt;
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
+use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
+use super::vga::create_console;
+use super::halt;
 
 /// IDT flags
 #[bitmask(u8)]
@@ -94,73 +97,73 @@ pub enum Exceptions {
     DivideByZero = 0,
 
     /// debug
-    Debug,
+    Debug = 1,
 
     /// non-maskable interrupt
-    NonMaskableInterrupt,
+    NonMaskableInterrupt = 2,
 
     /// breakpoint
-    Breakpoint,
+    Breakpoint = 3,
 
     /// overflow
-    Overflow,
+    Overflow = 4,
 
     /// bound range exceeded
-    BoundRangeExceeded,
+    BoundRangeExceeded = 5,
 
     /// invalid opcode
-    InvalidOpcode,
+    InvalidOpcode = 6,
 
     /// device not available
-    DeviceNotAvailable,
+    DeviceNotAvailable = 7,
 
     /// double fault
-    DoubleFault,
+    DoubleFault = 8,
 
     /// coprocessor segment overrun
-    CoprocessorSegmentOverrun,
+    CoprocessorSegmentOverrun = 9,
 
     /// invalid TSS
-    InvalidTSS,
+    InvalidTSS = 10,
 
     /// segment not present
-    SegmentNotPresent,
+    SegmentNotPresent = 11,
 
     /// stack segment fault
-    StackSegmentFault,
+    StackSegmentFault = 12,
 
     /// general protection fault
-    GeneralProtectionFault,
+    GeneralProtectionFault = 13,
 
     /// page fault
-    PageFault,
+    PageFault = 14,
 
     /// x87 floating point exception
     FloatingPoint = 16,
 
     /// alignment check
-    AlignmentCheck,
+    AlignmentCheck = 17,
 
     /// machine check
-    MachineCheck,
+    MachineCheck = 18,
 
     /// SIMD floating point exception
-    SIMDFloatingPoint,
+    SIMDFloatingPoint = 19,
 
     /// virtualization exception
-    Virtualization,
+    Virtualization = 20,
 
     /// control protection exception
-    ControlProtection,
+    ControlProtection = 21,
 
     /// hypervisor injection exception
     HypervisorInjection = 28,
 
     /// vmm communication exception
-    VMMCommunication,
+    VMMCommunication = 29,
 
     /// security exception
-    Security,
+    Security = 30,
 }
 
 /// page fault error code wrapper
@@ -222,8 +225,18 @@ unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) 
 unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, _error_code: u32) {
     log!("PANIC: double fault @ {:#x}", frame.instruction_pointer);
     log!("{:#?}", frame);
-    log!("halting");
-    asm!("cli; hlt"); // clear interrupts, halt
+
+    // write same message to screen
+    let mut raw = create_console();
+    let mut console = SimpleConsole::new(&mut raw, 80, 25);
+
+    console.color = PANIC_COLOR;
+
+    console.clear();
+    fmt::write(&mut console, format_args!("PANIC: double fault @ {:#x}\n", frame.instruction_pointer)).expect("lol. lmao");
+    fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
+
+    halt();
 }
 
 /// exception handler for page fault
@@ -234,8 +247,18 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
     log!("accessed address {:#x}", address);
     log!("{:#?}", frame);
-    log!("halting");
-    asm!("cli; hlt"); // clear interrupts, halt
+
+    let mut raw = create_console();
+    let mut console = SimpleConsole::new(&mut raw, 80, 25);
+    
+    console.color = PANIC_COLOR;
+
+    console.clear();
+    fmt::write(&mut console, format_args!("PANIC: page fault @ {:#x}, error code {}\n", frame.instruction_pointer, error_code)).expect("lol. lmao");
+    fmt::write(&mut console, format_args!("accessed address {:#x}\n", address)).expect("lol. lmao");
+    fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
+
+    halt();
 }
 
 // todo: more handlers
