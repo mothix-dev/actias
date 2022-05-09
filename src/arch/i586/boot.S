@@ -55,7 +55,7 @@ start:
 	add 4, %esp
 	
 	/* Enable paging */
-	mov $init_pd - LINKED_BASE, %eax
+	mov $page_directory - LINKED_BASE, %eax
 	mov %eax, %cr3
 	mov %cr0, %eax
 	or $0x80010000, %eax      /* PG & WP */
@@ -70,7 +70,7 @@ start:
 .extern kmain
 start_high:
 	/* Clear identity mapping */
-	movl $0, init_pd+0
+	movl $0, page_directory+0
 	
 	/* Prep segment registers */	
 	mov $0x10, %ax
@@ -92,7 +92,7 @@ start_high:
 
 /* === Page-aligned data === */
 .section .padata
-init_pd:
+page_directory:
 	.long init_pt - LINKED_BASE + 3
 	.rept 768-1
 		.long 0
