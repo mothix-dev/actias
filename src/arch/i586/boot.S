@@ -83,7 +83,7 @@ start_high:
 	mov $init_stack, %esp
 	call kmain
 	
-	/* If kmain returns, loop forefer */
+	/* If kmain returns, loop forever */
 .l:
 	cli
 	hlt
@@ -92,6 +92,7 @@ start_high:
 
 /* === Page-aligned data === */
 .section .padata
+.globl page_directory /* we need to access this in paging.rs! */
 page_directory:
 	.long init_pt - LINKED_BASE + 3
 	.rept 768-1

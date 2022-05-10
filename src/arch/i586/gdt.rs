@@ -1,4 +1,4 @@
-// i586 global descriptor table (GDT) and task state segment (TSS)
+//! i586 global descriptor table (GDT) and task state segment (TSS)
 
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lgdt};
@@ -47,7 +47,7 @@ enum GDTFlags {
     Present             = Self(1 << 0x07),
 
     /// available for system use
-    SysAvail            = Self(1 << 0x0c),
+    //SysAvail          = Self(1 << 0x0c),
 
     //  long mode (lmao why)
     //LongMode          = Self(1 << 0x0d),

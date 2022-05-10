@@ -1,4 +1,4 @@
-// generic text mode console interface and ANSI terminal emulator
+//! generic text mode console interface and ANSI terminal emulator
 
 /*
 TODO: define basic trait for text consoles
@@ -113,6 +113,12 @@ impl TextConsole for SimpleConsole<'_> {
                 b'\x08' => { // rust doesn't have \b lmao
                     if self.cursor_x > 0 {
                         self.cursor_x -= 1;
+                    }
+                },
+                b'\t' => {
+                    self.cursor_x = ((self.cursor_x / 4) * 4) + 4;
+                    if self.cursor_x >= self.width {
+                        self.newline();
                     }
                 },
                 _ => {

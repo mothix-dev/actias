@@ -1,4 +1,4 @@
-// i586 low level interrupt/exception handling
+//! i586 low level interrupt/exception handling
 
 use core::arch::asm;
 use core::fmt;

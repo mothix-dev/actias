@@ -22,3 +22,12 @@ pub fn halt() {
         asm!("cli; hlt"); // clear interrupts, halt
     }
 }
+
+pub fn init() {
+    log!("initializing GDT");
+    unsafe { gdt::init(); }
+    log!("initializing interrupts");
+    unsafe { ints::init(); }
+    log!("initializing paging");
+    unsafe { paging::init(); }
+}

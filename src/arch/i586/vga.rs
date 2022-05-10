@@ -1,4 +1,4 @@
-// x86 vga text mode
+//! x86 vga text mode
 
 use crate::console::{ColorCode, RawTextConsole};
 use core::cmp::Ordering;

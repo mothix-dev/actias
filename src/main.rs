@@ -12,6 +12,7 @@ mod macros;
 
 // Architecture-specific modules
 #[path="arch/i586/mod.rs"]
+#[cfg(target_arch = "x86")]
 pub mod arch;
 
 /// Exception handling (panic)
@@ -37,14 +38,7 @@ use console::*;
 pub extern fn kmain() -> ! {
     log!("booting {} v{}", NAME, VERSION);
 
-    unsafe {
-        log!("initializing GDT");
-        arch::gdt::init();
-        log!("initializing interrupts");
-        arch::ints::init();
-        log!("initializing paging");
-        arch::paging::init();
-    }
+    arch::init();
     
     log!("initializing console");
     let mut raw = create_console();
@@ -57,6 +51,7 @@ pub extern fn kmain() -> ! {
     console.puts("\n\n");
 
     console.puts("UwU\n");
+
 
     /*let mut asdf = 123;
     let mut ghjk = 123;
