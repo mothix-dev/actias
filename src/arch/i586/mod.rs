@@ -15,11 +15,13 @@ pub extern fn x86_prep_page_table(buf: &mut [u32; 1024]) {
     }
 }
 
-pub fn halt() {
+pub fn halt() -> ! {
     log!("halting");
 
     unsafe {
-        asm!("cli; hlt"); // clear interrupts, halt
+        loop {
+            asm!("cli; hlt"); // clear interrupts, halt
+        }
     }
 }
 

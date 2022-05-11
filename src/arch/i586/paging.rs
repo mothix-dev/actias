@@ -4,6 +4,7 @@ use core::fmt;
 use bitmask_enum::bitmask;
 
 const LINKED_BASE: usize = 0xc0000000;
+static mut MEM_SIZE: usize = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
 
 extern "C" {
     /// page directory, created in boot.S
@@ -12,12 +13,18 @@ extern "C" {
 
 /// entry in a page table
 #[repr(transparent)]
+#[derive(Copy, Clone)]
 pub struct PageTableEntry(u32);
 
 impl PageTableEntry {
     /// create new page table entry
     pub fn new(addr: u32, flags: PageTableFlags) -> Self {
         Self((addr & 0xfffff000) | (flags.0 & 0x0fff) as u32)
+    }
+
+    /// create an unused page table entry
+    pub fn new_unused() -> Self {
+        Self(0)
     }
 
     /// set address of page table entry
@@ -33,6 +40,11 @@ impl PageTableEntry {
     /// checks if this page table entry is unused
     pub fn is_unused(&self) -> bool {
         self.0 == 0 // lol. lmao
+    }
+
+    /// gets address of page table entry
+    pub fn get_address(&self) -> u32 {
+        self.0 & 0xfffff000
     }
 }
 
@@ -130,12 +142,18 @@ impl fmt::Display for PageTableFlags {
 
 /// entry in a page directory
 #[repr(transparent)]
+#[derive(Copy, Clone)]
 pub struct PageDirEntry(u32);
 
 impl PageDirEntry {
     /// create new page directory entry
     pub fn new(addr: u32, flags: PageTableFlags) -> Self {
         Self((addr & 0xfffff000) | (flags.0 & 0x0fff) as u32)
+    }
+
+    /// create an unused page directory entry
+    pub fn new_unused() -> Self {
+        Self(0)
     }
 
     /// set address of page directory entry
@@ -151,6 +169,11 @@ impl PageDirEntry {
     /// checks if this page dir entry is unused
     pub fn is_unused(&self) -> bool {
         self.0 == 0 // lol. lmao
+    }
+
+    /// gets address of page directory entry
+    pub fn get_address(&self) -> u32 {
+        self.0 & 0xfffff000
     }
 }
 

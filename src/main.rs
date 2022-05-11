@@ -34,7 +34,6 @@ use console::*;
 
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
-#[allow(clippy::empty_loop)]
 pub extern fn kmain() -> ! {
     log!("booting {} v{}", NAME, VERSION);
 
@@ -185,6 +184,4 @@ pub extern fn kmain() -> ! {
     console.puts("\nOwO\n");*/
 
     arch::halt();
-
-    loop {}
 }
