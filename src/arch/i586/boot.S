@@ -102,7 +102,6 @@ page_directory:
 	.rept 256-1
 		.long 0
 	.endr
-.globl init_pt
 init_pt:
 	/* The contents of this table is filled by the x86_prep_page_table function */
 	.rept 1024

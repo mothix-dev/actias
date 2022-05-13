@@ -4,19 +4,17 @@
 use core::arch::asm;
 use core::fmt;
 use bitmask_enum::bitmask;
+use core::default::Default;
 
 const LINKED_BASE: u32 = 0xc0000000;
 static mut MEM_SIZE: u32 = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
 
 extern "C" {
     /// page directory, created in boot.S
-    static page_directory: [PageDirEntry; 1024]; // TODO: consider putting this array in a struct?
+    //static page_directory: [PageDirEntry; 1024]; // TODO: consider putting this array in a struct?
 
-    /// located at end of kernel
+    /// located at end of kernel, used for calculating placement address
     static kernel_end: u32;
-
-    /// initial page table
-    static mut init_pt: PageTable;
 }
 
 /// entry in a page table
@@ -63,9 +61,9 @@ impl PageTableEntry {
 
 impl fmt::Display for PageTableEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PageTableEntry {{\n")?;
-        write!(f, "    address: {:#x},\n", self.0 & 0xfffff000)?;
-        write!(f, "    flags: {}\n", PageDirFlags((self.0 & 0x0fff) as u16))?;
+        writeln!(f, "PageTableEntry {{")?;
+        writeln!(f, "    address: {:#x},", self.0 & 0xfffff000)?;
+        writeln!(f, "    flags: {}", PageDirFlags((self.0 & 0x0fff) as u16))?;
         write!(f, "}}")
     }
 }
@@ -197,9 +195,9 @@ impl PageDirEntry {
 
 impl fmt::Display for PageDirEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PageDirEntry {{\n")?;
-        write!(f, "    address: {:#x},\n", self.0 & 0xfffff000)?;
-        write!(f, "    flags: {}\n", PageDirFlags((self.0 & 0x0fff) as u16))?;
+        writeln!(f, "PageDirEntry {{")?;
+        writeln!(f, "    address: {:#x},", self.0 & 0xfffff000)?;
+        writeln!(f, "    flags: {}", PageDirFlags((self.0 & 0x0fff) as u16))?;
         write!(f, "}}")
     }
 }
@@ -300,8 +298,10 @@ impl fmt::Display for PageDirFlags {
 
 // based on http://www.jamesmolloy.co.uk/tutorial_html/6.-Paging.html
 
+/// where to allocate memory
 static mut PLACEMENT_ADDR: u32 = 0; // to be filled in with end of kernel on init
 
+/// result of kmalloc calls
 pub struct MallocResult<T> {
     pointer: *mut T,
     phys_addr: u32,
@@ -343,7 +343,7 @@ pub struct PageDirectory {
     /// pointers to page tables
     pub tables: [*mut PageTable; 1024], // FIXME: maybe we want references here? too lazy to deal w borrow checking rn
 
-    /// physical addresses of page tables
+    /// physical addresses of page tables (raw pointer bc references are Annoying and shit breaks without it)
     pub tables_physical: *mut [u32; 1024],
 
     /// physical address of this page directory
@@ -354,6 +354,21 @@ pub struct PageDirectory {
 }
 
 impl PageDirectory {
+    /// creates a new page directory, allocating memory for it in the process
+    pub fn new() -> Self {
+        let num_frames = unsafe { MEM_SIZE >> 12 };
+        PageDirectory {
+            tables: [core::ptr::null_mut(); 1024],
+            tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * 4, false).pointer }, // shit breaks without this lmao
+            physical_addr: 0,
+            frame_set: FrameBitSet {
+                frames: unsafe { kmalloc::<u32>(num_frames / 32 * 4, false).pointer },
+                num_frames,
+            }
+        }
+    }
+
+    /// gets a page from the directory if one exists, makes one if requested
     fn get_page(&mut self, mut addr: u32, make: bool) -> Option<*mut PageTableEntry> {
         addr >>= 12;
         let table_idx = (addr / 1024) as usize;
@@ -374,8 +389,10 @@ impl PageDirectory {
         }
     }
     
+    /// allocates a frame for specified page
     fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
-        if unsafe { (*page).is_unused() } {
+        let page2 = unsafe { &mut *page }; // pointer shenanigans to get around the borrow checker lmao
+        if page2.is_unused() {
             if let Some(idx) = unsafe { self.frame_set.first_unused() } {
                 let mut flags = PageTableFlags::Present;
                 if !is_kernel {
@@ -385,21 +402,21 @@ impl PageDirectory {
                     flags |= PageTableFlags::ReadWrite;
                 }
 
-                unsafe {
-                    self.frame_set.set(idx << 12);
-                    (*page).set_flags(flags);
-                    (*page).set_address(idx << 12);
-                }
+                unsafe { self.frame_set.set(idx << 12); }
+                page2.set_flags(flags);
+                page2.set_address(idx << 12);
             } else {
                 panic!("out of memory (no free frames)");
             }
         }
     }
 
-    fn free_frame(&mut self, page: &mut PageTableEntry) {
-        if !page.is_unused() {
-            unsafe { self.frame_set.clear(page.get_address() >> 12); }
-            page.set_unused();
+    /// frees a frame, allowing other things to use it
+    fn free_frame(&mut self, page: *mut PageTableEntry) {
+        let page2 = unsafe { &mut *page }; // pointer shenanigans
+        if !page2.is_unused() {
+            unsafe { self.frame_set.clear(page2.get_address() >> 12); }
+            page2.set_unused();
         }
     }
 
@@ -413,6 +430,12 @@ impl PageDirectory {
             cr0 |= 0x80000000;
             asm!("mov cr0, {0}", in(reg) cr0);
         }
+    }
+}
+
+impl Default for PageDirectory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -474,16 +497,7 @@ pub unsafe fn init() {
     PLACEMENT_ADDR = (&kernel_end as *const _) as u32 - LINKED_BASE; // we need a physical address for this
 
     // set up page directory struct
-    let num_frames = MEM_SIZE >> 12;
-    let mut dir = PageDirectory {
-        tables: [0 as *mut _; 1024],
-        tables_physical: kmalloc::<[u32; 1024]>(1024 * 4, false).pointer, // shit breaks without this lmao
-        physical_addr: 0,
-        frame_set: FrameBitSet {
-            frames: kmalloc::<u32>(num_frames / 32 * 4, false).pointer,
-            num_frames,
-        }
-    };
+    let mut dir = PageDirectory::new();
 
     // map first 4mb of memory to LINKED_BASE
     for i in 0..1024 {
