@@ -8,7 +8,9 @@ static mut MEM_SIZE: usize = 128 * 1024 * 1024; // TODO: get actual RAM size fro
 
 extern "C" {
     /// page directory, created in boot.S
-    static page_directory: [PageDirEntry; 1024];
+    static page_directory: [PageDirEntry; 1024]; // TODO: consider putting this array in a struct?
+
+    static kernel_end: usize;
 }
 
 /// entry in a page table
@@ -280,8 +282,35 @@ impl fmt::Display for PageDirFlags {
     }
 }
 
+// based on http://www.jamesmolloy.co.uk/tutorial_html/6.-Paging.html
+
+static mut PLACEMENT_ADDR: usize = 0; // to be filled in with end of kernel on init
+
+struct MallocResult<T> {
+    pointer: *mut T,
+    phys_addr: usize,
+}
+
+// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
+unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
+    if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
+        PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
+        PLACEMENT_ADDR += 0x1000; // increment by 4k- we don't want to overwrite things
+    }
+
+    // increment address to make room for area of provided size, return pointer to start of area
+    let tmp = PLACEMENT_ADDR;
+    PLACEMENT_ADDR += size;
+    MallocResult {
+        pointer: tmp as *mut T,
+        phys_addr: tmp,
+    }
+}
+
 /// initializes paging
 pub unsafe fn init() {
+    PLACEMENT_ADDR = kernel_end - LINKED_BASE; // we need a physical address for this
+
     for (i, entry) in page_directory.iter().enumerate() {
         if !entry.is_unused() {
             log!("{}: {}", i, entry);

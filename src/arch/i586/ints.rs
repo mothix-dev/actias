@@ -235,6 +235,7 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     console.clear();
     fmt::write(&mut console, format_args!("PANIC: double fault @ {:#x}\n", frame.instruction_pointer)).expect("lol. lmao");
     fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
+    //console.puts("owo nowo! ur compuwuter did a fucky wucky uwu");
 
     halt();
 }
@@ -268,7 +269,7 @@ pub unsafe fn init() {
     // set up exception handlers
     IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::DoubleFault as usize] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
-    IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
+    //IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
     
     // load interrupt handler table
     let idt_desc = DescriptorTablePointer::new(&IDT);

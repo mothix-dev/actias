@@ -61,7 +61,7 @@ pub extern fn kmain() -> ! {
     log!("UwU {}", ghjk);
     log!("OwO");*/
 
-    /*log!("breakpoint test");
+    log!("breakpoint test");
 
     unsafe {
         asm!("int3");
@@ -74,7 +74,7 @@ pub extern fn kmain() -> ! {
     // trigger a page fault
     unsafe {
         *(0xdeadbeef as *mut u32) = 42;
-    };*/
+    };
 
     /*log!("stack overflow test");
 
