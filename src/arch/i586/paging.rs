@@ -1,4 +1,5 @@
 //! x86 non-PAE paging
+// warning: this code is terrible. do not do anything like this
 
 use core::arch::asm;
 use core::fmt;
@@ -319,7 +320,7 @@ pub unsafe fn kmalloc<T>(size: u32, align: bool) -> MallocResult<T> {
     PLACEMENT_ADDR += size;
 
     if PLACEMENT_ADDR >= MEM_SIZE { // prolly won't happen but might as well
-        panic!("out of memory!");
+        panic!("out of memory (kmalloc)");
     }
 
     MallocResult {
@@ -343,7 +344,7 @@ pub struct PageDirectory {
     pub tables: [*mut PageTable; 1024], // FIXME: maybe we want references here? too lazy to deal w borrow checking rn
 
     /// physical addresses of page tables
-    pub tables_physical: [u32; 1024],
+    pub tables_physical: *mut [u32; 1024],
 
     /// physical address of this page directory
     pub physical_addr: u32,
@@ -353,13 +354,28 @@ pub struct PageDirectory {
 }
 
 impl PageDirectory {
-    fn get_page(&self, addr: u32, make: bool) -> *mut PageTableEntry {
-        // ...
-        0 as *mut PageTableEntry // lol, lmao
+    fn get_page(&mut self, mut addr: u32, make: bool) -> Option<*mut PageTableEntry> {
+        addr >>= 12;
+        let table_idx = (addr / 1024) as usize;
+        if !self.tables[table_idx].is_null() { // page table already exists
+            unsafe { Some(&mut (*self.tables[table_idx]).entries[(addr % 1024) as usize]) }
+        } else if make { // page table doesn't exist, create it
+            unsafe {
+                let ptr = kmalloc(1024 * 4, true); // page table entries are 32 bits (4 bytes) wide
+                self.tables[table_idx] = ptr.pointer;
+                for i in 0..1024 {
+                    (*self.tables[table_idx]).entries[i].0 = 0;
+                }
+                (*self.tables_physical)[table_idx] = ptr.phys_addr | 0x7; // present, read/write, user/supervisor
+                Some(&mut (*self.tables[table_idx]).entries[(addr % 1024) as usize])
+            }
+        } else { // page table doesn't exist
+            None
+        }
     }
     
-    fn alloc_frame(&mut self, page: &mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
-        if page.is_unused() {
+    fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
+        if unsafe { (*page).is_unused() } {
             if let Some(idx) = unsafe { self.frame_set.first_unused() } {
                 let mut flags = PageTableFlags::Present;
                 if !is_kernel {
@@ -369,9 +385,11 @@ impl PageDirectory {
                     flags |= PageTableFlags::ReadWrite;
                 }
 
-                unsafe { self.frame_set.set(idx << 12); }
-                page.set_flags(flags);
-                page.set_address(idx << 12);
+                unsafe {
+                    self.frame_set.set(idx << 12);
+                    (*page).set_flags(flags);
+                    (*page).set_address(idx << 12);
+                }
             } else {
                 panic!("out of memory (no free frames)");
             }
@@ -388,10 +406,7 @@ impl PageDirectory {
     /// switch global page directory to this page directory
     fn switch_to(&self) {
         unsafe {
-            let addr = (&self.tables_physical as *const _) as u32 - LINKED_BASE;
-            log!("{:#x}, {:#x}", addr, addr + LINKED_BASE);
-            let addr2 = (&page_directory as *const _) as u32 - LINKED_BASE;
-            log!("{:#x}, {:#x}", addr2, addr2 + LINKED_BASE);
+            let addr = self.tables_physical as u32 - LINKED_BASE;
             asm!("mov cr3, {0}", in(reg) addr);
             let mut cr0: u32;
             asm!("mov {0}, cr0", out(reg) cr0);
@@ -450,18 +465,19 @@ impl FrameBitSet {
     }
 }
 
-// TODO: get_page
-
+/// our page directory
 static mut PAGE_DIR: Option<PageDirectory> = None;
 
 /// initializes paging
 pub unsafe fn init() {
+    // calculate placement addr for kmalloc calls
     PLACEMENT_ADDR = (&kernel_end as *const _) as u32 - LINKED_BASE; // we need a physical address for this
 
+    // set up page directory struct
     let num_frames = MEM_SIZE >> 12;
     let mut dir = PageDirectory {
         tables: [0 as *mut _; 1024],
-        tables_physical: [0; 1024],
+        tables_physical: kmalloc::<[u32; 1024]>(1024 * 4, false).pointer, // shit breaks without this lmao
         physical_addr: 0,
         frame_set: FrameBitSet {
             frames: kmalloc::<u32>(num_frames / 32 * 4, false).pointer,
@@ -469,32 +485,21 @@ pub unsafe fn init() {
         }
     };
 
-    //dir.tables[768] = page_directory[768]
-    /*log!("{:#x}", page_directory[768].0);
-    dir.tables_physical[768] = page_directory[768].0;
-    dir.tables[768] = &mut init_pt;*/
-    //dir.frame_set.set();
-
+    // map first 4mb of memory to LINKED_BASE
     for i in 0..1024 {
-        dir.tables_physical[i] = page_directory[i].0;
+        let page = dir.get_page(LINKED_BASE + i * 0x1000, true).unwrap();
+        dir.alloc_frame(page, true, true);
     }
 
     // holy fuck we need maybeuninit so bad
     PAGE_DIR = Some(dir);
     PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE;
 
+    // switch to our new page directory
     PAGE_DIR.as_ref().unwrap().switch_to();
 
-    /*for (i, entry) in page_directory.iter().enumerate() {
-        if !entry.is_unused() {
-            log!("{}: {}", i, entry);
-        }
-    }*/
-
-    /*
-    768: PageDirEntry {
-        address: 0x10a000,
-        flags: PageDirFlags { present, read/write, supervisor mode, accessed }
+    if let Some(dir) = PAGE_DIR.as_ref() {
+        let first_unused = dir.frame_set.first_unused().unwrap();
+        log!("{}mb total, {}/{} mapped ({}mb), {}% usage", MEM_SIZE / 1024 / 1024, first_unused, dir.frame_set.num_frames, first_unused / 256, (first_unused * 100) / dir.frame_set.num_frames);
     }
-    */
 }
