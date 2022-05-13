@@ -24,6 +24,7 @@ mod logging;
 /// text mode console
 mod console;
 
+#[allow(unused_imports)]
 use core::arch::asm;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -51,7 +52,6 @@ pub extern fn kmain() -> ! {
 
     console.puts("UwU\n");
 
-
     /*let mut asdf = 123;
     let mut ghjk = 123;
     asdf = 0;
@@ -61,7 +61,7 @@ pub extern fn kmain() -> ! {
     log!("UwU {}", ghjk);
     log!("OwO");*/
 
-    log!("breakpoint test");
+    /*log!("breakpoint test");
 
     unsafe {
         asm!("int3");
@@ -74,7 +74,7 @@ pub extern fn kmain() -> ! {
     // trigger a page fault
     unsafe {
         *(0xdeadbeef as *mut u32) = 42;
-    };
+    };*/
 
     /*log!("stack overflow test");
 

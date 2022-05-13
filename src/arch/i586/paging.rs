@@ -1,16 +1,21 @@
 //! x86 non-PAE paging
 
+use core::arch::asm;
 use core::fmt;
 use bitmask_enum::bitmask;
 
-const LINKED_BASE: usize = 0xc0000000;
-static mut MEM_SIZE: usize = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
+const LINKED_BASE: u32 = 0xc0000000;
+static mut MEM_SIZE: u32 = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
 
 extern "C" {
     /// page directory, created in boot.S
     static page_directory: [PageDirEntry; 1024]; // TODO: consider putting this array in a struct?
 
-    static kernel_end: usize;
+    /// located at end of kernel
+    static kernel_end: u32;
+
+    /// initial page table
+    static mut init_pt: PageTable;
 }
 
 /// entry in a page table
@@ -42,6 +47,11 @@ impl PageTableEntry {
     /// checks if this page table entry is unused
     pub fn is_unused(&self) -> bool {
         self.0 == 0 // lol. lmao
+    }
+
+    /// set page as unused and clear its fields
+    pub fn set_unused(&mut self) {
+        self.0 = 0;
     }
 
     /// gets address of page table entry
@@ -173,6 +183,11 @@ impl PageDirEntry {
         self.0 == 0 // lol. lmao
     }
 
+    /// set page dir as unused and clear its fields
+    pub fn set_unused(&mut self) {
+        self.0 = 0;
+    }
+
     /// gets address of page directory entry
     pub fn get_address(&self) -> u32 {
         self.0 & 0xfffff000
@@ -284,15 +299,16 @@ impl fmt::Display for PageDirFlags {
 
 // based on http://www.jamesmolloy.co.uk/tutorial_html/6.-Paging.html
 
-static mut PLACEMENT_ADDR: usize = 0; // to be filled in with end of kernel on init
+static mut PLACEMENT_ADDR: u32 = 0; // to be filled in with end of kernel on init
 
-struct MallocResult<T> {
+pub struct MallocResult<T> {
     pointer: *mut T,
-    phys_addr: usize,
+    phys_addr: u32,
 }
 
-// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
-unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
+/// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
+pub unsafe fn kmalloc<T>(size: u32, align: bool) -> MallocResult<T> {
+    //log!("kmalloc {} @ {:#x}", size, PLACEMENT_ADDR);
     if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
         PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
         PLACEMENT_ADDR += 0x1000; // increment by 4k- we don't want to overwrite things
@@ -301,19 +317,184 @@ unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
     // increment address to make room for area of provided size, return pointer to start of area
     let tmp = PLACEMENT_ADDR;
     PLACEMENT_ADDR += size;
+
+    if PLACEMENT_ADDR >= MEM_SIZE { // prolly won't happen but might as well
+        panic!("out of memory!");
+    }
+
     MallocResult {
-        pointer: tmp as *mut T,
+        pointer: (tmp + LINKED_BASE) as *mut T,
         phys_addr: tmp,
     }
 }
 
+/// struct for page table
+/// basically just a wrapper for the array lmao
+#[repr(C)]
+pub struct PageTable {
+    pub entries: [PageTableEntry; 1024],
+}
+
+/// struct for page directory
+/// could be laid out better, but works fine for now
+#[repr(C)] // im pretty sure this guarantees the order and size of this struct
+pub struct PageDirectory {
+    /// pointers to page tables
+    pub tables: [*mut PageTable; 1024], // FIXME: maybe we want references here? too lazy to deal w borrow checking rn
+
+    /// physical addresses of page tables
+    pub tables_physical: [u32; 1024],
+
+    /// physical address of this page directory
+    pub physical_addr: u32,
+
+    /// bitset to speed up allocation of page frames
+    pub frame_set: FrameBitSet,
+}
+
+impl PageDirectory {
+    fn get_page(&self, addr: u32, make: bool) -> *mut PageTableEntry {
+        // ...
+        0 as *mut PageTableEntry // lol, lmao
+    }
+    
+    fn alloc_frame(&mut self, page: &mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
+        if page.is_unused() {
+            if let Some(idx) = unsafe { self.frame_set.first_unused() } {
+                let mut flags = PageTableFlags::Present;
+                if !is_kernel {
+                    flags |= PageTableFlags::UserSupervisor;
+                }
+                if is_writeable {
+                    flags |= PageTableFlags::ReadWrite;
+                }
+
+                unsafe { self.frame_set.set(idx << 12); }
+                page.set_flags(flags);
+                page.set_address(idx << 12);
+            } else {
+                panic!("out of memory (no free frames)");
+            }
+        }
+    }
+
+    fn free_frame(&mut self, page: &mut PageTableEntry) {
+        if !page.is_unused() {
+            unsafe { self.frame_set.clear(page.get_address() >> 12); }
+            page.set_unused();
+        }
+    }
+
+    /// switch global page directory to this page directory
+    fn switch_to(&self) {
+        unsafe {
+            let addr = (&self.tables_physical as *const _) as u32 - LINKED_BASE;
+            log!("{:#x}, {:#x}", addr, addr + LINKED_BASE);
+            let addr2 = (&page_directory as *const _) as u32 - LINKED_BASE;
+            log!("{:#x}, {:#x}", addr2, addr2 + LINKED_BASE);
+            asm!("mov cr3, {0}", in(reg) addr);
+            let mut cr0: u32;
+            asm!("mov {0}, cr0", out(reg) cr0);
+            cr0 |= 0x80000000;
+            asm!("mov cr0, {0}", in(reg) cr0);
+        }
+    }
+}
+
+/// simple bitset used for keeping track of used and available page frames
+pub struct FrameBitSet {
+    frames: *mut u32, // not the cleanest solution but is probably the best one
+    num_frames: u32,
+}
+
+// safety: self.frames isn't guaranteed to exist and not overlap other data
+impl FrameBitSet {
+    /// set a frame as used
+    pub unsafe fn set(&mut self, addr: u32) {
+        let frame = addr >> 12;
+        let idx = frame / 32; // TODO: maybe replace with bitwise to improve speed? does it even matter on x86?
+        let off = frame % 32;
+        *self.frames.offset(idx as isize) |= 1 << off;
+    }
+
+    /// clear a frame/set it as unused
+    pub unsafe fn clear(&mut self, addr: u32) {
+        let frame = addr >> 12;
+        let idx = frame / 32;
+        let off = frame % 32;
+        *self.frames.offset(idx as isize) &= !(1 << off);
+    }
+
+    /// check if frame is used
+    pub unsafe fn test(&self, addr: u32) -> bool {
+        let frame = addr >> 12;
+        let idx = frame / 32;
+        let off = frame % 32;
+        (*self.frames.offset(idx as isize) & 1 << off) > 0
+    }
+
+    /// gets first unused frame
+    pub unsafe fn first_unused(&self) -> Option<u32> {
+        for i in 0..(self.num_frames as isize) / 32 {
+            let f = *self.frames.offset(i);
+            if f != 0xffffffff { // only test individual bits if there are bits to be tested
+                for j in 0..32 {
+                    let bit = 1 << j;
+                    if f & bit == 0 {
+                        return Some((i * 32 + j) as u32);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+// TODO: get_page
+
+static mut PAGE_DIR: Option<PageDirectory> = None;
+
 /// initializes paging
 pub unsafe fn init() {
-    PLACEMENT_ADDR = kernel_end - LINKED_BASE; // we need a physical address for this
+    PLACEMENT_ADDR = (&kernel_end as *const _) as u32 - LINKED_BASE; // we need a physical address for this
 
-    for (i, entry) in page_directory.iter().enumerate() {
+    let num_frames = MEM_SIZE >> 12;
+    let mut dir = PageDirectory {
+        tables: [0 as *mut _; 1024],
+        tables_physical: [0; 1024],
+        physical_addr: 0,
+        frame_set: FrameBitSet {
+            frames: kmalloc::<u32>(num_frames / 32 * 4, false).pointer,
+            num_frames,
+        }
+    };
+
+    //dir.tables[768] = page_directory[768]
+    /*log!("{:#x}", page_directory[768].0);
+    dir.tables_physical[768] = page_directory[768].0;
+    dir.tables[768] = &mut init_pt;*/
+    //dir.frame_set.set();
+
+    for i in 0..1024 {
+        dir.tables_physical[i] = page_directory[i].0;
+    }
+
+    // holy fuck we need maybeuninit so bad
+    PAGE_DIR = Some(dir);
+    PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE;
+
+    PAGE_DIR.as_ref().unwrap().switch_to();
+
+    /*for (i, entry) in page_directory.iter().enumerate() {
         if !entry.is_unused() {
             log!("{}: {}", i, entry);
         }
+    }*/
+
+    /*
+    768: PageDirEntry {
+        address: 0x10a000,
+        flags: PageDirFlags { present, read/write, supervisor mode, accessed }
     }
+    */
 }
