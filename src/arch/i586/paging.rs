@@ -6,9 +6,10 @@ use core::fmt;
 use bitmask_enum::bitmask;
 use core::default::Default;
 use core::mem::size_of;
+use crate::util::array::BitSet;
 
-const LINKED_BASE: u32 = 0xc0000000;
-static mut MEM_SIZE: u32 = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
+const LINKED_BASE: usize = 0xc0000000;
+static mut MEM_SIZE: usize = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
 
 extern "C" {
     /// page directory, created in boot.S
@@ -300,16 +301,16 @@ impl fmt::Display for PageDirFlags {
 // based on http://www.jamesmolloy.co.uk/tutorial_html/6.-Paging.html
 
 /// where to allocate memory
-static mut PLACEMENT_ADDR: u32 = 0; // to be filled in with end of kernel on init
+static mut PLACEMENT_ADDR: usize = 0; // to be filled in with end of kernel on init
 
 /// result of kmalloc calls
 pub struct MallocResult<T> {
     pub pointer: *mut T,
-    pub phys_addr: u32,
+    pub phys_addr: usize,
 }
 
 /// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
-pub unsafe fn kmalloc<T>(size: u32, align: bool) -> MallocResult<T> {
+pub unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
     //log!("kmalloc {} @ {:#x}", size, PLACEMENT_ADDR);
     if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
         PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
@@ -351,7 +352,7 @@ pub struct PageDirectory {
     pub physical_addr: u32,
 
     /// bitset to speed up allocation of page frames
-    pub frame_set: FrameBitSet,
+    pub frame_set: BitSet,
 }
 
 impl PageDirectory {
@@ -360,12 +361,9 @@ impl PageDirectory {
         let num_frames = unsafe { MEM_SIZE >> 12 };
         PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
-            tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>() as u32, false).pointer }, // shit breaks without this lmao
+            tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false).pointer }, // shit breaks without this lmao
             physical_addr: 0,
-            frame_set: FrameBitSet {
-                frames: unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>() as u32, false).pointer },
-                num_frames,
-            }
+            frame_set: BitSet::new(num_frames),
         }
     }
 
@@ -382,7 +380,7 @@ impl PageDirectory {
                 for i in 0..1024 {
                     (*self.tables[table_idx]).entries[i].0 = 0;
                 }
-                (*self.tables_physical)[table_idx] = ptr.phys_addr | 0x7; // present, read/write, user/supervisor
+                (*self.tables_physical)[table_idx] = (ptr.phys_addr | 0x7) as u32; // present, read/write, user/supervisor
                 Some(&mut (*self.tables[table_idx]).entries[(addr % 1024) as usize])
             }
         } else { // page table doesn't exist
@@ -394,7 +392,7 @@ impl PageDirectory {
     fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
         let page2 = unsafe { &mut *page }; // pointer shenanigans to get around the borrow checker lmao
         if page2.is_unused() {
-            if let Some(idx) = unsafe { self.frame_set.first_unused() } {
+            if let Some(idx) = self.frame_set.first_unset() {
                 let mut flags = PageTableFlags::Present;
                 if !is_kernel {
                     flags |= PageTableFlags::UserSupervisor;
@@ -403,9 +401,9 @@ impl PageDirectory {
                     flags |= PageTableFlags::ReadWrite;
                 }
 
-                unsafe { self.frame_set.set(idx << 12); }
+                self.frame_set.set(idx);
                 page2.set_flags(flags);
-                page2.set_address(idx << 12);
+                page2.set_address((idx << 12) as u32);
             } else {
                 panic!("out of memory (no free frames)");
             }
@@ -416,7 +414,7 @@ impl PageDirectory {
     fn free_frame(&mut self, page: *mut PageTableEntry) {
         let page2 = unsafe { &mut *page }; // pointer shenanigans
         if !page2.is_unused() {
-            unsafe { self.frame_set.clear(page2.get_address() >> 12); }
+            self.frame_set.clear((page2.get_address() >> 12) as usize);
             page2.set_unused();
         }
     }
@@ -424,7 +422,7 @@ impl PageDirectory {
     /// switch global page directory to this page directory
     fn switch_to(&self) {
         unsafe {
-            let addr = self.tables_physical as u32 - LINKED_BASE;
+            let addr = self.tables_physical as u32 - LINKED_BASE as u32;
             asm!("mov cr3, {0}", in(reg) addr);
             let mut cr0: u32;
             asm!("mov {0}, cr0", out(reg) cr0);
@@ -440,81 +438,32 @@ impl Default for PageDirectory {
     }
 }
 
-/// simple bitset used for keeping track of used and available page frames
-pub struct FrameBitSet {
-    frames: *mut u32, // not the cleanest solution but is probably the best one
-    num_frames: u32,
-}
-
-// safety: self.frames isn't guaranteed to exist and not overlap other data
-impl FrameBitSet {
-    /// set a frame as used
-    pub unsafe fn set(&mut self, addr: u32) {
-        let frame = addr >> 12;
-        let idx = frame / 32; // TODO: maybe replace with bitwise to improve speed? does it even matter on x86?
-        let off = frame % 32;
-        *self.frames.offset(idx as isize) |= 1 << off;
-    }
-
-    /// clear a frame/set it as unused
-    pub unsafe fn clear(&mut self, addr: u32) {
-        let frame = addr >> 12;
-        let idx = frame / 32;
-        let off = frame % 32;
-        *self.frames.offset(idx as isize) &= !(1 << off);
-    }
-
-    /// check if frame is used
-    pub unsafe fn test(&self, addr: u32) -> bool {
-        let frame = addr >> 12;
-        let idx = frame / 32;
-        let off = frame % 32;
-        (*self.frames.offset(idx as isize) & 1 << off) > 0
-    }
-
-    /// gets first unused frame
-    pub unsafe fn first_unused(&self) -> Option<u32> {
-        for i in 0..(self.num_frames as isize) / 32 {
-            let f = *self.frames.offset(i);
-            if f != 0xffffffff { // only test individual bits if there are bits to be tested
-                for j in 0..32 {
-                    let bit = 1 << j;
-                    if f & bit == 0 {
-                        return Some((i * 32 + j) as u32);
-                    }
-                }
-            }
-        }
-        None
-    }
-}
-
 /// our page directory
 static mut PAGE_DIR: Option<PageDirectory> = None;
 
 /// initializes paging
 pub unsafe fn init() {
     // calculate placement addr for kmalloc calls
-    PLACEMENT_ADDR = (&kernel_end as *const _) as u32 - LINKED_BASE; // we need a physical address for this
+    PLACEMENT_ADDR = (&kernel_end as *const _) as usize - LINKED_BASE; // we need a physical address for this
 
     // set up page directory struct
     let mut dir = PageDirectory::new();
 
     // map first 4mb of memory to LINKED_BASE
     for i in 0..1024 {
-        let page = dir.get_page(LINKED_BASE + i * 0x1000, true).unwrap();
+        let page = dir.get_page(LINKED_BASE as u32 + i * 0x1000, true).unwrap();
         dir.alloc_frame(page, true, true);
     }
 
     // holy fuck we need maybeuninit so bad
     PAGE_DIR = Some(dir);
-    PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE;
+    PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE as u32;
 
     // switch to our new page directory
     PAGE_DIR.as_ref().unwrap().switch_to();
 
     if let Some(dir) = PAGE_DIR.as_ref() {
-        let first_unused = dir.frame_set.first_unused().unwrap();
-        log!("{}mb total, {}/{} mapped ({}mb), {}% usage", MEM_SIZE / 1024 / 1024, first_unused, dir.frame_set.num_frames, first_unused / 256, (first_unused * 100) / dir.frame_set.num_frames);
+        let bits_used = dir.frame_set.bits_used;
+        log!("{}mb total, {}/{} mapped ({}mb), {}% usage", MEM_SIZE / 1024 / 1024, bits_used, dir.frame_set.size, bits_used / 256, (bits_used * 100) / dir.frame_set.size);
     }
 }

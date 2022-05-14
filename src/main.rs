@@ -32,6 +32,9 @@ mod console;
 /// memory management
 pub mod mm;
 
+/// various utility things
+pub mod util;
+
 #[allow(unused_imports)]
 use core::arch::asm;
 

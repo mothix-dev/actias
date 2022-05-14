@@ -23,11 +23,11 @@ pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     };
 
     if let Some(m) = info.message() {
-        log!("PANIC file='{}', line={} :: {}", file, line, m);
+        log!("PANIC: file='{}', line={} :: {}", file, line, m);
     } else if let Some(m) = info.payload().downcast_ref::<&str>() {
-        log!("PANIC file='{}', line={} :: {}", file, line, m);
+        log!("PANIC: file='{}', line={} :: {}", file, line, m);
     } else {
-        log!("PANIC file='{}', line={} :: ?", file, line);
+        log!("PANIC: file='{}', line={} :: ?", file, line);
     }
 
     // do this after in case anything breaks
@@ -39,11 +39,11 @@ pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     console.clear();
 
     if let Some(m) = info.message() {
-        fmt::write(&mut console, format_args!("PANIC file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
+        fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
     } else if let Some(m) = info.payload().downcast_ref::<&str>() {
-        fmt::write(&mut console, format_args!("PANIC file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
+        fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
     } else {
-        fmt::write(&mut console, format_args!("PANIC file='{}', line={} :: ?\n", file, line)).expect("lol. lmao");
+        fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: ?\n", file, line)).expect("lol. lmao");
     }
     loop {}
 }
