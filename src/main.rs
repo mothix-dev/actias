@@ -29,6 +29,9 @@ mod logging;
 /// text mode console
 mod console;
 
+/// memory management
+pub mod mm;
+
 #[allow(unused_imports)]
 use core::arch::asm;
 

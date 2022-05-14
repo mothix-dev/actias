@@ -5,6 +5,7 @@ use core::arch::asm;
 use core::fmt;
 use bitmask_enum::bitmask;
 use core::default::Default;
+use core::mem::size_of;
 
 const LINKED_BASE: u32 = 0xc0000000;
 static mut MEM_SIZE: u32 = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
@@ -303,8 +304,8 @@ static mut PLACEMENT_ADDR: u32 = 0; // to be filled in with end of kernel on ini
 
 /// result of kmalloc calls
 pub struct MallocResult<T> {
-    pointer: *mut T,
-    phys_addr: u32,
+    pub pointer: *mut T,
+    pub phys_addr: u32,
 }
 
 /// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
@@ -359,10 +360,10 @@ impl PageDirectory {
         let num_frames = unsafe { MEM_SIZE >> 12 };
         PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
-            tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * 4, false).pointer }, // shit breaks without this lmao
+            tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>() as u32, false).pointer }, // shit breaks without this lmao
             physical_addr: 0,
             frame_set: FrameBitSet {
-                frames: unsafe { kmalloc::<u32>(num_frames / 32 * 4, false).pointer },
+                frames: unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>() as u32, false).pointer },
                 num_frames,
             }
         }
