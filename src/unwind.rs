@@ -11,8 +11,9 @@
  */
 
 use core::fmt;
-use crate::arch::vga::create_console;
 use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
+use crate::platform::vga::create_console;
+//use crate::platform::create_panic_console;
 
 #[panic_handler]
 pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
@@ -30,9 +31,10 @@ pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     }
 
     // do this after in case anything breaks
+    //let mut console = create_panic_console();
     let mut raw = create_console();
     let mut console = SimpleConsole::new(&mut raw, 80, 25);
-
+    
     console.color = PANIC_COLOR;
     console.clear();
 

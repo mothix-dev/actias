@@ -10,10 +10,15 @@
 #[macro_use]
 mod macros;
 
-// Architecture-specific modules
+// architecture specific modules
 #[path="arch/i586/mod.rs"]
 #[cfg(target_arch = "x86")]
 pub mod arch;
+
+// platform specific modules
+#[path="platform/ibmpc/mod.rs"]
+#[cfg(target_platform = "ibmpc")]
+pub mod platform;
 
 /// Exception handling (panic)
 pub mod unwind;
@@ -30,7 +35,7 @@ use core::arch::asm;
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-use arch::vga::*;
+use platform::vga::*;
 use console::*;
 
 // kernel entrypoint (called by arch/<foo>/boot.S)

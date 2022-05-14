@@ -1,9 +1,6 @@
-pub mod debug;
-pub mod io;
 pub mod ints;
 pub mod gdt;
 pub mod paging;
-pub mod vga;
 
 use core::arch::asm;
 

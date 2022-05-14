@@ -6,8 +6,9 @@ use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
 use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
-use super::vga::create_console;
+use crate::platform::vga::create_console;
 use super::halt;
+//use crate::platform::create_panic_console;
 
 /// IDT flags
 #[bitmask(u8)]
@@ -227,12 +228,13 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     log!("{:#?}", frame);
 
     // write same message to screen
+    //let mut console = create_panic_console();
     let mut raw = create_console();
     let mut console = SimpleConsole::new(&mut raw, 80, 25);
-
+    
     console.color = PANIC_COLOR;
-
     console.clear();
+    
     fmt::write(&mut console, format_args!("PANIC: double fault @ {:#x}\n", frame.instruction_pointer)).expect("lol. lmao");
     fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
     //console.puts("owo nowo! ur compuwuter did a fucky wucky uwu");
@@ -249,12 +251,13 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     log!("accessed address {:#x}", address);
     log!("{:#?}", frame);
 
+    //let mut console = create_panic_console();
     let mut raw = create_console();
     let mut console = SimpleConsole::new(&mut raw, 80, 25);
     
     console.color = PANIC_COLOR;
-
     console.clear();
+
     fmt::write(&mut console, format_args!("PANIC: page fault @ {:#x}, error code {}\n", frame.instruction_pointer, error_code)).expect("lol. lmao");
     fmt::write(&mut console, format_args!("accessed address {:#x}\n", address)).expect("lol. lmao");
     fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");

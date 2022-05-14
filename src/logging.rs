@@ -55,7 +55,7 @@ impl fmt::Write for Writer {
         // If the lock is owned by this instance, then we can safely write to the output
         if self.0 {
             unsafe {
-                crate::arch::debug::puts(s);
+                crate::platform::debug::puts(s);
             }
         }
         Ok(())

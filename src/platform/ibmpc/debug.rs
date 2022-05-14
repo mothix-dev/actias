@@ -12,6 +12,8 @@
  * its use, and the author takes no liability.
  */
 
+use super::io::{inb, outb};
+
 /// Write a string to the output channel
 ///
 /// This method is unsafe because it does port accesses without synchronisation
@@ -26,12 +28,12 @@ pub unsafe fn puts(s: &str) {
 /// This method is unsafe because it does port accesses without synchronisation
 pub unsafe fn putb(b: u8) {
     // Wait for the serial port's fifo to not be empty
-    while (crate::arch::io::inb(0x3F8 + 5) & 0x20) == 0 {
+    while (inb(0x3F8 + 5) & 0x20) == 0 {
         // Do nothing
     }
     // Send the byte out the serial port
-    crate::arch::io::outb(0x3F8, b);
+    outb(0x3F8, b);
     
     // Also send to the bochs 0xe9 hack
-    crate::arch::io::outb(0xe9, b);
+    outb(0xe9, b);
 }
