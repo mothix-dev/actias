@@ -36,7 +36,7 @@ impl Writer {
     }
 }
 
-impl ::core::ops::Drop for Writer {
+impl core::ops::Drop for Writer {
     fn drop(&mut self) {
         // Write a terminating newline before releasing the lock
         {

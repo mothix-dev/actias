@@ -47,6 +47,7 @@ pub extern fn kmain() -> ! {
     log!("booting {} v{}", NAME, VERSION);
 
     arch::init();
+    mm::init();
     
     log!("initializing console");
     let mut raw = create_console();
