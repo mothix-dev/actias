@@ -303,8 +303,12 @@ impl Heap {
             let old_length = self.end_address - self.start_address;
             let new_length = self.contract(header_ptr as usize - self.start_address);
 
+            let header_size_signed: isize = header.size.try_into().unwrap();
+            let old_length_signed: isize = old_length.try_into().unwrap();
+            let new_length_signed: isize = new_length.try_into().unwrap();
+
             // will we still exist after resizing?
-            if header.size - old_length - new_length > 0 { // yes, resize
+            if header_size_signed - old_length_signed - new_length_signed > 0 { // yes, resize
                 header.size -= old_length - new_length;
 
                 footer_ptr = (header_ptr as usize + header.size - size_of::<Footer>()) as *mut Footer;

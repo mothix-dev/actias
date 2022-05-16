@@ -10,5 +10,6 @@ fn main() {
     println!("cargo:rustc-cfg=target_platform=\"ibmpc\""); // specify target platform
 
     // compile our asm boot shim
+    // FIXME: find better assembler
     Command::new("as").arg("-32").arg("src/arch/i586/boot.S").arg("-o").arg("target/boot.o").output().expect("failed to execute process");
 }

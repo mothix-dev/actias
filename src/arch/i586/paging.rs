@@ -445,6 +445,8 @@ pub unsafe fn init() {
     // calculate placement addr for kmalloc calls
     PLACEMENT_ADDR = (&kernel_end as *const _) as usize - LINKED_BASE; // we need a physical address for this
 
+    log!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
+
     // set up page directory struct
     let mut dir = PageDirectory::new();
 
