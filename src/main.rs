@@ -6,13 +6,17 @@
 #![crate_name="ockernel"]
 #![allow(clippy::missing_safety_doc)] // dont really want to write safety docs yet
 
+#![feature(custom_test_frameworks)]
+#![test_runner(crate::test_runner)]
+#![reexport_test_harness_main = "test_main"]
+
 /// Macros, need to be loaded before everything else due to how rust parses
 #[macro_use]
 mod macros;
 
 // architecture specific modules
 #[path="arch/i586/mod.rs"]
-#[cfg(target_arch = "x86")]
+#[cfg(target_arch = "i586")]
 pub mod arch;
 
 // platform specific modules
@@ -41,8 +45,22 @@ use core::arch::asm;
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(test)]
+fn test_runner(tests: &[&dyn Fn()]) {
+    log!("Running {} tests", tests.len());
+    for test in tests {
+        test();
+    }
+}
+
+/*
+#[cfg(test)]
+test_main();
+*/
+
 use platform::vga::*;
 use console::*;
+use mm::heap::{KERNEL_HEAP, alloc, free};
 
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
@@ -63,6 +81,83 @@ pub extern fn kmain() -> ! {
     console.puts("\n\n");
 
     console.puts("UwU\n");
+
+    unsafe {
+        log!("{:?}", KERNEL_HEAP);
+    }
+
+    let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
+
+    heap.print_holes();
+
+    let a = alloc::<u32>(8);
+    let b = alloc::<u32>(8);
+    log!("a (8): {:#x}", a as usize);
+    log!("b (8): {:#x}", b as usize);
+
+    heap.print_holes();
+
+    log!("free a");
+    free(a);
+
+    heap.print_holes();
+
+    log!("free b");
+    free(b);
+
+    heap.print_holes();
+
+    assert!(heap.index.size == 1);
+
+    let c = alloc::<u32>(12);
+    log!("c (12): {:#x}", c as usize);
+
+    assert!(c == a);
+
+    let d = alloc::<u32>(1024);
+    log!("d (1024): {:#x}", d as usize);
+
+    let e = alloc::<u32>(16);
+    log!("e (16): {:#x}", e as usize);
+
+    heap.print_holes();
+
+    log!("free c");
+    free(c);
+
+    heap.print_holes();
+
+    let f = alloc::<u32>(12);
+    log!("f (12): {:#x}", f as usize);
+
+    heap.print_holes();
+
+    assert!(f == c);
+
+    log!("free e");
+    free(e);
+
+    log!("free d");
+    free(d);
+
+    log!("free f");
+    free(f);
+
+    assert!(heap.index.size == 1);
+
+    heap.print_holes();
+
+    let g = alloc::<u32>(8);
+    log!("g (8): {:#x}", g as usize);
+
+    heap.print_holes();
+
+    assert!(g == a);
+
+    let h = alloc::<u32>(2048);
+    log!("h (2048): {:#x}", h as usize);
+
+    heap.print_holes();
 
     /*let mut asdf = 123;
     let mut ghjk = 123;

@@ -18,7 +18,6 @@ pub struct VGAConsole {
 }
 
 impl RawTextConsole for VGAConsole {
-    #[allow(clippy::only_used_in_recursion)] // clippy is confused
     fn write_char(&mut self, x: u16, y: u16, color: ColorCode, c: u8) {
         self.buffer.chars[y as usize][x as usize] = (((color.background as u16) & 0xf) << 12) | (((color.foreground as u16) & 0xf) << 8) | (c as u16);
     }

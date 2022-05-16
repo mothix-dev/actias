@@ -1,12 +1,13 @@
 //! array utilities
 
-use crate::arch::paging::kmalloc;
 use core::mem::size_of;
 use core::ops::{Index, IndexMut, Drop};
 use core::cmp::{Ordering, PartialOrd};
 use core::marker::Copy;
+use crate::mm::heap::{alloc, free};
 
 /// raw pointer as array of unknown size
+#[derive(Debug)]
 pub struct RawPtrArray<T> {
     /// raw pointer to memory
     array: *mut T,
@@ -19,7 +20,7 @@ impl<T> RawPtrArray<T> {
     /// create new raw ptr array and allocate memory for it
     pub fn new(size: usize) -> Self {
         // allocate memory
-        let array = unsafe { kmalloc::<T>(size * size_of::<T>(), false).pointer };
+        let array = alloc::<T>(size * size_of::<T>());
 
         Self::place_at(array, size)
     }
@@ -27,9 +28,9 @@ impl<T> RawPtrArray<T> {
     /// create new raw pointer array at provided address
     pub fn place_at(addr: *mut T, size: usize) -> Self {
         // zero out array
-        for i in 0..(size as isize) * (size_of::<T>() as isize) {
+        for i in 0..size * size_of::<T>() {
             unsafe {
-                (*(addr as *mut u8).offset(i)) = 0;
+                (*(addr as *mut u8).add(i)) = 0;
             }
         }
 
@@ -46,7 +47,7 @@ impl<T> Index<usize> for RawPtrArray<T> {
         if i >= self.size {
             panic!("attempted to index outside of array");
         }
-        unsafe { &*self.array.offset(i as isize) }
+        unsafe { &*self.array.add(i) }
     }
 }
 
@@ -55,18 +56,18 @@ impl<T> IndexMut<usize> for RawPtrArray<T> {
         if i >= self.size {
             panic!("attempted to index outside of array");
         }
-        unsafe { &mut *self.array.offset(i as isize) }
+        unsafe { &mut *self.array.add(i) }
     }
 }
 
 impl<T> Drop for RawPtrArray<T> {
     fn drop(&mut self) {
-        //kfree(self.array);
-        log!("dropping raw array, can't free!");
+        free(self.array);
     }
 }
 
 /// simple ordered array
+#[derive(Debug)]
 pub struct OrderedArray<T> {
     /// array we use internally
     pub array: RawPtrArray<T>,
@@ -102,6 +103,7 @@ impl<T: PartialOrd + Copy> OrderedArray<T> {
         if self.size >= self.max_size {
             panic!("attempted to insert into full ordered array"); // should we panic here or return Err?
         } else {
+            // find index in array where we can place the new item
             let mut iterator = 0;
             while iterator < self.size {
                 let item2 = self.array[iterator];
@@ -112,15 +114,18 @@ impl<T: PartialOrd + Copy> OrderedArray<T> {
                 iterator += 1;
             }
 
-            if iterator == self.size {
+            if iterator == self.size { // item should be placed at end of array
                 self.size += 1;
                 self.array[iterator] = item;
-            } else {
+            } else { // item should be place somewhere inside array
+                // save item in the slot that the new item should be placed in, then replace it in the array with the new item
                 let mut tmp = self.array[iterator];
                 self.array[iterator] = item;
+                
+                // move every other item in the array over to make room
                 while iterator < self.size {
                     iterator += 1;
-                    let tmp2 = self.array[iterator];
+                    let tmp2 = self.array[iterator]; // FIXME: core::mem::swap or core::mem::replace?
                     self.array[iterator] = tmp;
                     tmp = tmp2;
                 }

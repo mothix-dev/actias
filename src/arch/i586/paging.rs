@@ -7,9 +7,8 @@ use bitmask_enum::bitmask;
 use core::default::Default;
 use core::mem::size_of;
 use crate::util::array::BitSet;
-
-const LINKED_BASE: usize = 0xc0000000;
-static mut MEM_SIZE: usize = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
+use crate::mm::heap::KHEAP_INITIAL_SIZE;
+use super::{MEM_SIZE, LINKED_BASE, KHEAP_START, PAGE_SIZE};
 
 extern "C" {
     /// page directory, created in boot.S
@@ -363,12 +362,12 @@ impl PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
             tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false).pointer }, // shit breaks without this lmao
             physical_addr: 0,
-            frame_set: BitSet::new(num_frames),
+            frame_set: BitSet::place_at(unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>(), false).pointer }, num_frames), // BitSet::new uses the global allocator, which isn't initialized yet!
         }
     }
 
     /// gets a page from the directory if one exists, makes one if requested
-    fn get_page(&mut self, mut addr: u32, make: bool) -> Option<*mut PageTableEntry> {
+    pub fn get_page(&mut self, mut addr: u32, make: bool) -> Option<*mut PageTableEntry> {
         addr >>= 12;
         let table_idx = (addr / 1024) as usize;
         if !self.tables[table_idx].is_null() { // page table already exists
@@ -389,8 +388,8 @@ impl PageDirectory {
     }
     
     /// allocates a frame for specified page
-    fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
-        let page2 = unsafe { &mut *page }; // pointer shenanigans to get around the borrow checker lmao
+    pub unsafe fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
+        let page2 = &mut *page; // pointer shenanigans to get around the borrow checker lmao
         if page2.is_unused() {
             if let Some(idx) = self.frame_set.first_unset() {
                 let mut flags = PageTableFlags::Present;
@@ -411,8 +410,8 @@ impl PageDirectory {
     }
 
     /// frees a frame, allowing other things to use it
-    fn free_frame(&mut self, page: *mut PageTableEntry) {
-        let page2 = unsafe { &mut *page }; // pointer shenanigans
+    pub unsafe fn free_frame(&mut self, page: *mut PageTableEntry) {
+        let page2 = &mut *page; // pointer shenanigans
         if !page2.is_unused() {
             self.frame_set.clear((page2.get_address() >> 12) as usize);
             page2.set_unused();
@@ -420,7 +419,7 @@ impl PageDirectory {
     }
 
     /// switch global page directory to this page directory
-    fn switch_to(&self) {
+    pub fn switch_to(&self) {
         unsafe {
             let addr = self.tables_physical as u32 - LINKED_BASE as u32;
             asm!("mov cr3, {0}", in(reg) addr);
@@ -439,7 +438,7 @@ impl Default for PageDirectory {
 }
 
 /// our page directory
-static mut PAGE_DIR: Option<PageDirectory> = None;
+pub static mut PAGE_DIR: Option<PageDirectory> = None;
 
 /// initializes paging
 pub unsafe fn init() {
@@ -452,6 +451,12 @@ pub unsafe fn init() {
     // map first 4mb of memory to LINKED_BASE
     for i in 0..1024 {
         let page = dir.get_page(LINKED_BASE as u32 + i * 0x1000, true).unwrap();
+        dir.alloc_frame(page, true, true);
+    }
+
+    // map initial memory for kernel heap
+    for i in (KHEAP_START..KHEAP_START + KHEAP_INITIAL_SIZE).step_by(PAGE_SIZE) {
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
         dir.alloc_frame(page, true, true);
     }
 
