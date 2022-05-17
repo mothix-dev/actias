@@ -8,6 +8,9 @@ TODO: define basic trait for text consoles
 */
 
 use num_enum::FromPrimitive;
+use alloc::boxed::Box;
+use core::fmt::Write;
+use crate::platform::create_console;
 
 /// text colors
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive)]
@@ -56,9 +59,10 @@ pub const PANIC_COLOR: ColorCode = ColorCode {
 };
 
 /// trait for a text console
-pub trait TextConsole {
+pub trait TextConsole: Write {
     fn puts(&mut self, string: &str);
     fn clear(&mut self);
+    fn set_color(&mut self, color: ColorCode);
 }
 
 /// interface our fancy text console(s) use to talk to lower level 
@@ -70,8 +74,8 @@ pub trait RawTextConsole {
 }
 
 /// simple text console, doesn't implement ANSI control codes
-pub struct SimpleConsole<'c> {
-    pub raw: &'c mut dyn RawTextConsole,
+pub struct SimpleConsole {
+    pub raw: Box<dyn RawTextConsole + Sync>,
     pub width: u16,
     pub height: u16,
     pub cursor_x: u16,
@@ -79,8 +83,8 @@ pub struct SimpleConsole<'c> {
     pub color: ColorCode,
 }
 
-impl<'c> SimpleConsole<'c> {
-    pub fn new(raw: &'c mut dyn RawTextConsole, width: u16, height: u16) -> Self {
+impl SimpleConsole {
+    pub fn new(raw: Box<dyn RawTextConsole + Sync>, width: u16, height: u16) -> Self {
         Self {
             raw, width, height,
             cursor_x: 0,
@@ -100,7 +104,7 @@ impl<'c> SimpleConsole<'c> {
     }
 }
 
-impl TextConsole for SimpleConsole<'_> {
+impl TextConsole for SimpleConsole {
     fn puts(&mut self, string: &str) {
         for c in string.bytes() {
             match c {
@@ -135,11 +139,31 @@ impl TextConsole for SimpleConsole<'_> {
     fn clear(&mut self) {
         self.raw.clear(0, 0, self.width, self.height, self.color);
     }
+
+    fn set_color(&mut self, color: ColorCode) {
+        self.color = color;
+    }
 }
 
-impl core::fmt::Write for SimpleConsole<'_> {
+impl core::fmt::Write for SimpleConsole {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         self.puts(s);
         Ok(())
+    }
+}
+
+/// global text console
+static mut CONSOLE: Option<Box<dyn TextConsole + Sync>> = None;
+
+pub fn init() {
+    log!("initializing console");
+    unsafe {
+        CONSOLE = Some(Box::new(create_console()));
+    }
+}
+
+pub fn get_console() -> Option<&'static mut Box<(dyn TextConsole + Sync + 'static)>> {
+    unsafe {
+        CONSOLE.as_mut()
     }
 }

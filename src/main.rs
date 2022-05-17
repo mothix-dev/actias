@@ -1,16 +1,18 @@
-#![feature(panic_info_message)] //< Panic handling
-#![feature(abi_x86_interrupt)]
-//#![feature(llvm_asm)] //< As a kernel, we need inline assembly
-#![no_std]  //< Kernels can't use std
-#![no_main]
 #![crate_name="ockernel"]
-#![allow(clippy::missing_safety_doc)] // dont really want to write safety docs yet
+
+#![no_std]
+#![no_main]
+
+#![feature(panic_info_message)]
+#![feature(abi_x86_interrupt)]
 
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 #![feature(alloc_error_handler)]
+
+#![allow(clippy::missing_safety_doc)] // dont really want to write safety docs yet
 
 /// Macros, need to be loaded before everything else due to how rust parses
 #[macro_use]
@@ -48,11 +50,8 @@ pub mod test;
 // we need this to effectively use our heap
 extern crate alloc;
 
-const NAME: &str = env!("CARGO_PKG_NAME");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-use platform::vga::*;
-use console::*;
+pub const NAME: &str = env!("CARGO_PKG_NAME");
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 use platform::debug::exit_success;
@@ -60,11 +59,14 @@ use platform::debug::exit_success;
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
 pub extern fn kmain() -> ! {
-    log!("booting {} v{}", NAME, VERSION);
-
     // initialize kernel
     arch::init(); // platform specific initialization
-    mm::init();
+
+    mm::init(); // init memory management/heap/etc
+
+    console::init(); // init console
+
+    log!("{} v{}", NAME, VERSION);
 
     #[cfg(test)]
     {
@@ -74,19 +76,11 @@ pub extern fn kmain() -> ! {
 
     #[cfg(not(test))]
     {
-        log!("initializing console");
-        let mut raw = create_console();
-        let mut console = SimpleConsole::new(&mut raw, 80, 25);
+        log!("UwU");
 
-        console.clear();
-        console.puts(NAME);
-        console.puts(" v");
-        console.puts(VERSION);
-        console.puts("\n\n");
-
-        console.puts("UwU\n");
-
-
+        /*unsafe {
+            *(0xdeadbeef as *mut u32) = 3621; // page fault lmao
+        }*/
     }
 
     arch::halt();

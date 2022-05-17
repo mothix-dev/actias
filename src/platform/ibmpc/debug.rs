@@ -54,9 +54,11 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
 }
 
 pub fn exit_failure() {
+    log!("exiting (failed)");
     exit_qemu(QemuExitCode::Failed);
 }
 
 pub fn exit_success() {
+    log!("exiting (success)");
     exit_qemu(QemuExitCode::Success);
 }

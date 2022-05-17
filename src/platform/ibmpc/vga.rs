@@ -2,6 +2,7 @@
 
 use crate::console::{ColorCode, RawTextConsole};
 use core::cmp::Ordering;
+use alloc::boxed::Box;
 
 const BUFFER_WIDTH: usize = 80;
 const BUFFER_HEIGHT: usize = 25;
@@ -51,8 +52,8 @@ impl RawTextConsole for VGAConsole {
 }
 
 /// creates a raw console
-pub fn create_console() -> VGAConsole {
-    VGAConsole {
+pub fn create_console() -> Box<dyn RawTextConsole + Sync> {
+    Box::new(VGAConsole {
         buffer: unsafe { &mut *(0xc00b8000 as *mut Buffer) }, // lowest 4 mb are mapped up to 0xc0000000 (3gb), this includes video ram lmao
-    }
+    })
 }

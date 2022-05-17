@@ -10,6 +10,7 @@
  */
 use core::sync::atomic;
 use core::fmt;
+use crate::console::get_console;
 
 /// A formatter object
 pub struct Writer(bool);
@@ -56,6 +57,10 @@ impl fmt::Write for Writer {
         if self.0 {
             unsafe {
                 crate::platform::debug::puts(s);
+            }
+
+            if let Some(console) = get_console() {
+                console.puts(s);
             }
         }
         Ok(())

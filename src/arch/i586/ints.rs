@@ -5,10 +5,8 @@ use core::fmt;
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
-use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
-use crate::platform::vga::create_console;
 use super::halt;
-//use crate::platform::create_panic_console;
+use crate::console::{get_console, PANIC_COLOR};
 
 #[cfg(test)]
 use crate::platform::debug::exit_failure;
@@ -227,20 +225,12 @@ unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) 
 
 /// exception handler for double fault
 unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, _error_code: u32) {
+    if let Some(console) = get_console() {
+        console.set_color(PANIC_COLOR);
+    }
+
     log!("PANIC: double fault @ {:#x}", frame.instruction_pointer);
     log!("{:#?}", frame);
-
-    // write same message to screen
-    //let mut console = create_panic_console();
-    let mut raw = create_console();
-    let mut console = SimpleConsole::new(&mut raw, 80, 25);
-    
-    console.color = PANIC_COLOR;
-    console.clear();
-    
-    fmt::write(&mut console, format_args!("PANIC: double fault @ {:#x}\n", frame.instruction_pointer)).expect("lol. lmao");
-    fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
-    //console.puts("owo nowo! ur compuwuter did a fucky wucky uwu");
 
     #[cfg(test)]
     exit_failure();
@@ -253,21 +243,14 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
+    if let Some(console) = get_console() {
+        console.set_color(PANIC_COLOR);
+    }
+
     log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
     log!("accessed address {:#x}", address);
     log!("{:#?}", frame);
-
-    //let mut console = create_panic_console();
-    let mut raw = create_console();
-    let mut console = SimpleConsole::new(&mut raw, 80, 25);
     
-    console.color = PANIC_COLOR;
-    console.clear();
-
-    fmt::write(&mut console, format_args!("PANIC: page fault @ {:#x}, error code {}\n", frame.instruction_pointer, error_code)).expect("lol. lmao");
-    fmt::write(&mut console, format_args!("accessed address {:#x}\n", address)).expect("lol. lmao");
-    fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
-
     #[cfg(test)]
     exit_failure();
 

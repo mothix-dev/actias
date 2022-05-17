@@ -6,6 +6,8 @@ use core::cmp::{Ordering, PartialOrd};
 use crate::arch::paging::{alloc_page, free_page};
 use crate::arch::{KHEAP_START, PAGE_SIZE, INV_PAGE_SIZE};
 use alloc::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic;
+use crate::arch::halt;
 
 // useful constants
 pub const KHEAP_INITIAL_SIZE: usize = 0x100000;
@@ -120,22 +122,32 @@ impl Heap {
                     } else {
                         0
                     };
+                
+                // make sure hole is big enough
+                assert!(offset + new_size <= orig_hole_size, "hole is too small");
+                
+                // do we have enough room to split?
+                if offset >= size_of::<Header>() + size_of::<Footer>() {
+                    // yes, split hole in two to free up space before our allocated region
+                    let new_location = orig_hole_pos + offset;
 
-                let new_location = orig_hole_pos + offset;
+                    // modify the original hole header to make a new hole that takes up the space in between the original hole position and the nearest page boundary
+                    // we can just modify the original header since we'd just delete it otherwise
+                    orig_hole_header.size = offset;
+                    orig_hole_header.magic = MAGIC_NUMBER;
+                    orig_hole_header.is_hole = true;
 
-                // modify the original hole header to make a new hole that takes up the space in between the original hole position and the nearest page boundary
-                // we can just modify the original header since we'd just delete it otherwise
-                orig_hole_header.size = offset;
-                orig_hole_header.magic = MAGIC_NUMBER;
-                orig_hole_header.is_hole = true;
+                    let hole_footer = unsafe { &mut *((new_location - size_of::<Footer>()) as *mut Footer) };
+                    hole_footer.magic = MAGIC_NUMBER;
+                    hole_footer.header = orig_hole_header_ptr;
 
-                let hole_footer = unsafe { &mut *((new_location - size_of::<Footer>()) as *mut Footer) };
-                hole_footer.magic = MAGIC_NUMBER;
-                hole_footer.header = orig_hole_header_ptr;
-
-                // change our position and size to point to the proper page aligned location and size
-                orig_hole_pos = new_location;
-                orig_hole_size -= orig_hole_header.size;
+                    // change our position and size to point to the proper page aligned location and size
+                    orig_hole_pos = new_location;
+                    orig_hole_size -= orig_hole_header.size;
+                } else {
+                    // no, remove the hole from our index as normal
+                    self.index.remove(hole_index);
+                }
             } else {
                 // otherwise just remove the hole from our index, it's not needed anymore
                 self.index.remove(hole_index);
@@ -446,19 +458,33 @@ pub fn init() {
     }
 }
 
+/// lock for heap, prevents access if interrupted during an operation
+static HEAP_LOCK: atomic::AtomicBool = atomic::AtomicBool::new(false);
+
 /// wrapper to safely access kernel heap for allocating memory
 pub fn alloc<T>(size: usize) -> *mut T {
-    if let Some(heap) = unsafe { KERNEL_HEAP.as_mut() } {
-        heap.alloc(size, 0)
-    } else {
-        panic!("can't alloc before heap init");
-    }
+    alloc_aligned(size, 0)
 }
 
 /// wrapper to safely access kernel heap for allocating page-aligned memory
 pub fn alloc_aligned<T>(size: usize, alignment: usize) -> *mut T {
     if let Some(heap) = unsafe { KERNEL_HEAP.as_mut() } {
-        heap.alloc(size, alignment)
+        // check if we have the lock
+        if !HEAP_LOCK.swap(true, atomic::Ordering::Acquire) { // we do
+            // allocate memory
+            let ptr = heap.alloc(size, alignment);
+
+            // release lock
+            HEAP_LOCK.store(false, atomic::Ordering::Release);
+
+            // return pointer
+            ptr
+        } else { // we do not
+            log!("!!! WARNING: heap locked, using bump alloc !!!");
+
+            // use simple bump allocator to allocate memory, since we want panic messages to be able to be displayed
+            unsafe { crate::arch::paging::bump_alloc(size, alignment) }
+        }
     } else {
         panic!("can't alloc before heap init");
     }
@@ -467,13 +493,22 @@ pub fn alloc_aligned<T>(size: usize, alignment: usize) -> *mut T {
 /// wrapper to safely access kernel heap for freeing memory
 pub fn free<T>(p: *mut T) {
     if let Some(heap) = unsafe { KERNEL_HEAP.as_mut() } {
-        heap.free(p);
+        // check if we have the lock
+        if !HEAP_LOCK.swap(true, atomic::Ordering::Acquire) { // we do
+            // free memory
+            heap.free(p);
+
+            // release lock
+            HEAP_LOCK.store(false, atomic::Ordering::Release);
+        } else { // we do not
+            log!("!!! WARNING: heap locked, cannot free !!!");
+        }
     } else {
-        panic!("can't free before heap init");
+        panic!("can't alloc before heap init");
     }
 }
 
-/// our custom allocator
+/// our custom allocator, allows rust to use our heap
 pub struct CustomAlloc;
 
 #[global_allocator]
@@ -481,23 +516,16 @@ static ALLOCATOR: CustomAlloc = CustomAlloc;
 
 unsafe impl GlobalAlloc for CustomAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if let Some(heap) = KERNEL_HEAP.as_mut() {
-            heap.alloc(layout.size(), layout.align())
-        } else {
-            panic!("can't alloc before heap init");
-        }
+        alloc_aligned::<u8>(layout.size(), layout.align())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        if let Some(heap) = KERNEL_HEAP.as_mut() {
-            heap.free(ptr);
-        } else {
-            panic!("can't free before heap init");
-        }
+        free::<u8>(ptr)
     }
 }
 
 #[alloc_error_handler]
-fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
-    panic!("allocation error: {:?}", layout)
+fn alloc_error_handler(layout: Layout) -> ! {
+    log!("PANIC: allocation error: {:?}", layout);
+    halt();
 }

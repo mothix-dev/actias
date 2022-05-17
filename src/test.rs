@@ -2,8 +2,8 @@
 
 use core::arch::asm;
 use crate::mm::heap::{KERNEL_HEAP, alloc, alloc_aligned, free, KHEAP_INITIAL_SIZE, HEAP_MIN_SIZE};
-use crate::platform::vga::*;
-use crate::console::*;
+use crate::console::{ColorCode, TextConsole, get_console};
+use alloc::vec::Vec;
 
 /// custom test runner to run all tests
 pub fn test_runner(tests: &[&dyn Testable]) {
@@ -29,7 +29,7 @@ impl<T> Testable for T where T: Fn() {
 
 /// test breakpoint interrupt
 #[test_case]
-fn test_int() {
+fn int() {
     unsafe {
         asm!("int3");
     }
@@ -37,7 +37,7 @@ fn test_int() {
 
 /// test heap alloc/free
 #[test_case]
-fn test_heap_alloc_free() {
+fn heap_alloc_free() {
     #[cfg(debug_messages)]
     unsafe {
         log!("{:?}", KERNEL_HEAP);
@@ -171,7 +171,7 @@ fn test_heap_alloc_free() {
 
 /// test heap expand/contract
 #[test_case]
-fn test_heap_expand_contract() {
+fn heap_expand_contract() {
     let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
 
     let heap_start = heap.index.get(0).0 as usize;
@@ -223,12 +223,17 @@ fn test_heap_expand_contract() {
 
 /// test heap alloc alignment
 #[test_case]
-fn test_heap_alloc_align() {
-    #[cfg(debug_messages)]
+fn heap_alloc_align() {
     let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
     
     for size in 1..32 {
         for i in 0..16 {
+            let before = heap.index.get(0).0 as usize;
+            let before_size = (unsafe { &*heap.index.get(0).0 }).size;
+
+            #[cfg(debug_messages)]
+            log!("before: addr @ {:#x}, size {:#x}", before, before_size);
+
             let alignment = 1 << i;
             let ptr = alloc_aligned::<u8>(size, alignment);
             //let ptr = alloc::<u8>(size);
@@ -246,12 +251,16 @@ fn test_heap_alloc_align() {
 
             #[cfg(debug_messages)]
             heap.print_holes();
+
+            assert!(heap.index.get(0).0 as usize == before);
+            assert!((unsafe { &*heap.index.get(0).0 }).size == before_size);
         }
     }
 }
 
+/// test allocating aligned memory with existing allocation
 #[test_case]
-fn test_heap_alloc_align_2() {
+fn heap_alloc_align_2() {
     let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
 
     let heap_start = heap.index.get(0).0 as usize;
@@ -302,21 +311,32 @@ fn test_heap_alloc_align_2() {
 
 /// make sure writing to vga console doesn't crash
 #[test_case]
-fn test_vga_partial() {
-    let mut raw = create_console();
-    let mut console = SimpleConsole::new(&mut raw, 80, 25);
+fn vga_partial() {
+    let console = get_console().unwrap();
 
     for _i in 0..256 {
         for bg in 0..16 {
             for fg in 0..16 {
-                console.color = ColorCode {
+                console.set_color(ColorCode {
                     foreground: fg.into(),
                     background: bg.into()
-                };
+                });
                 console.puts("OwO ");
             }
         }
     }
 }
 
+#[test_case]
+fn vec() {
+    let mut vec: Vec<u32> = Vec::with_capacity(1);
+    vec.push(3);
+    vec.push(5);
+    vec.push(9);
+    vec.push(15);
 
+    #[cfg(debug_messages)]
+    log!("{:?}", vec);
+
+    assert!(vec.len() == 4);
+}

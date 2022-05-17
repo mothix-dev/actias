@@ -309,7 +309,7 @@ pub struct MallocResult<T> {
 }
 
 /// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
-pub unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
+unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
     if let Some(heap) = KERNEL_HEAP.as_mut() {
         let pointer = heap.alloc::<T>(size, if align { PAGE_SIZE } else { 0 });
         let phys_addr = virt_to_phys(pointer as usize).unwrap();
@@ -327,7 +327,7 @@ pub unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
         let tmp = PLACEMENT_ADDR;
         PLACEMENT_ADDR += size;
 
-        if PLACEMENT_ADDR >= MEM_SIZE { // prolly won't happen but might as well
+        if PLACEMENT_ADDR >= 0x400000 { // prolly won't happen but might as well
             panic!("out of memory (kmalloc)");
         }
 
@@ -367,7 +367,10 @@ impl PageDirectory {
     pub fn new() -> Self {
         let num_frames = unsafe { MEM_SIZE >> 12 };
         let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false).pointer };
+
+        #[cfg(debug_messages)]
         log!("tables_physical alloc @ {:#x}", tables_physical as usize);
+
         PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
             tables_physical, // shit breaks without this lmao
@@ -449,9 +452,11 @@ impl Default for PageDirectory {
     }
 }
 
+/// allocate region of memory
 unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
     let end = start + size;
 
+    #[cfg(debug_messages)]
     log!("mapped {:#x} - {:#x}", start, end);
 
     for i in (start..end).step_by(PAGE_SIZE) {
@@ -468,41 +473,39 @@ pub unsafe fn init() {
     // calculate placement addr for kmalloc calls
     PLACEMENT_ADDR = (&kernel_end as *const _) as usize - LINKED_BASE; // we need a physical address for this
 
-    log!("kernel end @ {:#x}, linked @ {:#x}", (&kernel_end as *const _) as usize, LINKED_BASE);
-    log!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
+    #[cfg(debug_messages)]
+    {
+        log!("kernel end @ {:#x}, linked @ {:#x}", (&kernel_end as *const _) as usize, LINKED_BASE);
+        log!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
+    }
 
     // set up page directory struct
     let mut dir = PageDirectory::new();
 
+    #[cfg(debug_messages)]
     log!("mapping kernel memory");
 
     // map first 4mb of memory to LINKED_BASE
-    /*for i in 0..1024 {
-        let page = dir.get_page(LINKED_BASE as u32 + i * 0x1000, true).unwrap();
-        dir.alloc_frame(page, true, true);
-    }
-
-    log!("{:#x} - {:#x}", LINKED_BASE as usize, LINKED_BASE as usize + 1024 * 0x1000);*/
     alloc_region(&mut dir, LINKED_BASE as u32, 0x400000);
 
+    #[cfg(debug_messages)]
     log!("mapping heap memory");
 
     // map initial memory for kernel heap
-    /*for i in (KHEAP_START..KHEAP_START + KHEAP_INITIAL_SIZE).step_by(PAGE_SIZE) {
-        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
-        dir.alloc_frame(page, true, true);
-    }*/
     alloc_region(&mut dir, KHEAP_START as u32, KHEAP_INITIAL_SIZE as u32);
 
+    #[cfg(debug_messages)]
     log!("creating page table");
 
     // holy fuck we need maybeuninit so bad
     PAGE_DIR = Some(dir);
 
+    #[cfg(debug_messages)]
     log!("setting page table physical address");
 
     PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE as u32;
 
+    #[cfg(debug_messages)]
     log!("switching to page table");
 
     // switch to our new page directory
@@ -553,4 +556,25 @@ pub fn virt_to_phys(addr: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// bump allocate some memory
+pub unsafe fn bump_alloc<T>(size: usize, alignment: usize) -> *mut T {
+    let offset: usize = 
+        if PLACEMENT_ADDR % alignment != 0 {
+            alignment - (PLACEMENT_ADDR % alignment)
+        } else {
+            0
+        };
+    
+    PLACEMENT_ADDR += offset;
+
+    let tmp = PLACEMENT_ADDR;
+    PLACEMENT_ADDR += size;
+
+    if PLACEMENT_ADDR >= 0x400000 { // prolly won't happen but might as well
+        panic!("out of memory (kmalloc)");
+    }
+
+    (tmp + LINKED_BASE) as *mut T
 }

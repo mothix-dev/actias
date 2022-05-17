@@ -10,10 +10,7 @@
  * its use, and the author takes no liability.
  */
 
-use core::fmt;
-use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
-use crate::platform::vga::create_console;
-//use crate::platform::create_panic_console;
+use crate::console::{get_console, PANIC_COLOR};
 
 #[cfg(test)]
 use crate::platform::debug::exit_failure;
@@ -25,28 +22,16 @@ pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
         None => ("", 0),
     };
 
+    if let Some(console) = get_console() {
+        console.set_color(PANIC_COLOR);
+    }
+
     if let Some(m) = info.message() {
         log!("PANIC: file='{}', line={} :: {}", file, line, m);
     } else if let Some(m) = info.payload().downcast_ref::<&str>() {
         log!("PANIC: file='{}', line={} :: {}", file, line, m);
     } else {
         log!("PANIC: file='{}', line={} :: ?", file, line);
-    }
-
-    // do this after in case anything breaks
-    //let mut console = create_panic_console();
-    let mut raw = create_console();
-    let mut console = SimpleConsole::new(&mut raw, 80, 25);
-    
-    console.color = PANIC_COLOR;
-    console.clear();
-
-    if let Some(m) = info.message() {
-        fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
-    } else if let Some(m) = info.payload().downcast_ref::<&str>() {
-        fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: {}\n", file, line, m)).expect("lol. lmao");
-    } else {
-        fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: ?\n", file, line)).expect("lol. lmao");
     }
     
     #[cfg(test)]
