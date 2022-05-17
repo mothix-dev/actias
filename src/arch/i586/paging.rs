@@ -366,9 +366,11 @@ impl PageDirectory {
     /// creates a new page directory, allocating memory for it in the process
     pub fn new() -> Self {
         let num_frames = unsafe { MEM_SIZE >> 12 };
+        let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false).pointer };
+        log!("tables_physical alloc @ {:#x}", tables_physical as usize);
         PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
-            tables_physical: unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false).pointer }, // shit breaks without this lmao
+            tables_physical, // shit breaks without this lmao
             physical_addr: 0,
             frame_set: BitSet::place_at(unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>(), false).pointer }, num_frames), // BitSet::new uses the global allocator, which isn't initialized yet!
         }
@@ -380,7 +382,7 @@ impl PageDirectory {
         let table_idx = (addr / 1024) as usize;
         if !self.tables[table_idx].is_null() { // page table already exists
             let table_ref = unsafe { &mut (*self.tables[table_idx]) };
-            unsafe { Some(&mut table_ref.entries[(addr % 1024) as usize]) }
+            Some(&mut table_ref.entries[(addr % 1024) as usize])
         } else if make { // page table doesn't exist, create it
             unsafe {
                 let ptr = kmalloc(1024 * 4, true); // page table entries are 32 bits (4 bytes) wide
@@ -447,6 +449,71 @@ impl Default for PageDirectory {
     }
 }
 
+unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
+    let end = start + size;
+
+    log!("mapped {:#x} - {:#x}", start, end);
+
+    for i in (start..end).step_by(PAGE_SIZE) {
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+        dir.alloc_frame(page, true, true);
+    }
+}
+
+/// our page directory
+pub static mut PAGE_DIR: Option<PageDirectory> = None;
+
+/// initializes paging
+pub unsafe fn init() {
+    // calculate placement addr for kmalloc calls
+    PLACEMENT_ADDR = (&kernel_end as *const _) as usize - LINKED_BASE; // we need a physical address for this
+
+    log!("kernel end @ {:#x}, linked @ {:#x}", (&kernel_end as *const _) as usize, LINKED_BASE);
+    log!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
+
+    // set up page directory struct
+    let mut dir = PageDirectory::new();
+
+    log!("mapping kernel memory");
+
+    // map first 4mb of memory to LINKED_BASE
+    /*for i in 0..1024 {
+        let page = dir.get_page(LINKED_BASE as u32 + i * 0x1000, true).unwrap();
+        dir.alloc_frame(page, true, true);
+    }
+
+    log!("{:#x} - {:#x}", LINKED_BASE as usize, LINKED_BASE as usize + 1024 * 0x1000);*/
+    alloc_region(&mut dir, LINKED_BASE as u32, 0x400000);
+
+    log!("mapping heap memory");
+
+    // map initial memory for kernel heap
+    /*for i in (KHEAP_START..KHEAP_START + KHEAP_INITIAL_SIZE).step_by(PAGE_SIZE) {
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+        dir.alloc_frame(page, true, true);
+    }*/
+    alloc_region(&mut dir, KHEAP_START as u32, KHEAP_INITIAL_SIZE as u32);
+
+    log!("creating page table");
+
+    // holy fuck we need maybeuninit so bad
+    PAGE_DIR = Some(dir);
+
+    log!("setting page table physical address");
+
+    PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE as u32;
+
+    log!("switching to page table");
+
+    // switch to our new page directory
+    PAGE_DIR.as_ref().unwrap().switch_to();
+
+    if let Some(dir) = PAGE_DIR.as_ref() {
+        let bits_used = dir.frame_set.bits_used;
+        log!("{}mb total, {}/{} mapped ({}mb), {}% usage", MEM_SIZE / 1024 / 1024, bits_used, dir.frame_set.size, bits_used / 256, (bits_used * 100) / dir.frame_set.size);
+    }
+}
+
 /// allocate page and map to given address
 pub fn alloc_page(addr: usize, is_kernel: bool, is_writeable: bool) {
     assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
@@ -455,12 +522,7 @@ pub fn alloc_page(addr: usize, is_kernel: bool, is_writeable: bool) {
 
     let page = dir.get_page(addr.try_into().unwrap(), true).unwrap();
 
-    let page_ref = unsafe { &*page };
-
     unsafe { dir.alloc_frame(page, is_kernel, is_writeable); }
-
-    let page = dir.get_page(addr.try_into().unwrap(), false).unwrap();
-    let page_ref = unsafe { &*page };
 
     dir.switch_to();
 }
@@ -486,49 +548,9 @@ pub fn virt_to_phys(addr: usize) -> Option<usize> {
 
     let page = dir.get_page(addr, true)?;
 
-    let page_ref = unsafe { &*page };
-
     if let Ok(res) = (unsafe { &*page }).get_address().try_into() {
         Some(res)
     } else {
         None
-    }
-}
-
-/// our page directory
-pub static mut PAGE_DIR: Option<PageDirectory> = None;
-
-/// initializes paging
-pub unsafe fn init() {
-    // calculate placement addr for kmalloc calls
-    PLACEMENT_ADDR = (&kernel_end as *const _) as usize - LINKED_BASE; // we need a physical address for this
-
-    log!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
-
-    // set up page directory struct
-    let mut dir = PageDirectory::new();
-
-    // map first 4mb of memory to LINKED_BASE
-    for i in 0..1024 {
-        let page = dir.get_page(LINKED_BASE as u32 + i * 0x1000, true).unwrap();
-        dir.alloc_frame(page, true, true);
-    }
-
-    // map initial memory for kernel heap
-    for i in (KHEAP_START..KHEAP_START + KHEAP_INITIAL_SIZE).step_by(PAGE_SIZE) {
-        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
-        dir.alloc_frame(page, true, true);
-    }
-
-    // holy fuck we need maybeuninit so bad
-    PAGE_DIR = Some(dir);
-    PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE as u32;
-
-    // switch to our new page directory
-    PAGE_DIR.as_ref().unwrap().switch_to();
-
-    if let Some(dir) = PAGE_DIR.as_ref() {
-        let bits_used = dir.frame_set.bits_used;
-        log!("{}mb total, {}/{} mapped ({}mb), {}% usage", MEM_SIZE / 1024 / 1024, bits_used, dir.frame_set.size, bits_used / 256, (bits_used * 100) / dir.frame_set.size);
     }
 }

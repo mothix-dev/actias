@@ -10,6 +10,8 @@
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+#![feature(alloc_error_handler)]
+
 /// Macros, need to be loaded before everything else due to how rust parses
 #[macro_use]
 mod macros;
@@ -42,6 +44,9 @@ pub mod util;
 /// tests
 #[cfg(test)]
 pub mod test;
+
+// we need this to effectively use our heap
+extern crate alloc;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");

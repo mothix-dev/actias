@@ -68,7 +68,7 @@ impl<T> Drop for RawPtrArray<T> {
 
 /// simple ordered array
 #[derive(Debug)]
-pub struct OrderedArray<T> {
+pub struct OrderedArray<T> where T: PartialOrd + Copy {
     /// array we use internally
     pub array: RawPtrArray<T>,
 

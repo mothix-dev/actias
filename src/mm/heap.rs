@@ -3,9 +3,11 @@
 use crate::util::array::OrderedArray;
 use core::mem::size_of;
 use core::cmp::{Ordering, PartialOrd};
-use crate::arch::paging::{alloc_page, free_page, virt_to_phys};
+use crate::arch::paging::{alloc_page, free_page};
 use crate::arch::{KHEAP_START, PAGE_SIZE, INV_PAGE_SIZE};
+use alloc::alloc::{GlobalAlloc, Layout};
 
+// useful constants
 pub const KHEAP_INITIAL_SIZE: usize = 0x100000;
 pub const KHEAP_MAX_SIZE: usize = 0xffff000;
 pub const HEAP_INDEX_SIZE: usize = 0x20000;
@@ -24,7 +26,7 @@ pub struct Header {
 /// wrapper around raw pointer to header to allow for comparing by size
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
-pub struct HeaderPtr(*mut Header);
+pub struct HeaderPtr(pub *mut Header);
 
 impl PartialEq for HeaderPtr {
     fn eq(&self, other: &Self) -> bool {
@@ -90,6 +92,9 @@ impl Heap {
     }
 
     pub fn alloc<T>(&mut self, size: usize, alignment: usize) -> *mut T {
+        // make sure we aren't allocating too little memory for the requested type
+        assert!(size >= size_of::<T>(), "size of type is larger than requested size");
+
         // account for header and footer size
         let mut new_size = size + size_of::<Header>() + size_of::<Footer>();
         
@@ -107,28 +112,14 @@ impl Heap {
                 new_size = orig_hole_size;
             }
 
-            // if we want page aligned data and aren't page aligned already
-            if alignment > 0 && (orig_hole_pos % alignment) > 0 {
-                //let new_location = orig_hole_pos + PAGE_SIZE - (orig_hole_pos & (PAGE_SIZE - 1)) - size_of::<Header>();
+            // if we want aligned data and aren't page aligned already
+            if alignment > 1 && ((orig_hole_pos + size_of::<Header>()) % alignment) > 0 {
                 let offset: usize = 
                     if (orig_hole_pos + size_of::<Header>()) % alignment != 0 {
-                        alignment - ((orig_hole_pos + size_of::<Header>()) % alignment) // lmao
+                        alignment - ((orig_hole_pos + size_of::<Header>()) % alignment)
                     } else {
                         0
                     };
-
-                /*
-                // find nearest page boundary
-                let offset: isize = 
-                    if (location + size_of::<Header>()) % alignment != 0 {
-                        alignment as isize - ((location + size_of::<Header>()) % alignment) as isize
-                    } else {
-                        0
-                    };
-
-                // check if the hole is big enough to fit the amount of data we want when page aligned
-                let hole_size = header.size as isize - offset;
-                */
 
                 let new_location = orig_hole_pos + offset;
 
@@ -354,8 +345,8 @@ impl Heap {
             let location = header_ptr as usize;
             let header = unsafe { &*header_ptr };
 
-            if alignment > 0 { // do we want page aligning?
-                // find nearest page boundary
+            if alignment > 1 { // do we want aligning?
+                // find nearest alignment
                 let offset: isize = 
                     if (location + size_of::<Header>()) % alignment != 0 {
                         alignment as isize - ((location + size_of::<Header>()) % alignment) as isize
@@ -363,7 +354,7 @@ impl Heap {
                         0
                     };
 
-                // check if the hole is big enough to fit the amount of data we want when page aligned
+                // check if the hole is big enough to fit the amount of data we want when aligned
                 let hole_size = header.size as isize - offset;
 
                 if hole_size >= size.try_into().unwrap() {
@@ -385,7 +376,6 @@ impl Heap {
 
     /// expand heap
     fn expand(&mut self, mut new_size: usize) {
-
         // make sure we're actually expanding
         assert!(new_size > self.end_address - self.start_address, "new size is smaller than current size");
 
@@ -481,4 +471,33 @@ pub fn free<T>(p: *mut T) {
     } else {
         panic!("can't free before heap init");
     }
+}
+
+/// our custom allocator
+pub struct CustomAlloc;
+
+#[global_allocator]
+static ALLOCATOR: CustomAlloc = CustomAlloc;
+
+unsafe impl GlobalAlloc for CustomAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if let Some(heap) = KERNEL_HEAP.as_mut() {
+            heap.alloc(layout.size(), layout.align())
+        } else {
+            panic!("can't alloc before heap init");
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        if let Some(heap) = KERNEL_HEAP.as_mut() {
+            heap.free(ptr);
+        } else {
+            panic!("can't free before heap init");
+        }
+    }
+}
+
+#[alloc_error_handler]
+fn alloc_error_handler(layout: alloc::alloc::Layout) -> ! {
+    panic!("allocation error: {:?}", layout)
 }
