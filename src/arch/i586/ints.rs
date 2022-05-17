@@ -10,6 +10,9 @@ use crate::platform::vga::create_console;
 use super::halt;
 //use crate::platform::create_panic_console;
 
+#[cfg(test)]
+use crate::platform::debug::exit_failure;
+
 /// IDT flags
 #[bitmask(u8)]
 enum IDTFlags {
@@ -239,6 +242,9 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
     //console.puts("owo nowo! ur compuwuter did a fucky wucky uwu");
 
+    #[cfg(test)]
+    exit_failure();
+
     halt();
 }
 
@@ -261,6 +267,9 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     fmt::write(&mut console, format_args!("PANIC: page fault @ {:#x}, error code {}\n", frame.instruction_pointer, error_code)).expect("lol. lmao");
     fmt::write(&mut console, format_args!("accessed address {:#x}\n", address)).expect("lol. lmao");
     fmt::write(&mut console, format_args!("{:#?}\n", frame)).expect("lol. lmao");
+
+    #[cfg(test)]
+    exit_failure();
 
     halt();
 }

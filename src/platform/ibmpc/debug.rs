@@ -37,3 +37,26 @@ pub unsafe fn putb(b: u8) {
     // Also send to the bochs 0xe9 hack
     outb(0xe9, b);
 }
+
+/// exit code for qemu
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum QemuExitCode {
+    Success = 0x10,
+    Failed = 0x11,
+}
+
+/// exit qemu with code, useful for unit testing
+pub fn exit_qemu(exit_code: QemuExitCode) {
+    unsafe {
+        outb(0xf4, exit_code as u8)
+    }
+}
+
+pub fn exit_failure() {
+    exit_qemu(QemuExitCode::Failed);
+}
+
+pub fn exit_success() {
+    exit_qemu(QemuExitCode::Success);
+}

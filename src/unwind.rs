@@ -15,6 +15,9 @@ use crate::console::{TextConsole, SimpleConsole, PANIC_COLOR};
 use crate::platform::vga::create_console;
 //use crate::platform::create_panic_console;
 
+#[cfg(test)]
+use crate::platform::debug::exit_failure;
+
 #[panic_handler]
 pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     let (file,line) = match info.location() {
@@ -45,7 +48,11 @@ pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     } else {
         fmt::write(&mut console, format_args!("PANIC: file='{}', line={} :: ?\n", file, line)).expect("lol. lmao");
     }
-    loop {}
+    
+    #[cfg(test)]
+    exit_failure();
+
+    crate::arch::halt();
 }
 
 #[allow(non_camel_case_types)]

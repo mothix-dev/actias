@@ -3,7 +3,7 @@
 use crate::util::array::OrderedArray;
 use core::mem::size_of;
 use core::cmp::{Ordering, PartialOrd};
-use crate::arch::paging::PAGE_DIR;
+use crate::arch::paging::{alloc_page, free_page, virt_to_phys};
 use crate::arch::{KHEAP_START, PAGE_SIZE, INV_PAGE_SIZE};
 
 pub const KHEAP_INITIAL_SIZE: usize = 0x100000;
@@ -89,12 +89,12 @@ impl Heap {
         }
     }
 
-    pub fn alloc<T>(&mut self, size: usize, page_align: bool) -> *mut T {
+    pub fn alloc<T>(&mut self, size: usize, alignment: usize) -> *mut T {
         // account for header and footer size
         let mut new_size = size + size_of::<Header>() + size_of::<Footer>();
         
         // check if we have a large enough hole
-        if let Some(hole_index) = self.find_smallest_hole(new_size, page_align) {
+        if let Some(hole_index) = self.find_smallest_hole(new_size, alignment) {
             let orig_hole_header_ptr = self.index.get(hole_index).0;
 
             let mut orig_hole_pos = orig_hole_header_ptr as usize;
@@ -108,12 +108,33 @@ impl Heap {
             }
 
             // if we want page aligned data and aren't page aligned already
-            if page_align && (orig_hole_pos & INV_PAGE_SIZE) > 0 {
-                let new_location = orig_hole_pos + PAGE_SIZE - (orig_hole_pos & (PAGE_SIZE - 1)) - size_of::<Header>();
+            if alignment > 0 && (orig_hole_pos % alignment) > 0 {
+                //let new_location = orig_hole_pos + PAGE_SIZE - (orig_hole_pos & (PAGE_SIZE - 1)) - size_of::<Header>();
+                let offset: usize = 
+                    if (orig_hole_pos + size_of::<Header>()) % alignment != 0 {
+                        alignment - ((orig_hole_pos + size_of::<Header>()) % alignment) // lmao
+                    } else {
+                        0
+                    };
+
+                /*
+                // find nearest page boundary
+                let offset: isize = 
+                    if (location + size_of::<Header>()) % alignment != 0 {
+                        alignment as isize - ((location + size_of::<Header>()) % alignment) as isize
+                    } else {
+                        0
+                    };
+
+                // check if the hole is big enough to fit the amount of data we want when page aligned
+                let hole_size = header.size as isize - offset;
+                */
+
+                let new_location = orig_hole_pos + offset;
 
                 // modify the original hole header to make a new hole that takes up the space in between the original hole position and the nearest page boundary
                 // we can just modify the original header since we'd just delete it otherwise
-                orig_hole_header.size = PAGE_SIZE - (orig_hole_pos & (PAGE_SIZE - 1)) - size_of::<Header>();
+                orig_hole_header.size = offset;
                 orig_hole_header.magic = MAGIC_NUMBER;
                 orig_hole_header.is_hole = true;
 
@@ -189,10 +210,12 @@ impl Heap {
                 // adjust last header to take up new allocated space
                 let header_ptr = self.index.get(idx).0;
                 let header = unsafe { &mut *header_ptr };
-                header.size += new_length - old_length;
+                //header.size += new_length - old_length;
+                header.size = self.end_address - (header_ptr as usize);
 
                 // create new footer at end of allocated space
-                let footer = unsafe { &mut *((header_ptr as usize + header.size - size_of::<Footer>()) as *mut Footer) };
+                let footer_ptr = (header_ptr as usize + header.size - size_of::<Footer>()) as *mut Footer;
+                let footer = unsafe { &mut *footer_ptr };
                 footer.magic = MAGIC_NUMBER;
                 footer.header = header;
             } else { // we didn't find a header
@@ -212,7 +235,7 @@ impl Heap {
             }
 
             // we now have enough space, so we can recurse and try again
-            self.alloc(size, page_align)
+            self.alloc(size, alignment)
         }
     }
 
@@ -247,11 +270,7 @@ impl Heap {
         let test_footer_ptr = (header_ptr as usize - size_of::<Footer>()) as *mut Footer;
         let test_footer = unsafe { &mut *test_footer_ptr };
 
-        log!("{:#x}: {:?}", test_footer_ptr as usize, test_footer);
-
         if test_footer.magic == MAGIC_NUMBER && unsafe { &mut *test_footer.header }.is_hole {
-            log!("unify left");
-
             // found a hole, switch our header with it and increase its size 
             let cache_size = header.size;
 
@@ -259,8 +278,6 @@ impl Heap {
             header = unsafe { &mut *header_ptr };
             footer.header = header_ptr;
             header.size += cache_size;
-
-            log!("new header: {:?} @ {:#x}", header, header_ptr as usize);
 
             add_to_index = false;
         }
@@ -271,11 +288,7 @@ impl Heap {
         let test_header_ptr = (footer_ptr as usize + size_of::<Footer>()) as *mut Header;
         let test_header = unsafe { &mut *test_header_ptr };
 
-        log!("{:#x}: {:?}", test_header_ptr as usize, test_header);
-
         if test_header.magic == MAGIC_NUMBER && test_header.is_hole {
-            log!("unify right");
-
             // found a hole
             header.size += test_header.size;
 
@@ -333,7 +346,7 @@ impl Heap {
     }
 
     /// find smallest hole in heap
-    fn find_smallest_hole(&self, size: usize, page_align: bool) -> Option<usize> {
+    fn find_smallest_hole(&self, size: usize, alignment: usize) -> Option<usize> {
         // loop through all headers
         let mut iterator = 0;
         while iterator < self.index.size {
@@ -341,11 +354,11 @@ impl Heap {
             let location = header_ptr as usize;
             let header = unsafe { &*header_ptr };
 
-            if page_align { // do we want page aligning?
+            if alignment > 0 { // do we want page aligning?
                 // find nearest page boundary
                 let offset: isize = 
-                    if (location + size_of::<Header>()) & 0xFFFFF000 != 0 {
-                        PAGE_SIZE as isize - ((location + size_of::<Header>()) % PAGE_SIZE) as isize
+                    if (location + size_of::<Header>()) % alignment != 0 {
+                        alignment as isize - ((location + size_of::<Header>()) % alignment) as isize
                     } else {
                         0
                     };
@@ -372,6 +385,7 @@ impl Heap {
 
     /// expand heap
     fn expand(&mut self, mut new_size: usize) {
+
         // make sure we're actually expanding
         assert!(new_size > self.end_address - self.start_address, "new size is smaller than current size");
 
@@ -386,13 +400,9 @@ impl Heap {
 
         // allocate new pages for heap
         let old_size = self.end_address - self.start_address;
-
-        let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
         
         for i in (old_size..new_size).step_by(PAGE_SIZE) {
-            // FIXME: make page allocation arch agnostic
-            let page = dir.get_page((self.start_address + i).try_into().unwrap(), true).unwrap();
-            unsafe { dir.alloc_frame(page, self.supervisor, !self.readonly); }
+            alloc_page(self.start_address + i, self.supervisor, !self.readonly);
         }
 
         self.end_address = self.start_address + new_size;
@@ -417,12 +427,8 @@ impl Heap {
         // free unneeded pages
         let old_size = self.end_address - self.start_address;
 
-        let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
-
         for i in (old_size - PAGE_SIZE..new_size).step_by(PAGE_SIZE).rev() {
-            if let Some(page) = dir.get_page((self.start_address + i).try_into().unwrap(), false) {
-                unsafe { dir.free_frame(page); }
-            }
+            free_page(self.start_address + i);
         }
 
         self.end_address = self.start_address + new_size;
@@ -453,16 +459,16 @@ pub fn init() {
 /// wrapper to safely access kernel heap for allocating memory
 pub fn alloc<T>(size: usize) -> *mut T {
     if let Some(heap) = unsafe { KERNEL_HEAP.as_mut() } {
-        heap.alloc(size, false)
+        heap.alloc(size, 0)
     } else {
         panic!("can't alloc before heap init");
     }
 }
 
 /// wrapper to safely access kernel heap for allocating page-aligned memory
-pub fn alloc_aligned<T>(size: usize) -> *mut T {
+pub fn alloc_aligned<T>(size: usize, alignment: usize) -> *mut T {
     if let Some(heap) = unsafe { KERNEL_HEAP.as_mut() } {
-        heap.alloc(size, true)
+        heap.alloc(size, alignment)
     } else {
         panic!("can't alloc before heap init");
     }

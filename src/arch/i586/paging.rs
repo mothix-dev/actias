@@ -7,7 +7,7 @@ use bitmask_enum::bitmask;
 use core::default::Default;
 use core::mem::size_of;
 use crate::util::array::BitSet;
-use crate::mm::heap::KHEAP_INITIAL_SIZE;
+use crate::mm::heap::{KERNEL_HEAP, KHEAP_INITIAL_SIZE};
 use super::{MEM_SIZE, LINKED_BASE, KHEAP_START, PAGE_SIZE};
 
 extern "C" {
@@ -310,23 +310,31 @@ pub struct MallocResult<T> {
 
 /// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
 pub unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
-    //log!("kmalloc {} @ {:#x}", size, PLACEMENT_ADDR);
-    if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
-        PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
-        PLACEMENT_ADDR += 0x1000; // increment by 4k- we don't want to overwrite things
-    }
+    if let Some(heap) = KERNEL_HEAP.as_mut() {
+        let pointer = heap.alloc::<T>(size, if align { PAGE_SIZE } else { 0 });
+        let phys_addr = virt_to_phys(pointer as usize).unwrap();
 
-    // increment address to make room for area of provided size, return pointer to start of area
-    let tmp = PLACEMENT_ADDR;
-    PLACEMENT_ADDR += size;
+        MallocResult {
+            pointer, phys_addr,
+        }
+    } else {
+        if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
+            PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
+            PLACEMENT_ADDR += 0x1000; // increment by 4k- we don't want to overwrite things
+        }
 
-    if PLACEMENT_ADDR >= MEM_SIZE { // prolly won't happen but might as well
-        panic!("out of memory (kmalloc)");
-    }
+        // increment address to make room for area of provided size, return pointer to start of area
+        let tmp = PLACEMENT_ADDR;
+        PLACEMENT_ADDR += size;
 
-    MallocResult {
-        pointer: (tmp + LINKED_BASE) as *mut T,
-        phys_addr: tmp,
+        if PLACEMENT_ADDR >= MEM_SIZE { // prolly won't happen but might as well
+            panic!("out of memory (kmalloc)");
+        }
+
+        MallocResult {
+            pointer: (tmp + LINKED_BASE) as *mut T,
+            phys_addr: tmp,
+        }
     }
 }
 
@@ -371,16 +379,18 @@ impl PageDirectory {
         addr >>= 12;
         let table_idx = (addr / 1024) as usize;
         if !self.tables[table_idx].is_null() { // page table already exists
-            unsafe { Some(&mut (*self.tables[table_idx]).entries[(addr % 1024) as usize]) }
+            let table_ref = unsafe { &mut (*self.tables[table_idx]) };
+            unsafe { Some(&mut table_ref.entries[(addr % 1024) as usize]) }
         } else if make { // page table doesn't exist, create it
             unsafe {
                 let ptr = kmalloc(1024 * 4, true); // page table entries are 32 bits (4 bytes) wide
                 self.tables[table_idx] = ptr.pointer;
+                let table_ref = &mut (*self.tables[table_idx]);
                 for i in 0..1024 {
-                    (*self.tables[table_idx]).entries[i].0 = 0;
+                    table_ref.entries[i].0 = 0;
                 }
                 (*self.tables_physical)[table_idx] = (ptr.phys_addr | 0x7) as u32; // present, read/write, user/supervisor
-                Some(&mut (*self.tables[table_idx]).entries[(addr % 1024) as usize])
+                Some(&mut table_ref.entries[(addr % 1024) as usize])
             }
         } else { // page table doesn't exist
             None
@@ -434,6 +444,54 @@ impl PageDirectory {
 impl Default for PageDirectory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// allocate page and map to given address
+pub fn alloc_page(addr: usize, is_kernel: bool, is_writeable: bool) {
+    assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
+
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+    let page = dir.get_page(addr.try_into().unwrap(), true).unwrap();
+
+    let page_ref = unsafe { &*page };
+
+    unsafe { dir.alloc_frame(page, is_kernel, is_writeable); }
+
+    let page = dir.get_page(addr.try_into().unwrap(), false).unwrap();
+    let page_ref = unsafe { &*page };
+
+    dir.switch_to();
+}
+
+/// free page at given address
+pub fn free_page(addr: usize) {
+    assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
+
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+    if let Some(page) = dir.get_page(addr.try_into().unwrap(), false) {
+        unsafe { dir.free_frame(page); }
+    }
+    
+    dir.switch_to();
+}
+
+/// convert virtual to physical address
+pub fn virt_to_phys(addr: usize) -> Option<usize> {
+    let dir = unsafe { PAGE_DIR.as_mut()? };
+
+    let addr = if let Ok(res) = addr.try_into() { res } else { return None };
+
+    let page = dir.get_page(addr, true)?;
+
+    let page_ref = unsafe { &*page };
+
+    if let Ok(res) = (unsafe { &*page }).get_address().try_into() {
+        Some(res)
+    } else {
+        None
     }
 }
 
