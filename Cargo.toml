@@ -17,3 +17,5 @@ cc = "1.0"
 
 [profile.test]
 opt-level = "z"
+strip = "symbols"
+debug = 1

@@ -78,9 +78,9 @@ pub extern fn kmain() -> ! {
     {
         log!("UwU");
 
-        /*unsafe {
+        unsafe {
             *(0xdeadbeef as *mut u32) = 3621; // page fault lmao
-        }*/
+        }
     }
 
     arch::halt();

@@ -3,6 +3,8 @@
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lgdt};
 use bitmask_enum::bitmask;
+use core::arch::asm;
+use core::mem::size_of;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
@@ -87,7 +89,7 @@ enum GDTFlags {
     DataPriv0           = Self(Self::DescTypeCodeData.0 | Self::Present.0 | Self::Size32.0 | Self::GranLarge.0 | Self::DataReadWrite.0),
     CodePriv3           = Self(Self::DescTypeCodeData.0 | Self::Present.0 | Self::Size32.0 | Self::GranLarge.0 | Self::Priv3.0 | Self::DataExecute.0 | Self::DataReadWrite.0),
     DataPriv3           = Self(Self::DescTypeCodeData.0 | Self::Present.0 | Self::Size32.0 | Self::GranLarge.0 | Self::Priv3.0 | Self::DataReadWrite.0),
-    TaskStateSegment    = Self(Self::Present.0 | Self::DataExecute.0 | Self::DataAccessed.0 | Self::Size32.0),
+    TaskStateSegment    = Self(Self::Present.0 | Self::DataExecute.0 | Self::DataAccessed.0),
 }
 
 /// TSS
@@ -194,6 +196,15 @@ const STACK_SIZE: usize = 4096 * 5; // 20k
 /// kernel stack
 static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
+/// flush TSS
+unsafe fn flush_tss() {
+    asm!("mov ax, 0x28; ltr ax");
+}
+
+extern "C" {
+    static init_stack: u32;
+}
+
 /// initialize GDT and TSS
 pub unsafe fn init() {
     // populate TSS
@@ -201,14 +212,21 @@ pub unsafe fn init() {
     TSS.esp0 = (&STACK as *const _) as u32;
     //TSS.iopb = 0x6c; // size of TSS
 
+    log!("esp0: {:#x} ({})", TSS.esp0, TSS.esp0);
+
+    let stack_ptr = (&init_stack as *const _) as u32;
+    log!("init_stack @ {:#x} ({})", stack_ptr, stack_ptr);
+
     // populate GDT
     GDT[1] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv0);
     GDT[2] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv0);
     GDT[3] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv3);
     GDT[4] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv3);
-    GDT[5] = GDTEntry::new((&TSS as *const _) as u32, 0x6c, GDTFlags::TaskStateSegment);
+    GDT[5] = GDTEntry::new((&TSS as *const _) as u32, size_of::<TaskStateSegment>() as u32, GDTFlags::TaskStateSegment);
 
     // load GDT
     let gdt_desc = DescriptorTablePointer::new(&GDT);
     lgdt(&gdt_desc);
+
+    flush_tss();
 }

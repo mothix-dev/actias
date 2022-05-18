@@ -355,9 +355,6 @@ pub struct PageDirectory {
     /// physical addresses of page tables (raw pointer bc references are Annoying and shit breaks without it)
     pub tables_physical: *mut [u32; 1024],
 
-    /// physical address of this page directory
-    pub physical_addr: u32,
-
     /// bitset to speed up allocation of page frames
     pub frame_set: BitSet,
 }
@@ -374,7 +371,6 @@ impl PageDirectory {
         PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
             tables_physical, // shit breaks without this lmao
-            physical_addr: 0,
             frame_set: BitSet::place_at(unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>(), false).pointer }, num_frames), // BitSet::new uses the global allocator, which isn't initialized yet!
         }
     }
@@ -436,6 +432,9 @@ impl PageDirectory {
     /// switch global page directory to this page directory
     pub fn switch_to(&self) {
         unsafe {
+            /*#[cfg(debug_messages)]
+            log!("switching to page table @ phys {:#x}", self.tables_physical as u32);*/
+
             let addr = self.tables_physical as u32 - LINKED_BASE as u32;
             asm!("mov cr3, {0}", in(reg) addr);
             let mut cr0: u32;
@@ -499,11 +498,6 @@ pub unsafe fn init() {
 
     // holy fuck we need maybeuninit so bad
     PAGE_DIR = Some(dir);
-
-    #[cfg(debug_messages)]
-    log!("setting page table physical address");
-
-    PAGE_DIR.as_mut().unwrap().physical_addr = (&PAGE_DIR as *const _) as u32 - LINKED_BASE as u32;
 
     #[cfg(debug_messages)]
     log!("switching to page table");

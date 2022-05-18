@@ -130,5 +130,6 @@ GDTEnd:
 	
 .section .bss
 	.space 0x1000*2
+.globl init_stack
 init_stack:
 
