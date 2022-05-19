@@ -95,17 +95,13 @@ enum GDTFlags {
 /// TSS
 #[repr(C, packed(16))]
 pub struct TaskStateSegment {
-    pub link: u16,
-    _reserved0: u16,
+    pub link: u32,
     pub esp0: u32,
-    pub ss0: u16,
-    _reserved1: u16,
+    pub ss0: u32,
     pub esp1: u32,
-    pub ss1: u16,
-    _reserved2: u16,
+    pub ss1: u32,
     pub esp2: u32,
-    pub ss2: u16,
-    _reserved3: u16,
+    pub ss2: u32,
     pub cr3: u32,
     pub eip: u32,
     pub eflags: u32,
@@ -117,22 +113,15 @@ pub struct TaskStateSegment {
     pub ebp: u32,
     pub esi: u32,
     pub edi: u32,
-    pub es: u16,
-    _reserved4: u16,
-    pub cs: u16,
-    _reserved5: u16,
-    pub ss: u16,
-    _reserved6: u16,
-    pub ds: u16,
-    _reserved7: u16,
-    pub fs: u16,
-    _reserved8: u16,
-    pub gs: u16,
-    _reserved9: u16,
-    pub ldtr: u16,
-    _reserved10: u32,
+    pub es: u32,
+    pub cs: u32,
+    pub ss: u32,
+    pub ds: u32,
+    pub fs: u32,
+    pub gs: u32,
+    pub ldtr: u32,
     pub iopb: u16,
-    pub ssp: u32,
+    pub ssp: u16,
 }
 
 impl TaskStateSegment {
@@ -140,16 +129,12 @@ impl TaskStateSegment {
     pub const fn new() -> Self {
         Self {
             link: 0,
-            _reserved0: 0,
             esp0: 0,
             ss0: 0,
-            _reserved1: 0,
             esp1: 0,
             ss1: 0,
-            _reserved2: 0,
             esp2: 0,
             ss2: 0,
-            _reserved3: 0,
             cr3: 0,
             eip: 0,
             eflags: 0,
@@ -162,19 +147,12 @@ impl TaskStateSegment {
             esi: 0,
             edi: 0,
             es: 0,
-            _reserved4: 0,
             cs: 0,
-            _reserved5: 0,
             ss: 0,
-            _reserved6: 0,
             ds: 0,
-            _reserved7: 0,
             fs: 0,
-            _reserved8: 0,
             gs: 0,
-            _reserved9: 0,
             ldtr: 0,
-            _reserved10: 0,
             iopb: 0,
             ssp: 0,
         }
@@ -182,10 +160,10 @@ impl TaskStateSegment {
 }
 
 /// how many entries do we want in our GDT
-const GDT_ENTRIES: usize = 6;
+const GDT_ENTRIES: usize = 5;
 
 /// the GDT itself (aligned to 16 bits for performance)
-static mut GDT: Aligned<A16, [GDTEntry; GDT_ENTRIES]> = Aligned([GDTEntry(0); GDT_ENTRIES]);
+static mut GDT: Aligned<A16, [GDTEntry; GDT_ENTRIES + 1]> = Aligned([GDTEntry(0); GDT_ENTRIES + 1]);
 
 /// the TSS lmao
 static mut TSS: Aligned<A16, TaskStateSegment> = Aligned(TaskStateSegment::new());
@@ -198,7 +176,8 @@ static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 /// flush TSS
 unsafe fn flush_tss() {
-    asm!("mov ax, 0x28; ltr ax", out("ax") _);
+    let index = (5 * 8) | 3;
+    asm!("ltr ax", in("ax") index);
 }
 
 extern "C" {
@@ -210,8 +189,13 @@ pub unsafe fn init() {
     // populate TSS
     TSS.ss0 = 0x10; // kernel data segment descriptor
     TSS.esp0 = (&STACK as *const _) as u32 + STACK_SIZE as u32 - 1;
+    TSS.cs = 0x0b;
+    TSS.ds = 0x13;
+    TSS.es = 0x13;
+    TSS.fs = 0x13;
+    TSS.gs = 0x13;
     //TSS.esp0 = 0xc03fffff;
-    //TSS.iopb = 0x6c; // size of TSS
+    //TSS.iopb = size_of::<TaskStateSegment>() as u16; // size of TSS
 
     log!("esp0: {:#x}-{:#x} ({}-{})", (&STACK as *const _) as u32, TSS.esp0, (&STACK as *const _) as u32, TSS.esp0);
 
@@ -223,7 +207,9 @@ pub unsafe fn init() {
     GDT[2] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv0);
     GDT[3] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv3);
     GDT[4] = GDTEntry::new(0, 0x000fffff, GDTFlags::DataPriv3);
-    GDT[5] = GDTEntry::new((&TSS as *const _) as u32, size_of::<TaskStateSegment>() as u32, GDTFlags::TaskStateSegment);
+    
+    let base = (&TSS as *const _) as u32;
+    GDT[5] = GDTEntry::new(base, base + size_of::<TaskStateSegment>() as u32, GDTFlags::TaskStateSegment);
 
     // load GDT
     let gdt_desc = DescriptorTablePointer::new(&GDT);

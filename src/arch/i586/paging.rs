@@ -460,7 +460,7 @@ unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
 
     for i in (start..end).step_by(PAGE_SIZE) {
         let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
-        dir.alloc_frame(page, true, true);
+        dir.alloc_frame(page, false, true);
     }
 }
 

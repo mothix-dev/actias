@@ -94,6 +94,27 @@ loop_test:
     nop
     jmp loop_test
 
+.globl enter_user_mode
+enter_user_mode:
+    /*popl %ecx*/
+    cli
+    mov $0x23, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    mov %esp, %eax
+    pushl $0x23
+    pushl %eax
+    pushf
+    /*pop %eax
+    or %eax, $0x200
+    push %eax*/
+    pushl $0x1b
+    pushl %ecx
+    iret
+
 
 /* === Page-aligned data === */
 .section .padata
