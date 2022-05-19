@@ -221,6 +221,11 @@ impl fmt::Display for PageFaultErrorCode {
 /// exception handler for breakpoint
 unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) {
     log!("breakpoint @ {:#x}", frame.instruction_pointer);
+
+    let mut address: u32;
+    asm!("mov {0}, esp", out(reg) address);
+
+    log!("esp: {:#x} ({})", address, address);
 }
 
 /// exception handler for double fault
@@ -250,6 +255,31 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
     log!("accessed address {:#x}", address);
     log!("{:#?}", frame);
+
+    let mut address: u32;
+    asm!("mov {0}, esp", out(reg) address);
+
+    log!("esp: {:#x} ({})", address, address);
+    
+    #[cfg(test)]
+    exit_failure();
+
+    halt();
+}
+
+/// exception handler for general protection fault
+unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
+    if let Some(console) = get_console() {
+        console.set_color(PANIC_COLOR);
+    }
+
+    log!("PANIC: general protection fault @ {:#x}, error code {:#x}", frame.instruction_pointer, error_code);
+    log!("{:#?}", frame);
+
+    let mut address: u32;
+    asm!("mov {0}, esp", out(reg) address);
+
+    log!("esp: {:#x} ({})", address, address);
     
     #[cfg(test)]
     exit_failure();
@@ -265,6 +295,7 @@ pub unsafe fn init() {
     IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::DoubleFault as usize] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::GeneralProtectionFault as usize] = IDTEntry::new(general_protection_fault_handler as *const (), IDTFlags::Exception);
     
     // load interrupt handler table
     let idt_desc = DescriptorTablePointer::new(&IDT);

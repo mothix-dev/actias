@@ -56,6 +56,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(test)]
 use platform::debug::exit_success;
 
+extern "C" {
+    static loop_test: extern fn() -> !;
+}
+
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
 pub extern fn kmain() -> ! {
@@ -79,9 +83,54 @@ pub extern fn kmain() -> ! {
         log!("UwU");
 
         unsafe {
-            *(0xdeadbeef as *mut u32) = 3621; // page fault lmao
+            //*(0xdeadbeef as *mut u32) = 3621; // page fault lmao
+            //let ptr = (&(user_mode_test as fn()) as *const _) as usize;
+            let ptr = (&loop_test as *const _) as usize;
+            log!("fn @ {:#x}", ptr);
+            enter_user_mode(ptr);
         }
     }
 
     arch::halt();
+}
+
+use core::arch::asm;
+
+unsafe fn enter_user_mode(fn_ptr: usize) {
+    asm!(
+        "mov ax, 0x23",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        "mov gs, ax",
+
+        "mov eax, esp",
+        "push 0x23",
+        "push eax",
+        "pushf",
+        "push 0x1b",
+        "push {0}",
+        "iret",
+
+        /*"xor edx, edx",
+        "mov eax, 0x100008",
+        "mov ecx, 0x174",
+        "wrmsr",
+
+        "mov edx, {0}",
+        "mov ecx, esp",
+        "sysexit",*/
+
+        in(reg) fn_ptr,
+        out("eax") _,
+        //out("ecx") _,
+        //out("edx") _,
+    );
+}
+
+fn user_mode_test() {
+    /*unsafe {
+        asm!("cli");
+    }*/
+    loop {}
 }

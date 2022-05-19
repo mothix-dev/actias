@@ -198,7 +198,7 @@ static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 /// flush TSS
 unsafe fn flush_tss() {
-    asm!("mov ax, 0x28; ltr ax");
+    asm!("mov ax, 0x28; ltr ax", out("ax") _);
 }
 
 extern "C" {
@@ -209,10 +209,11 @@ extern "C" {
 pub unsafe fn init() {
     // populate TSS
     TSS.ss0 = 0x10; // kernel data segment descriptor
-    TSS.esp0 = (&STACK as *const _) as u32;
+    TSS.esp0 = (&STACK as *const _) as u32 + STACK_SIZE as u32 - 1;
+    //TSS.esp0 = 0xc03fffff;
     //TSS.iopb = 0x6c; // size of TSS
 
-    log!("esp0: {:#x} ({})", TSS.esp0, TSS.esp0);
+    log!("esp0: {:#x}-{:#x} ({}-{})", (&STACK as *const _) as u32, TSS.esp0, (&STACK as *const _) as u32, TSS.esp0);
 
     let stack_ptr = (&init_stack as *const _) as u32;
     log!("init_stack @ {:#x} ({})", stack_ptr, stack_ptr);
@@ -229,4 +230,9 @@ pub unsafe fn init() {
     lgdt(&gdt_desc);
 
     flush_tss();
+
+    let mut address: u32;
+    asm!("mov {0}, esp", out(reg) address);
+
+    log!("esp: {:#x} ({})", address, address);
 }
