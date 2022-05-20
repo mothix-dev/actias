@@ -57,7 +57,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 use platform::debug::exit_success;
 
 extern "C" {
-    fn loop_test() -> !;
     fn enter_user_mode(ptr: u32) -> !;
 }
 
@@ -84,12 +83,15 @@ pub extern fn kmain() -> ! {
         log!("UwU");
 
         unsafe {
-            //*(0xdeadbeef as *mut u32) = 3621; // page fault lmao
-            let ptr = (&(user_mode_test as fn()) as *const _) as usize;
-            //let ptr = (&loop_test as *const _) as u32;
-            //let ptr = 0x62100000;
+            let mut address: u32;
+            asm!("mov {0}, esp", out(reg) address);
+
+            log!("esp: {:#x} ({})", address, address);
+
+            let ptr = (user_mode_test as *const ()) as u32;
             log!("fn @ {:#x}", ptr);
-            enter_user_mode_2(0xc0108494);
+
+            enter_user_mode(ptr);
         }
     }
 
@@ -98,94 +100,14 @@ pub extern fn kmain() -> ! {
 
 use core::arch::asm;
 
-unsafe fn enter_user_mode_2(fn_ptr: u32) -> ! {
-    asm!(
-        "mov ecx, 0xc010c260",
-        "jmp enter_user_mode",
+unsafe extern fn user_mode_test() {
+    // is_computer_on
+    let result: u32;
+    asm!("mov eax, 0; int 0x80", out("eax")_, out("ebx") result);
 
-        //in(reg) fn_ptr,
-    );
-    loop {}
-}
+    if result == 1 {
+        asm!("int3");
+    }
 
-/*unsafe fn enter_user_mode(fn_ptr: u32) {
-    /*asm!(
-        "mov ax, 0x23",
-        "mov ds, ax",
-        "mov es, ax",
-        "mov fs, ax",
-        "mov gs, ax",
-
-        /*"mov eax, esp",
-        "push 0x23",
-        "push eax",
-        "pushf",
-        "push 0x1b",
-        "push ebx",
-        "iret",*/
-
-        "xor edx, edx",
-        "mov eax, 0x100008",
-        "mov ecx, 0x174",
-        "wrmsr",
-
-        "mov edx, ebx",
-        "mov ecx, esp",
-        "sysexit",
-
-        in("ebx") fn_ptr,
-        out("eax") _,
-        //out("ecx") _,
-        //out("edx") _,
-    );*/
-    /*
-    // Set up a stack structure for switching to user mode.
-    asm volatile("  \
-        cli; \
-        mov $0x23, %ax; \
-        mov %ax, %ds; \
-        mov %ax, %es; \
-        mov %ax, %fs; \
-        mov %ax, %gs; \
-                    \
-        mov %esp, %eax; \
-        pushl $0x23; \
-        pushl %eax; \
-        pushf; \
-        pushl $0x1B; \
-        push $1f; \
-        iret; \
-    1: \
-        ");
-    */
-    asm!(
-        "cli",
-        "mov ax, 0x23",
-        "mov ds, ax",
-        "mov es, ax",
-        "mov fs, ax",
-        "mov gs, ax",
-
-        "mov eax, esp",
-        "push 0x23",
-        "push eax",
-        "pushf",
-        /*"pop eax",
-        "or eax, 0x200",
-        "push eax",*/
-        "push 0x1b",
-        "push {0}",
-        "iret",
-
-        in(reg) fn_ptr,
-        out("eax") _,
-    );
-
-}*/
-
-fn user_mode_test() {
-    /*unsafe {
-        asm!("cli");
-    }*/
     loop {}
 }

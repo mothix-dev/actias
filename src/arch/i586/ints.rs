@@ -287,6 +287,35 @@ unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: Excepti
     halt();
 }
 
+unsafe extern "x86-interrupt" fn test_handler(frame: ExceptionStackFrame) {
+    log!("UwU");
+}
+
+/// structure of registers saved in the syscall handler
+#[repr(C, packed)]
+#[derive(Debug)]
+pub struct SyscallRegisters {
+    pub ds: u32,
+    pub edi: u32,
+    pub esi: u32,
+    pub ebp: u32,
+    pub esp: u32,
+    pub ebx: u32,
+    pub edx: u32,
+    pub ecx: u32,
+    pub eax: u32,
+    pub eip: u32,
+    pub cs: u32,
+    pub eflags: u32,
+    pub useresp: u32,
+    pub ss: u32,
+}
+
+extern "C" {
+    /// wrapper around syscall_handler to save and restore state
+    fn syscall_handler_wrapper() -> !;
+}
+
 // todo: more handlers
 
 /// set up idt(r) and enable interrupts
@@ -296,6 +325,8 @@ pub unsafe fn init() {
     IDT[Exceptions::DoubleFault as usize] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::GeneralProtectionFault as usize] = IDTEntry::new(general_protection_fault_handler as *const (), IDTFlags::Exception);
+
+    IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
     
     // load interrupt handler table
     let idt_desc = DescriptorTablePointer::new(&IDT);

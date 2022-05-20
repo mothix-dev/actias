@@ -1,6 +1,7 @@
 pub mod ints;
 pub mod gdt;
 pub mod paging;
+pub mod syscalls;
 
 use core::arch::asm;
 
