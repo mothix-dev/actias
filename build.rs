@@ -10,4 +10,5 @@ fn main() {
     // compile our asm boot shim
     cc::Build::new().file("src/arch/i586/boot.S").compile("boot");
     cc::Build::new().file("src/arch/i586/tasks.S").compile("tasks");
+    cc::Build::new().file("src/platform/ibmpc/irq.S").compile("irq");
 }

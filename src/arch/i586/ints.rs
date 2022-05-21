@@ -13,7 +13,7 @@ use crate::platform::debug::exit_failure;
 
 /// IDT flags
 #[bitmask(u8)]
-enum IDTFlags {
+pub enum IDTFlags {
     X16Interrupt    = Self(0x06),
     X16Trap         = Self(0x07),
     X32Task         = Self(0x05),
@@ -24,16 +24,16 @@ enum IDTFlags {
     Ring3           = Self(0x60),
     Present         = Self(0x80),
 
-    Exception       = Self(Self::X32Interrupt.0 | Self::Present.0), // exception?
-    External        = Self(Self::X32Interrupt.0 | Self::Present.0), // external interrupt?
-    Call            = Self(Self::X32Interrupt.0 | Self::Present.0 | Self::Ring3.0), // system call?
+    Exception       = Self(Self::X32Interrupt.0 | Self::Present.0), // exception
+    External        = Self(Self::X32Interrupt.0 | Self::Present.0), // external interrupt
+    Call            = Self(Self::X32Interrupt.0 | Self::Present.0 | Self::Ring3.0), // system call
 }
 
 /// entry in IDT
 /// this describes an interrupt handler (i.e. where it is, how it works, etc)
 #[repr(C, packed(16))]
 #[derive(Copy, Clone)]
-struct IDTEntry {
+pub struct IDTEntry {
     /// low 16 bits of handler pointer
     isr_low: u16,
 
@@ -52,7 +52,7 @@ struct IDTEntry {
 
 impl IDTEntry {
     /// creates a new IDT entry
-    fn new(isr: *const (), flags: IDTFlags) -> Self {
+    pub fn new(isr: *const (), flags: IDTFlags) -> Self {
         Self {
             isr_low: ((isr as u32) & 0xffff) as u16, // gets address of function pointer, then chops off the top 2 bytes
                                                      // not sure if casting to u16 will only return lower 2 bytes?
@@ -76,10 +76,10 @@ impl IDTEntry {
 }
 
 /// how many entries do we want in our IDT
-const IDT_ENTRIES: usize = 256;
+pub const IDT_ENTRIES: usize = 256;
 
 /// the IDT itself (aligned to 16 bits for performance)
-static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
+pub static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
 
 /// stores state of cpu prior to running exception handler
 /// this should be the proper stack frame format? it isn't provided by the x86 crate to my knowledge
@@ -287,13 +287,13 @@ unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: Excepti
     halt();
 }
 
-unsafe extern "x86-interrupt" fn test_handler(frame: ExceptionStackFrame) {
+unsafe extern "x86-interrupt" fn test_handler(_frame: ExceptionStackFrame) {
     log!("UwU");
 }
 
 /// structure of registers saved in the syscall handler
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct SyscallRegisters {
     pub ds: u32,
     pub edi: u32,
@@ -309,6 +309,27 @@ pub struct SyscallRegisters {
     pub eflags: u32,
     pub useresp: u32,
     pub ss: u32,
+}
+
+impl Default for SyscallRegisters {
+    fn default() -> Self {
+        Self {
+            ds: 0,
+            edi: 0,
+            esi: 0,
+            ebp: 0,
+            esp: 0,
+            ebx: 0,
+            edx: 0,
+            ecx: 0,
+            eax: 0,
+            eip: 0,
+            cs: 0,
+            eflags: 0,
+            useresp: 0,
+            ss: 0,
+        }
+    }
 }
 
 extern "C" {
@@ -327,6 +348,9 @@ pub unsafe fn init() {
     IDT[Exceptions::GeneralProtectionFault as usize] = IDTEntry::new(general_protection_fault_handler as *const (), IDTFlags::Exception);
 
     IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
+
+    // init irq handlers
+    crate::platform::irq::init();
     
     // load interrupt handler table
     let idt_desc = DescriptorTablePointer::new(&IDT);

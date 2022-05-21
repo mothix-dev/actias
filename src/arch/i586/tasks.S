@@ -1,6 +1,8 @@
 /* enter ring 3 (user mode) from ring 0 (kernel mode) */
 .globl enter_user_mode
 enter_user_mode:
+    cli
+    
     /* init function stack frame */
     push %ebp
     mov %esp, %ebp
@@ -8,22 +10,24 @@ enter_user_mode:
     /* get pointer to function */
     mov 8(%ebp), %ecx
 
+    /* get stack pointer */
+    mov 16(%ebp), %edx
+
     /* enter ring 3. this is some magic shit im afraid to touch lest it completely break again */
-    cli
     mov $0x23, %ax
     mov %ax, %ds
     mov %ax, %es
     mov %ax, %fs
     mov %ax, %gs
 
-    mov %esp, %eax
+    /*mov %esp, %eax*/
+    mov %edx, %eax
     pushl $0x23
     pushl %eax
     pushf
-    /* FIXME: fix interrupts then un-comment this */
-    /*pop %eax 
+    pop %eax 
     or $0x200, %eax
-    push %eax*/
+    push %eax
     pushl $0x1b
     pushl %ecx
     iret
@@ -33,6 +37,8 @@ enter_user_mode:
 .extern syscall_handler
 .globl syscall_handler_wrapper
 syscall_handler_wrapper:
+    cli
+
     pusha
 
     mov %ds, %ax
@@ -54,6 +60,6 @@ syscall_handler_wrapper:
 
     popa
 
-    /*sti*/
+    sti
     iret
 

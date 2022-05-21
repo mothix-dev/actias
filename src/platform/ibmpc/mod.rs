@@ -1,6 +1,7 @@
 pub mod debug;
 pub mod io;
 pub mod vga;
+pub mod irq;
 
 use crate::console::{TextConsole, SimpleConsole};
 
