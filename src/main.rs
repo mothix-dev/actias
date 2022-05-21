@@ -102,7 +102,7 @@ pub extern fn kmain() -> ! {
         start_tasking();
 
         loop {
-            //log!("UwU");
+            log!("UwU");
         }
     }
 

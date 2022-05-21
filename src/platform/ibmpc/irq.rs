@@ -51,22 +51,8 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
         current.state.page_updates = dir.page_updates;
     }
 
-    //log!("switching directories");
-
-    log!("task instruction pointer: {:#x}", regs.eip);
-
-    log!("task phys instruction pointer: {:#x}", current.state.pages.virt_to_phys(regs.eip).unwrap());
-
-    /*unsafe {
-        use core::arch::asm;
-        asm!("cli; hlt");
-    }*/
-
     // switch to task's page directory
     get_current_task_mut().state.pages.switch_to();
-    //PAGE_DIR.as_ref().unwrap().switch_to();
-
-    //log!("uwu");
 
     // reset interrupt controller
     outb(0x20, 0x20);

@@ -370,10 +370,10 @@ impl PageDirectory {
     /// creates a new page directory, allocating memory for it in the process
     pub fn new() -> Self {
         let num_frames = unsafe { MEM_SIZE >> 12 };
-        let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false) };
+        let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), true) };
 
         #[cfg(debug_messages)]
-        log!("tables_physical alloc @ {:#x}", tables_physical as usize);
+        log!("tables_physical alloc @ {:#x}", tables_physical.pointer);
 
         for i in 0..1024 {
             unsafe {
@@ -449,10 +449,10 @@ impl PageDirectory {
     /// switch global page directory to this page directory
     pub fn switch_to(&self) {
         unsafe {
-            //#[cfg(debug_messages)]
+            #[cfg(debug_messages)]
             log!("switching to page table @ phys {:#x}", self.tables_physical_addr);
 
-            /*asm!(
+            asm!(
                 "mov cr3, {0}",
                 "mov {1}, cr0",
                 "or {1}, 0x80000000",
@@ -460,19 +460,7 @@ impl PageDirectory {
 
                 in(reg) self.tables_physical_addr,
                 out(reg) _,
-            );*/
-
-            log!("a");
-            asm!("mov cr3, {0}", in(reg) self.tables_physical_addr);
-
-            log!("b");
-            let mut cr0: u32;
-            asm!("mov {0}, cr0", out(reg) cr0);
-
-            log!("c");
-            cr0 |= 0x80000000;
-            asm!("mov cr0, {0}", in(reg) cr0);
-            log!("d");
+            );
         }
     }
 

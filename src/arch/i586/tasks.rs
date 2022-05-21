@@ -46,8 +46,6 @@ impl TaskState {
             unsafe {
                 (*self.pages.tables_physical)[i] = (*dir.tables_physical)[i];
             }
-
-            //log!("self.pages.tables[{}] = {:?}, self.pages.tables_physical[{}] = {:#x}", i, self.pages.tables[i], i, unsafe { (*self.pages.tables_physical)[i] });
         }
     }
 }
