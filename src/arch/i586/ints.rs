@@ -292,7 +292,7 @@ unsafe extern "x86-interrupt" fn test_handler(_frame: ExceptionStackFrame) {
 }
 
 /// structure of registers saved in the syscall handler
-#[repr(C, packed)]
+#[repr(C, packed(32))]
 #[derive(Debug, Copy, Clone)]
 pub struct SyscallRegisters {
     pub ds: u32,

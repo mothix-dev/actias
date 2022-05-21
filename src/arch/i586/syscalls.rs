@@ -36,6 +36,7 @@ pub fn fork(regs: &mut SyscallRegisters) {
         state: TaskState {
             registers: current.state.registers,
             pages: PageDirectory::new(),
+            page_updates: 0,
         },
     };
     add_task(new);

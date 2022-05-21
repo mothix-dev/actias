@@ -2,7 +2,9 @@
 
 use super::io::outb;
 use crate::arch::ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters};
-use crate::tasks::{get_current_task_mut, get_current_task, switch_tasks};
+use crate::tasks::{get_current_task_mut, switch_tasks};
+use crate::arch::paging::PAGE_DIR;
+use crate::arch::LINKED_BASE;
 
 /// interrupt stub handler for unhandled interrupts
 unsafe extern "x86-interrupt" fn stub_handler(_frame: ExceptionStackFrame) {
@@ -18,8 +20,11 @@ unsafe extern "x86-interrupt" fn stub_handler_2(_frame: ExceptionStackFrame) {
     outb(0x20, 0x20);
 }
 
+/// timer interrupt handler, currently just switches tasks
 #[no_mangle]
 pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
+    // TODO: task priority, task execution timers
+
     // save state of current task
     get_current_task_mut().state.save(&regs);
 
@@ -27,7 +32,41 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     switch_tasks();
 
     // load state of new current task
-    get_current_task().state.load(&mut regs);
+    let current = get_current_task_mut();
+
+    current.state.load(&mut regs);
+
+    // get reference to global page directory
+    let dir = PAGE_DIR.as_mut().expect("paging not initialized");
+
+    // has the kernel page directory been updated?
+    if current.state.page_updates != dir.page_updates {
+        // get page directory index of the start of the kernel's address space
+        let idx = LINKED_BASE >> 22;
+
+        // copy from the kernel's page directory to the task's
+        current.state.copy_pages_from(dir, idx, 1024);
+
+        // the task's page directory is now up to date (at least for our purposes)
+        current.state.page_updates = dir.page_updates;
+    }
+
+    //log!("switching directories");
+
+    log!("task instruction pointer: {:#x}", regs.eip);
+
+    log!("task phys instruction pointer: {:#x}", current.state.pages.virt_to_phys(regs.eip).unwrap());
+
+    /*unsafe {
+        use core::arch::asm;
+        asm!("cli; hlt");
+    }*/
+
+    // switch to task's page directory
+    get_current_task_mut().state.pages.switch_to();
+    //PAGE_DIR.as_ref().unwrap().switch_to();
+
+    //log!("uwu");
 
     // reset interrupt controller
     outb(0x20, 0x20);

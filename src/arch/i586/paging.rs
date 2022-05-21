@@ -355,23 +355,38 @@ pub struct PageDirectory {
     /// physical addresses of page tables (raw pointer bc references are Annoying and shit breaks without it)
     pub tables_physical: *mut [u32; 1024],
 
+    /// physical address of tables_physical lmao
+    pub tables_physical_addr: u32,
+
     /// bitset to speed up allocation of page frames
     pub frame_set: BitSet,
+
+    /// counter of how many times the page directory has been updated
+    /// can be used to check if partial copies of this page directory elsewhere are out of date
+    pub page_updates: usize,
 }
 
 impl PageDirectory {
     /// creates a new page directory, allocating memory for it in the process
     pub fn new() -> Self {
         let num_frames = unsafe { MEM_SIZE >> 12 };
-        let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false).pointer };
+        let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), false) };
 
         #[cfg(debug_messages)]
         log!("tables_physical alloc @ {:#x}", tables_physical as usize);
 
+        for i in 0..1024 {
+            unsafe {
+                (*tables_physical.pointer)[i] = 0;
+            }
+        }
+
         PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
-            tables_physical, // shit breaks without this lmao
+            tables_physical: tables_physical.pointer, // shit breaks without this lmao
+            tables_physical_addr: tables_physical.phys_addr as u32,
             frame_set: BitSet::place_at(unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>(), false).pointer }, num_frames), // BitSet::new uses the global allocator, which isn't initialized yet!
+            page_updates: 0,
         }
     }
 
@@ -414,6 +429,7 @@ impl PageDirectory {
                 self.frame_set.set(idx);
                 page2.set_flags(flags);
                 page2.set_address((idx << 12) as u32);
+                self.page_updates.wrapping_add(1); // we want this to be able to overflow
             } else {
                 panic!("out of memory (no free frames)");
             }
@@ -426,21 +442,47 @@ impl PageDirectory {
         if !page2.is_unused() {
             self.frame_set.clear((page2.get_address() >> 12) as usize);
             page2.set_unused();
+            self.page_updates.wrapping_add(1);
         }
     }
 
     /// switch global page directory to this page directory
     pub fn switch_to(&self) {
         unsafe {
-            /*#[cfg(debug_messages)]
-            log!("switching to page table @ phys {:#x}", self.tables_physical as u32);*/
+            //#[cfg(debug_messages)]
+            log!("switching to page table @ phys {:#x}", self.tables_physical_addr);
 
-            let addr = self.tables_physical as u32 - LINKED_BASE as u32;
-            asm!("mov cr3, {0}", in(reg) addr);
+            /*asm!(
+                "mov cr3, {0}",
+                "mov {1}, cr0",
+                "or {1}, 0x80000000",
+                "mov cr0, {1}",
+
+                in(reg) self.tables_physical_addr,
+                out(reg) _,
+            );*/
+
+            log!("a");
+            asm!("mov cr3, {0}", in(reg) self.tables_physical_addr);
+
+            log!("b");
             let mut cr0: u32;
             asm!("mov {0}, cr0", out(reg) cr0);
+
+            log!("c");
             cr0 |= 0x80000000;
             asm!("mov cr0, {0}", in(reg) cr0);
+            log!("d");
+        }
+    }
+
+    pub fn virt_to_phys(&mut self, addr: u32) -> Option<usize> {
+        let page = self.get_page(addr, false)?;
+    
+        if let Ok(res) = (unsafe { &*page }).get_address().try_into() {
+            Some(res)
+        } else {
+            None
         }
     }
 }
@@ -460,7 +502,7 @@ unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
 
     for i in (start..end).step_by(PAGE_SIZE) {
         let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
-        dir.alloc_frame(page, false, true);
+        dir.alloc_frame(page, false, true); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
 }
 
@@ -521,7 +563,7 @@ pub fn alloc_page(addr: usize, is_kernel: bool, is_writeable: bool) {
 
     unsafe { dir.alloc_frame(page, is_kernel, is_writeable); }
 
-    dir.switch_to();
+    //dir.switch_to(); // i think we only need to flush the tlb when freeing pages?
 }
 
 /// free page at given address
@@ -532,9 +574,9 @@ pub fn free_page(addr: usize) {
 
     if let Some(page) = dir.get_page(addr.try_into().unwrap(), false) {
         unsafe { dir.free_frame(page); }
+
+        dir.switch_to();
     }
-    
-    dir.switch_to();
 }
 
 /// convert virtual to physical address
@@ -543,13 +585,7 @@ pub fn virt_to_phys(addr: usize) -> Option<usize> {
 
     let addr = if let Ok(res) = addr.try_into() { res } else { return None };
 
-    let page = dir.get_page(addr, true)?;
-
-    if let Ok(res) = (unsafe { &*page }).get_address().try_into() {
-        Some(res)
-    } else {
-        None
-    }
+    dir.virt_to_phys(addr)
 }
 
 /// bump allocate some memory
