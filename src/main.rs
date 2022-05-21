@@ -62,7 +62,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 use platform::debug::exit_success;
 
 extern "C" {
-    fn enter_user_mode(ptr: u32) -> !;
+    fn enter_user_mode(ptr: u32, stack: u32) -> !;
+    //fn enter_user_mode(ptr: u32) -> !;
 }
 
 // kernel entrypoint (called by arch/<foo>/boot.S)
@@ -98,20 +99,20 @@ pub extern fn kmain() -> ! {
 
             enter_user_mode(ptr);
         }*/
+        switch_to_user_mode(user_mode_test as *const _);
 
-        start_tasking();
-
-        loop {
+        /*loop {
             log!("UwU");
-        }
+        }*/
     }
 
     arch::halt();
 }
 
 use core::arch::asm;
-use tasks::{Task, add_task};
+use tasks::{Task, add_task, get_current_task_mut};
 use syscalls::Syscalls;
+use arch::{LINKED_BASE, PAGE_SIZE};
 
 /// initialize multitasking
 pub fn start_tasking() {
@@ -125,12 +126,53 @@ pub fn start_tasking() {
     unsafe { asm!("sti"); }
 }
 
+/// set up stack, switch to user mode
+pub fn switch_to_user_mode(ptr: *const u32) {
+    #[cfg(debug_messages)]
+    log!("creating task");
+
+    let mut task = Task {
+        state: Default::default(),
+        id: 0,
+    };
+
+    // map page at top of user memory (right below kernel memory) for stack
+    #[cfg(debug_messages)]
+    log!("allocating stack");
+
+    task.state.alloc_page((LINKED_BASE - PAGE_SIZE) as u32, false, true, false);
+
+    #[cfg(debug_messages)]
+    log!("adding task");
+    
+    add_task(task);
+
+    #[cfg(debug_messages)]
+    log!("switching page tables");
+
+    get_current_task_mut().expect("no tasks?").state.pages.switch_to();
+
+    log!("entering user mode @ {:#x}", ptr as u32);
+
+    unsafe {
+        enter_user_mode(ptr as u32, (LINKED_BASE - 1) as u32); // this also enables interrupts, effectively enabling task switching
+    }
+}
+
 #[inline(always)]
 unsafe fn syscall_is_computer_on() -> bool {
     let result: u32;
     asm!("int 0x80", in("eax") Syscalls::IsComputerOn as u32, out("ebx") result);
 
     result > 0
+}
+
+#[inline(always)]
+unsafe fn syscall_fork() -> u32 {
+    let result: u32;
+    asm!("int 0x80", in("eax") Syscalls::Fork as u32, out("ebx") result);
+
+    result
 }
 
 #[inline(always)]
@@ -144,11 +186,42 @@ unsafe extern fn user_mode_test_2() {
     }
 }
 
-unsafe extern fn user_mode_test() {
-    if syscall_is_computer_on() {
+unsafe extern fn user_mode_test() -> ! {
+    /*if syscall_is_computer_on() {
         syscall_test_log(b"computer is on\0");
     } else {
         syscall_test_log(b"computer is not on\0");
+    }*/
+
+    /*let ptr = (LINKED_BASE - PAGE_SIZE) as *mut u16;
+
+    *ptr = 621;
+
+    if syscall_fork() == 0 {
+        syscall_test_log(b"parent\0");
+
+        if *ptr == 621 {
+            syscall_test_log(b"parent: preserved\0");
+        }
+    } else {
+        syscall_test_log(b"child\0");
+
+        if *ptr == 621 {
+            syscall_test_log(b"child: preserved\0");
+        }
+    }*/
+
+    let proc = syscall_fork();
+
+    loop {
+        if proc == 0 {
+            syscall_test_log(b"UwU\0");
+        } else {
+            syscall_test_log(b"OwO\0");
+        }
+        for _i in 0..1024 * 1024 { // slow things down
+            asm!("nop");
+        }
     }
 
     loop {}

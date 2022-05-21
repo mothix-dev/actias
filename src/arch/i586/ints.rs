@@ -7,6 +7,9 @@ use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
 use super::halt;
 use crate::console::{get_console, PANIC_COLOR};
+use crate::tasks::get_current_task_mut;
+use super::paging::{PAGE_DIR, PageTableFlags};
+use crate::arch::{MEM_TOP, PAGE_SIZE};
 
 #[cfg(test)]
 use crate::platform::debug::exit_failure;
@@ -221,11 +224,6 @@ impl fmt::Display for PageFaultErrorCode {
 /// exception handler for breakpoint
 unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) {
     log!("breakpoint @ {:#x}", frame.instruction_pointer);
-
-    let mut address: u32;
-    asm!("mov {0}, esp", out(reg) address);
-
-    log!("esp: {:#x} ({})", address, address);
 }
 
 /// exception handler for double fault
@@ -243,28 +241,104 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     halt();
 }
 
+extern "C" {
+    fn copy_page_physical(src: u32, dest: u32);
+}
+
 /// exception handler for page fault
 unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, error_code: PageFaultErrorCode) {
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
-    if let Some(console) = get_console() {
-        console.set_color(PANIC_COLOR);
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+    // switch to kernel's page directory
+    dir.switch_to();
+
+    // rust moment
+    if 
+        // is there a current task?
+        if let Some(current) = get_current_task_mut() {
+            // get current task's page entry for given address
+            if let Some(page) = current.state.pages.get_page(address, false) {
+                let page = &mut *page;
+
+                // get flags
+                let flags: PageTableFlags = page.get_flags().into();
+
+                // is read/write flag unset and copy on write flag set?
+                if u16::from(flags & PageTableFlags::ReadWrite) == 0 && u16::from(flags & PageTableFlags::CopyOnWrite) > 0 {
+                    #[cfg(debug_messages)]
+                    log!("copy on write");
+
+                    // get physical address of page
+                    let old_addr = page.get_address();
+
+                    // set page as unused so we can get a new frame
+                    page.set_unused();
+
+                    if let Some(addr) = dir.alloc_frame(page, false, true) {
+                        #[cfg(debug_messages)]
+                        log!("copying");
+
+                        // temporarily map the page we want to copy from and the page we want to copy to into memory
+                        let from_virt = MEM_TOP - PAGE_SIZE * 2 + 1;
+                        let to_virt = MEM_TOP - PAGE_SIZE + 1;
+
+                        let page_from = &mut *dir.get_page(from_virt as u32, true).expect("can't get page");
+                        page_from.set_flags(PageTableFlags::Present | PageTableFlags::ReadWrite);
+                        page_from.set_address(old_addr);
+                        asm!("invlpg [{0}]", in(reg) old_addr);
+
+                        let page_to = &mut *dir.get_page(to_virt as u32, true).expect("can't get page");
+                        page_to.set_flags(PageTableFlags::Present | PageTableFlags::ReadWrite);
+                        page_to.set_address(addr);
+                        asm!("invlpg [{0}]", in(reg) addr);
+
+                        // pointer shenanigans to get buffers we can copy
+                        let from_buf = &mut *(from_virt as *mut [u32; 256]);
+                        let to_buf = &mut *(to_virt as *mut [u32; 256]);
+
+                        // do the copy
+                        to_buf.copy_from_slice(from_buf);
+
+                        // set our temporary pages as unused so the data can't be accessed elsewhere
+                        page_from.set_unused();
+                        page_to.set_unused();
+
+                        // switch back to task's page directory
+                        current.state.pages.switch_to();
+
+                        #[cfg(debug_messages)]
+                        log!("copied {:#x} -> {:#x}", old_addr, addr);
+                        
+                        false // don't panic
+                    } else {
+                        true // panic
+                    }
+                } else {
+                    true // panic
+                }
+            } else {
+                true // panic
+            }
+        } else {
+            true // panic
+        }
+    {
+        if let Some(console) = get_console() {
+            console.set_color(PANIC_COLOR);
+        }
+
+        log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
+        log!("accessed address {:#x}", address);
+        log!("{:#?}", frame);
+        
+        #[cfg(test)]
+        exit_failure();
+
+        halt();
     }
-
-    log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
-    log!("accessed address {:#x}", address);
-    log!("{:#?}", frame);
-
-    let mut address: u32;
-    asm!("mov {0}, esp", out(reg) address);
-
-    log!("esp: {:#x} ({})", address, address);
-    
-    #[cfg(test)]
-    exit_failure();
-
-    halt();
 }
 
 /// exception handler for general protection fault

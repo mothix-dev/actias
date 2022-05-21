@@ -7,6 +7,7 @@ pub mod tasks;
 use core::arch::asm;
 
 // various useful constants
+pub const MEM_TOP: usize = 0xffffffff;
 pub const LINKED_BASE: usize = 0xc0000000;
 pub const KHEAP_START: usize = LINKED_BASE + 0x10000000;
 

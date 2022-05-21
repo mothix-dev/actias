@@ -11,7 +11,7 @@ enter_user_mode:
     mov 8(%ebp), %ecx
 
     /* get stack pointer */
-    mov 16(%ebp), %edx
+    mov 12(%ebp), %edx
 
     /* enter ring 3. this is some magic shit im afraid to touch lest it completely break again */
     mov $0x23, %ax
@@ -20,16 +20,23 @@ enter_user_mode:
     mov %ax, %fs
     mov %ax, %gs
 
-    /*mov %esp, %eax*/
-    mov %edx, %eax
+    /* push stack pointer */
+    mov %edx, %ebp
+    mov %ebp, %esp
+
     pushl $0x23
-    pushl %eax
+    pushl %edx
+
+    /* push flags */
     pushf
-    pop %eax 
+    pop %eax /* enable interrupts */
     or $0x200, %eax
     push %eax
+
+    /* push entry point */
     pushl $0x1b
     pushl %ecx
+    
     iret
 
 

@@ -4,7 +4,8 @@ use core::ffi::CStr;
 use super::ints::SyscallRegisters;
 use crate::tasks::{Task, get_current_task_mut, add_task, TASKS};
 use crate::arch::tasks::TaskState;
-use crate::arch::paging::PageDirectory;
+use crate::arch::paging::{PAGE_DIR, PageDirectory};
+use crate::arch::LINKED_BASE;
 
 /// is computer on?
 /// sets ebx to 1 (true) if computer is on
@@ -22,24 +23,31 @@ pub fn test_log(regs: &mut SyscallRegisters) {
 /// forks task
 /// sets ebx to 0 in parent task, 1 in child task
 pub fn fork(regs: &mut SyscallRegisters) {
-    let current = get_current_task_mut();
+    let current = get_current_task_mut().expect("no tasks?");
 
     // save state of current task
     current.state.save(&regs);
 
-    // clone task, change its id, set its ebx contents (return value) to 1
-    /*let mut new = current.clone();
-    new.id = unsafe { TASKS.len() };
-    new.state.registers.ebx = 1;*/
-    let mut new = Task {
-        id: unsafe { TASKS.len() },
-        state: TaskState {
-            registers: current.state.registers,
-            pages: PageDirectory::new(),
-            page_updates: 0,
-        },
+    // create new task state
+    let mut state = TaskState {
+        registers: current.state.registers,
+        pages: PageDirectory::new(),
+        page_updates: current.state.page_updates,
     };
-    add_task(new);
+
+    // copy kernel pages, copy parent task's pages as copy on write
+    let kernel_start = LINKED_BASE >> 22;
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+    state.copy_on_write_from(&mut current.state.pages, 0, kernel_start);
+    state.copy_pages_from(dir, kernel_start, 1024);
+
+    // set ebx of child
+    state.registers.ebx = 1;
+
+    add_task(Task {
+        id: unsafe { TASKS.len() },
+        state,
+    });
 
     // set ebx contents of parent
     regs.ebx = 0;

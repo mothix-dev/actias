@@ -58,20 +58,29 @@ impl PageTableEntry {
     pub fn get_address(&self) -> u32 {
         self.0 & 0xfffff000
     }
+
+    /// gets flags of page table entry
+    pub fn get_flags(&self) -> u16 {
+        (self.0 & 0x00000fff) as u16
+    }
 }
 
 impl fmt::Display for PageTableEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "PageTableEntry {{")?;
         writeln!(f, "    address: {:#x},", self.0 & 0xfffff000)?;
-        writeln!(f, "    flags: {}", PageDirFlags((self.0 & 0x0fff) as u16))?;
+        writeln!(f, "    flags: {}", PageTableFlags((self.0 & 0x0fff) as u16))?;
         write!(f, "}}")
     }
 }
 
 /// page table entry flags
 #[bitmask(u16)]
+#[repr(transparent)]
 pub enum PageTableFlags {
+    /// no flags?
+    None                = Self(0),
+
     /// page is present in memory and can be accessed
     Present             = Self(1 << 0),
 
@@ -102,6 +111,9 @@ pub enum PageTableFlags {
 
     /// tells cpu to not invalidate this page table entry in cache when page tables are reloaded
     Global              = Self(1 << 8),
+
+    /// if this bit is set and the present bit is not, the page will be copied into a new page when written to
+    CopyOnWrite         = Self(1 << 9),
 }
 
 impl fmt::Display for PageTableFlags {
@@ -148,6 +160,10 @@ impl fmt::Display for PageTableFlags {
             write!(f, ", global")?;
         }
 
+        if self.0 & (1 << 9) > 0 {
+            write!(f, ", copy on write")?;
+        }
+
         write!(f, " }}")
     }
 }
@@ -192,6 +208,11 @@ impl PageDirEntry {
     pub fn get_address(&self) -> u32 {
         self.0 & 0xfffff000
     }
+
+    /// gets flags of page directory entry
+    pub fn get_flags(&self) -> u16 {
+        (self.0 & 0x00000fff) as u16
+    }
 }
 
 impl fmt::Display for PageDirEntry {
@@ -207,7 +228,11 @@ impl fmt::Display for PageDirEntry {
 /// all absent flags override flags of children, i.e. not having the read write bit set prevents
 /// all page table entries in the page directory from being writable
 #[bitmask(u16)]
+#[repr(transparent)]
 pub enum PageDirFlags {
+    /// no flags?
+    None                = Self(0),
+
     /// pages are present in memory and can be accessed
     Present             = Self(1 << 0),
 
@@ -396,6 +421,7 @@ impl PageDirectory {
         let table_idx = (addr / 1024) as usize;
         if !self.tables[table_idx].is_null() { // page table already exists
             let table_ref = unsafe { &mut (*self.tables[table_idx]) };
+
             Some(&mut table_ref.entries[(addr % 1024) as usize])
         } else if make { // page table doesn't exist, create it
             unsafe {
@@ -406,6 +432,7 @@ impl PageDirectory {
                     table_ref.entries[i].0 = 0;
                 }
                 (*self.tables_physical)[table_idx] = (ptr.phys_addr | 0x7) as u32; // present, read/write, user/supervisor
+                
                 Some(&mut table_ref.entries[(addr % 1024) as usize])
             }
         } else { // page table doesn't exist
@@ -414,7 +441,7 @@ impl PageDirectory {
     }
     
     /// allocates a frame for specified page
-    pub unsafe fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) { // TODO: consider passing in flags?
+    pub unsafe fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) -> Option<u32> { // TODO: consider passing in flags?
         let page2 = &mut *page; // pointer shenanigans to get around the borrow checker lmao
         if page2.is_unused() {
             if let Some(idx) = self.frame_set.first_unset() {
@@ -429,20 +456,29 @@ impl PageDirectory {
                 self.frame_set.set(idx);
                 page2.set_flags(flags);
                 page2.set_address((idx << 12) as u32);
-                self.page_updates.wrapping_add(1); // we want this to be able to overflow
+                self.page_updates = self.page_updates.wrapping_add(1); // we want this to be able to overflow
+
+                Some((idx << 12) as u32)
             } else {
                 panic!("out of memory (no free frames)");
             }
+        } else {
+            None
         }
     }
 
     /// frees a frame, allowing other things to use it
-    pub unsafe fn free_frame(&mut self, page: *mut PageTableEntry) {
+    pub unsafe fn free_frame(&mut self, page: *mut PageTableEntry) -> Option<u32> {
         let page2 = &mut *page; // pointer shenanigans
         if !page2.is_unused() {
-            self.frame_set.clear((page2.get_address() >> 12) as usize);
+            let addr = page2.get_address();
+            self.frame_set.clear((addr >> 12) as usize);
             page2.set_unused();
-            self.page_updates.wrapping_add(1);
+            self.page_updates = self.page_updates.wrapping_add(1);
+
+            Some(addr)
+        } else {
+            None
         }
     }
 
@@ -464,14 +500,11 @@ impl PageDirectory {
         }
     }
 
-    pub fn virt_to_phys(&mut self, addr: u32) -> Option<usize> {
+    /// transform a virtual address to a physical address
+    pub fn virt_to_phys(&mut self, addr: u32) -> Option<u32> {
         let page = self.get_page(addr, false)?;
-    
-        if let Ok(res) = (unsafe { &*page }).get_address().try_into() {
-            Some(res)
-        } else {
-            None
-        }
+
+        Some((unsafe { *page }).get_address() | (addr & (PAGE_SIZE as u32 - 1)))
     }
 }
 
@@ -485,13 +518,13 @@ impl Default for PageDirectory {
 unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
     let end = start + size;
 
-    #[cfg(debug_messages)]
-    log!("mapped {:#x} - {:#x}", start, end);
-
     for i in (start..end).step_by(PAGE_SIZE) {
         let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
         dir.alloc_frame(page, false, true); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
+
+    #[cfg(debug_messages)]
+    log!("mapped {:#x} - {:#x}", start, end);
 }
 
 /// our page directory
@@ -510,6 +543,8 @@ pub unsafe fn init() {
 
     // set up page directory struct
     let mut dir = PageDirectory::new();
+
+    // FIXME: map initial kernel memory allocations as global so they won't be invalidated from TLB flushes
 
     #[cfg(debug_messages)]
     log!("mapping kernel memory");
@@ -549,9 +584,11 @@ pub fn alloc_page(addr: usize, is_kernel: bool, is_writeable: bool) {
 
     let page = dir.get_page(addr.try_into().unwrap(), true).unwrap();
 
-    unsafe { dir.alloc_frame(page, is_kernel, is_writeable); }
-
-    //dir.switch_to(); // i think we only need to flush the tlb when freeing pages?
+    unsafe {
+        if dir.alloc_frame(page, is_kernel, is_writeable).is_some() {
+            asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+        }
+    }
 }
 
 /// free page at given address
@@ -561,9 +598,11 @@ pub fn free_page(addr: usize) {
     let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
 
     if let Some(page) = dir.get_page(addr.try_into().unwrap(), false) {
-        unsafe { dir.free_frame(page); }
-
-        dir.switch_to();
+        unsafe {
+            if dir.free_frame(page).is_some() {
+                asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+            }
+        }
     }
 }
 
@@ -573,7 +612,13 @@ pub fn virt_to_phys(addr: usize) -> Option<usize> {
 
     let addr = if let Ok(res) = addr.try_into() { res } else { return None };
 
-    dir.virt_to_phys(addr)
+    match dir.virt_to_phys(addr) {
+        Some(res) => match res.try_into() {
+            Ok(ult) => Some(ult),
+            Err(..) => None,
+        },
+        None => None,
+    }
 }
 
 /// bump allocate some memory

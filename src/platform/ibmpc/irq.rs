@@ -26,13 +26,13 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     // TODO: task priority, task execution timers
 
     // save state of current task
-    get_current_task_mut().state.save(&regs);
+    get_current_task_mut().expect("no tasks?").state.save(&regs);
 
     // switch to next task
     switch_tasks();
 
     // load state of new current task
-    let current = get_current_task_mut();
+    let current = get_current_task_mut().expect("no tasks?");
 
     current.state.load(&mut regs);
 
@@ -52,7 +52,7 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     }
 
     // switch to task's page directory
-    get_current_task_mut().state.pages.switch_to();
+    get_current_task_mut().expect("no tasks?").state.pages.switch_to();
 
     // reset interrupt controller
     outb(0x20, 0x20);

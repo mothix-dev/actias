@@ -16,32 +16,32 @@ pub static mut TASKS: Vec<Task> = Vec::new();
 pub static mut CURRENT_TASK: usize = 0;
 
 /// get a reference to the next task to switch to
-pub fn get_next_task() -> &'static Task {
+pub fn get_next_task() -> Option<&'static Task> {
     unsafe {
         let next = (CURRENT_TASK + 1) % TASKS.len();
-        TASKS.get(next).expect("no tasks?")
+        TASKS.get(next)
     }
 }
 
 /// get a mutable reference to the next task to switch to
-pub fn get_next_task_mut() -> &'static mut Task {
+pub fn get_next_task_mut() -> Option<&'static mut Task> {
     unsafe {
         let next = (CURRENT_TASK + 1) % TASKS.len();
-        TASKS.get_mut(next).expect("no tasks?")
+        TASKS.get_mut(next)
     }
 }
 
 /// get a reference to the current task
-pub fn get_current_task() -> &'static Task {
+pub fn get_current_task() -> Option<&'static Task> {
     unsafe {
-        TASKS.get(CURRENT_TASK).expect("no tasks?")
+        TASKS.get(CURRENT_TASK)
     }
 }
 
 /// get a mutable reference to the current task
-pub fn get_current_task_mut() -> &'static mut Task {
+pub fn get_current_task_mut() -> Option<&'static mut Task> {
     unsafe {
-        TASKS.get_mut(CURRENT_TASK).expect("no tasks?")
+        TASKS.get_mut(CURRENT_TASK)
     }
 }
 
@@ -58,4 +58,3 @@ pub fn add_task(task: Task) {
         TASKS.push(task);
     }
 }
-
