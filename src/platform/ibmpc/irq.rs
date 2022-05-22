@@ -2,7 +2,7 @@
 
 use super::io::outb;
 use crate::arch::ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters};
-use crate::tasks::{get_current_task_mut, switch_tasks};
+use crate::tasks::{CURRENT_TERMINATED, get_current_task_mut, switch_tasks};
 use crate::arch::paging::PAGE_DIR;
 use crate::arch::LINKED_BASE;
 
@@ -26,7 +26,11 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     // TODO: task priority, task execution timers
 
     // save state of current task
-    get_current_task_mut().expect("no tasks?").state.save(&regs);
+    if CURRENT_TERMINATED {
+        CURRENT_TERMINATED = false;
+    } else {
+        get_current_task_mut().expect("no tasks?").state.save(&regs);
+    }
 
     // switch to next task
     switch_tasks();

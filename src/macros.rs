@@ -13,10 +13,21 @@
 ///
 /// Obtaines a logger instance (locking the log channel) with the current module name passed
 /// then passes the standard format! arguments to it
-macro_rules! log{
+macro_rules! log {
     ( $($arg:tt)* ) => ({
         // Import the Writer trait (required by write!)
         use core::fmt::Write;
+        let _ = write!(&mut crate::logging::Writer::get(module_path!()), $($arg)*);
+    })
+}
+
+/// works exactly the same as log!, however requres debug_messages to be set at compile time
+macro_rules! debug {
+    ( $($arg:tt)* ) => ({
+        // Import the Writer trait (required by write!)
+        use core::fmt::Write;
+        
+        #[cfg(debug_messages)]
         let _ = write!(&mut crate::logging::Writer::get(module_path!()), $($arg)*);
     })
 }

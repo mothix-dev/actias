@@ -6,8 +6,8 @@ use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
 use super::halt;
-use crate::console::{get_console, PANIC_COLOR};
-use crate::tasks::get_current_task_mut;
+use crate::console::{get_console, PANIC_COLOR, ColorCode};
+use crate::tasks::{CURRENT_TASK, IN_TASK, get_current_task_mut, remove_task};
 use super::paging::{PAGE_DIR, PageTableFlags};
 use crate::arch::{MEM_TOP, PAGE_SIZE};
 
@@ -241,22 +241,21 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     halt();
 }
 
-extern "C" {
-    fn copy_page_physical(src: u32, dest: u32);
-}
-
 /// exception handler for page fault
 unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, error_code: PageFaultErrorCode) {
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
-    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+    let was_in_task = IN_TASK;
+    IN_TASK = false;
+
+    let dir = PAGE_DIR.as_mut().unwrap();
 
     // switch to kernel's page directory
     dir.switch_to();
 
     // rust moment
-    if 
+    if was_in_task &&
         // is there a current task?
         if let Some(current) = get_current_task_mut() {
             // get current task's page entry for given address
@@ -268,8 +267,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
 
                 // is read/write flag unset and copy on write flag set?
                 if u16::from(flags & PageTableFlags::ReadWrite) == 0 && u16::from(flags & PageTableFlags::CopyOnWrite) > 0 {
-                    #[cfg(debug_messages)]
-                    log!("copy on write");
+                    debug!("copy on write");
 
                     // get physical address of page
                     let old_addr = page.get_address();
@@ -278,8 +276,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
                     page.set_unused();
 
                     if let Some(addr) = dir.alloc_frame(page, false, true) {
-                        #[cfg(debug_messages)]
-                        log!("copying");
+                        debug!("copying");
 
                         // temporarily map the page we want to copy from and the page we want to copy to into memory
                         let from_virt = MEM_TOP - PAGE_SIZE * 2 + 1;
@@ -309,8 +306,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
                         // switch back to task's page directory
                         current.state.pages.switch_to();
 
-                        #[cfg(debug_messages)]
-                        log!("copied {:#x} -> {:#x}", old_addr, addr);
+                        debug!("copied {:#x} -> {:#x}", old_addr, addr);
                         
                         false // don't panic
                     } else {
@@ -339,30 +335,54 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
 
         halt();
     }
+
+    IN_TASK = was_in_task;
 }
 
 /// exception handler for general protection fault
 unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
-    if let Some(console) = get_console() {
-        console.set_color(PANIC_COLOR);
+    let was_in_task = IN_TASK;
+    IN_TASK = false;
+
+    if was_in_task {
+        let old_color: ColorCode = 
+            if let Some(console) = get_console() {
+                let color = console.get_color();
+                console.set_color(PANIC_COLOR);
+                color
+            } else {
+                Default::default()
+            };
+
+        log!("general protection fault in task {} @ {:#x}, error code {:#x}", CURRENT_TASK, frame.instruction_pointer, error_code);
+        log!("{:#?}", frame);
+
+        remove_task(CURRENT_TASK);
+
+        log!("task {} terminated", CURRENT_TASK);
+
+        if let Some(console) = get_console() {
+            console.set_color(old_color);
+        }
+
+        // idle the cpu until the next task switch
+        IN_TASK = true;
+        asm!("sti; hlt");
+    } else {
+        if let Some(console) = get_console() {
+            console.set_color(PANIC_COLOR);
+        }
+
+        log!("PANIC: general protection fault @ {:#x}, error code {:#x}", frame.instruction_pointer, error_code);
+        log!("{:#?}", frame);
+        
+        #[cfg(test)]
+        exit_failure();
+
+        halt();
     }
 
-    log!("PANIC: general protection fault @ {:#x}, error code {:#x}", frame.instruction_pointer, error_code);
-    log!("{:#?}", frame);
-
-    let mut address: u32;
-    asm!("mov {0}, esp", out(reg) address);
-
-    log!("esp: {:#x} ({})", address, address);
-    
-    #[cfg(test)]
-    exit_failure();
-
-    halt();
-}
-
-unsafe extern "x86-interrupt" fn test_handler(_frame: ExceptionStackFrame) {
-    log!("UwU");
+    IN_TASK = was_in_task;
 }
 
 /// structure of registers saved in the syscall handler

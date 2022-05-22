@@ -42,9 +42,9 @@ pub struct ColorCode {
     pub background: Color,
 }
 
-impl ColorCode {
+impl Default for ColorCode {
     /// default color
-    pub fn default() -> Self {
+    fn default() -> Self {
         Self {
             foreground: Color::LightGray,
             background: Color::Black,
@@ -63,6 +63,7 @@ pub trait TextConsole: Write {
     fn puts(&mut self, string: &str);
     fn clear(&mut self);
     fn set_color(&mut self, color: ColorCode);
+    fn get_color(&self) -> ColorCode;
 }
 
 /// interface our fancy text console(s) use to talk to lower level 
@@ -142,6 +143,10 @@ impl TextConsole for SimpleConsole {
 
     fn set_color(&mut self, color: ColorCode) {
         self.color = color;
+    }
+
+    fn get_color(&self) -> ColorCode {
+        self.color
     }
 }
 

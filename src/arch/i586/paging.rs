@@ -397,8 +397,7 @@ impl PageDirectory {
         let num_frames = unsafe { MEM_SIZE >> 12 };
         let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), true) };
 
-        #[cfg(debug_messages)]
-        log!("tables_physical alloc @ {:#x}", tables_physical.pointer);
+        debug!("tables_physical alloc @ {:#x}", tables_physical.pointer);
 
         for i in 0..1024 {
             unsafe {
@@ -485,8 +484,7 @@ impl PageDirectory {
     /// switch global page directory to this page directory
     pub fn switch_to(&self) {
         unsafe {
-            #[cfg(debug_messages)]
-            log!("switching to page table @ phys {:#x}", self.tables_physical_addr);
+            debug!("switching to page table @ phys {:#x}", self.tables_physical_addr);
 
             asm!(
                 "mov cr3, {0}",
@@ -523,8 +521,7 @@ unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
         dir.alloc_frame(page, false, true); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
 
-    #[cfg(debug_messages)]
-    log!("mapped {:#x} - {:#x}", start, end);
+    debug!("mapped {:#x} - {:#x}", start, end);
 }
 
 /// our page directory
@@ -535,37 +532,30 @@ pub unsafe fn init() {
     // calculate placement addr for kmalloc calls
     PLACEMENT_ADDR = (&kernel_end as *const _) as usize - LINKED_BASE; // we need a physical address for this
 
-    #[cfg(debug_messages)]
-    {
-        log!("kernel end @ {:#x}, linked @ {:#x}", (&kernel_end as *const _) as usize, LINKED_BASE);
-        log!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
-    }
+    debug!("kernel end @ {:#x}, linked @ {:#x}", (&kernel_end as *const _) as usize, LINKED_BASE);
+    debug!("placement @ {:#x} (phys {:#x})", PLACEMENT_ADDR + LINKED_BASE, PLACEMENT_ADDR);
 
     // set up page directory struct
     let mut dir = PageDirectory::new();
 
     // FIXME: map initial kernel memory allocations as global so they won't be invalidated from TLB flushes
 
-    #[cfg(debug_messages)]
-    log!("mapping kernel memory");
+    debug!("mapping kernel memory");
 
     // map first 4mb of memory to LINKED_BASE
     alloc_region(&mut dir, LINKED_BASE as u32, 0x400000);
 
-    #[cfg(debug_messages)]
-    log!("mapping heap memory");
+    debug!("mapping heap memory");
 
     // map initial memory for kernel heap
     alloc_region(&mut dir, KHEAP_START as u32, KHEAP_INITIAL_SIZE as u32);
 
-    #[cfg(debug_messages)]
-    log!("creating page table");
+    debug!("creating page table");
 
     // holy fuck we need maybeuninit so bad
     PAGE_DIR = Some(dir);
 
-    #[cfg(debug_messages)]
-    log!("switching to page table");
+    debug!("switching to page table");
 
     // switch to our new page directory
     PAGE_DIR.as_ref().unwrap().switch_to();

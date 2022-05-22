@@ -197,10 +197,10 @@ pub unsafe fn init() {
     //TSS.esp0 = 0xc03fffff;
     //TSS.iopb = size_of::<TaskStateSegment>() as u16; // size of TSS
 
-    log!("esp0: {:#x}-{:#x} ({}-{})", (&STACK as *const _) as u32, TSS.esp0, (&STACK as *const _) as u32, TSS.esp0);
+    debug!("esp0: {:#x}-{:#x} ({}-{})", (&STACK as *const _) as u32, TSS.esp0, (&STACK as *const _) as u32, TSS.esp0);
 
     let stack_ptr = (&init_stack as *const _) as u32;
-    log!("init_stack @ {:#x} ({})", stack_ptr, stack_ptr);
+    debug!("init_stack @ {:#x} ({})", stack_ptr, stack_ptr);
 
     // populate GDT
     GDT[1] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv0);
@@ -220,5 +220,5 @@ pub unsafe fn init() {
     let mut address: u32;
     asm!("mov {0}, esp", out(reg) address);
 
-    log!("esp: {:#x} ({})", address, address);
+    debug!("esp: {:#x} ({})", address, address);
 }

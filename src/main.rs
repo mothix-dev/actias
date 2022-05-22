@@ -88,48 +88,20 @@ pub extern fn kmain() -> ! {
     {
         log!("UwU");
 
-        /*unsafe {
-            /*let mut address: u32;
-            asm!("mov {0}, esp", out(reg) address);
-
-            log!("esp: {:#x} ({})", address, address);*/
-
-            let ptr = (user_mode_test as *const ()) as u32;
-            //log!("fn @ {:#x}", ptr);
-
-            enter_user_mode(ptr);
-        }*/
         switch_to_user_mode(user_mode_test as *const _);
-
-        /*loop {
-            log!("UwU");
-        }*/
     }
 
     arch::halt();
 }
 
 use core::arch::asm;
-use tasks::{Task, add_task, get_current_task_mut};
+use tasks::{IN_TASK, Task, add_task, get_current_task_mut};
 use syscalls::Syscalls;
 use arch::{LINKED_BASE, PAGE_SIZE};
 
-/// initialize multitasking
-pub fn start_tasking() {
-    // add kernel task
-    add_task(Task {
-        state: Default::default(),
-        id: 0,
-    });
-
-    // enable interrupts, effectively enabling multitaskins
-    unsafe { asm!("sti"); }
-}
-
-/// set up stack, switch to user mode
-pub fn switch_to_user_mode(ptr: *const u32) {
-    #[cfg(debug_messages)]
-    log!("creating task");
+/// set up stack, multitasking, switch to user mode
+pub fn switch_to_user_mode(ptr: *const u32) -> ! {
+    debug!("creating task");
 
     let mut task = Task {
         state: Default::default(),
@@ -137,24 +109,23 @@ pub fn switch_to_user_mode(ptr: *const u32) {
     };
 
     // map page at top of user memory (right below kernel memory) for stack
-    #[cfg(debug_messages)]
-    log!("allocating stack");
+    debug!("allocating stack");
 
     task.state.alloc_page((LINKED_BASE - PAGE_SIZE) as u32, false, true, false);
 
-    #[cfg(debug_messages)]
-    log!("adding task");
+    debug!("adding task");
     
     add_task(task);
 
-    #[cfg(debug_messages)]
-    log!("switching page tables");
+    debug!("switching page tables");
 
     get_current_task_mut().expect("no tasks?").state.pages.switch_to();
 
     log!("entering user mode @ {:#x}", ptr as u32);
 
     unsafe {
+        IN_TASK = true;
+        
         enter_user_mode(ptr as u32, (LINKED_BASE - 1) as u32); // this also enables interrupts, effectively enabling task switching
     }
 }
@@ -178,12 +149,6 @@ unsafe fn syscall_fork() -> u32 {
 #[inline(always)]
 unsafe fn syscall_test_log(string: &[u8]) {
     asm!("int 0x80", in("eax") Syscalls::TestLog as u32, in("ebx") &string[0] as *const _);
-}
-
-unsafe extern fn user_mode_test_2() {
-    loop {
-        syscall_test_log(b"OwO\0");
-    }
 }
 
 unsafe extern fn user_mode_test() -> ! {
@@ -213,7 +178,7 @@ unsafe extern fn user_mode_test() -> ! {
 
     let proc = syscall_fork();
 
-    loop {
+    /*loop {
         if proc == 0 {
             syscall_test_log(b"UwU\0");
         } else {
@@ -221,6 +186,26 @@ unsafe extern fn user_mode_test() -> ! {
         }
         for _i in 0..1024 * 1024 { // slow things down
             asm!("nop");
+        }
+    }*/
+
+    if proc == 0 {
+        asm!("int3"); // effectively crash this process
+
+        loop {
+            syscall_test_log(b"OwO\0");
+
+            for _i in 0..1024 * 1024 * 128 { // slow things down
+                asm!("nop");
+            }
+        }
+    } else {
+        loop {
+            syscall_test_log(b"UwU\0");
+
+            for _i in 0..1024 * 1024 * 128 { // slow things down
+                asm!("nop");
+            }
         }
     }
 

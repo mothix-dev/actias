@@ -38,9 +38,8 @@ fn int() {
 /// test heap alloc/free
 #[test_case]
 fn heap_alloc_free() {
-    #[cfg(debug_messages)]
     unsafe {
-        log!("{:?}", KERNEL_HEAP);
+        debug!("{:?}", KERNEL_HEAP);
     }
 
     let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
@@ -50,33 +49,25 @@ fn heap_alloc_free() {
 
     let heap_start = heap.index.get(0).0 as usize;
 
-    #[cfg(debug_messages)]
-    log!("heap start @ {:#x}", heap_start);
+    debug!("heap start @ {:#x}", heap_start);
 
     let a = alloc::<u32>(8);
     let b = alloc::<u32>(8);
 
-    #[cfg(debug_messages)]
-    {
-        log!("a (8): {:#x}", a as usize);
-        log!("b (8): {:#x}", b as usize);
-    }
+    debug!("a (8): {:#x}", a as usize);
+    debug!("b (8): {:#x}", b as usize);
 
     #[cfg(debug_messages)]
-    {
-        heap.print_holes();
+    heap.print_holes();
 
-        log!("free a");
-    }
+    debug!("free a");
 
     free(a);
 
     #[cfg(debug_messages)]
-    {
-        heap.print_holes();
+    heap.print_holes();
 
-        log!("free b");
-    }
+    debug!("free b");
 
     free(b);
 
@@ -87,27 +78,22 @@ fn heap_alloc_free() {
 
     let c = alloc::<u32>(12);
 
-    #[cfg(debug_messages)]
-    log!("c (12): {:#x}", c as usize);
+    debug!("c (12): {:#x}", c as usize);
 
     assert!(c == a);
 
     let d = alloc::<u32>(1024);
 
-    #[cfg(debug_messages)]
-    log!("d (1024): {:#x}", d as usize);
+    debug!("d (1024): {:#x}", d as usize);
 
     let e = alloc::<u32>(16);
 
-    #[cfg(debug_messages)]
-    log!("e (16): {:#x}", e as usize);
+    debug!("e (16): {:#x}", e as usize);
 
     #[cfg(debug_messages)]
-    {
-        heap.print_holes();
+    heap.print_holes();
 
-        log!("free c");
-    }
+    debug!("free c");
 
     free(c);
 
@@ -116,27 +102,22 @@ fn heap_alloc_free() {
 
     let f = alloc::<u32>(12);
 
-    #[cfg(debug_messages)]
-    {
-        log!("f (12): {:#x}", f as usize);
+    debug!("f (12): {:#x}", f as usize);
 
-        heap.print_holes();
-    }
+    #[cfg(debug_messages)]
+    heap.print_holes();
 
     assert!(f == c);
 
-    #[cfg(debug_messages)]
-    log!("free e");
+    debug!("free e");
 
     free(e);
 
-    #[cfg(debug_messages)]
-    log!("free d");
+    debug!("free d");
 
     free(d);
 
-    #[cfg(debug_messages)]
-    log!("free f");
+    debug!("free f");
 
     free(f);
 
@@ -147,17 +128,14 @@ fn heap_alloc_free() {
 
     let g = alloc::<u32>(8);
 
-    #[cfg(debug_messages)]
-    {
-        log!("g (8): {:#x}", g as usize);
+    debug!("g (8): {:#x}", g as usize);
 
-        heap.print_holes();
-    }
+    #[cfg(debug_messages)]
+    heap.print_holes();
 
     assert!(g == a);
 
-    #[cfg(debug_messages)]
-    log!("free g");
+    debug!("free g");
     
     free(g);
 
@@ -178,43 +156,36 @@ fn heap_expand_contract() {
     
     let h = alloc::<u32>(2048);
 
-    #[cfg(debug_messages)]
-    log!("h (2048): {:#x}", h as usize);
+    debug!("h (2048): {:#x}", h as usize);
 
     #[cfg(debug_messages)]
     heap.print_holes();
 
-    #[cfg(debug_messages)]
-    log!("size: {:#x}", heap.end_address - heap.start_address);
+    debug!("size: {:#x}", heap.end_address - heap.start_address);
 
     let i = alloc::<u32>(KHEAP_INITIAL_SIZE);
 
-    #[cfg(debug_messages)]
-    log!("i ({}): {:#x}", KHEAP_INITIAL_SIZE, i as usize);
+    debug!("i ({}): {:#x}", KHEAP_INITIAL_SIZE, i as usize);
 
     #[cfg(debug_messages)]
     heap.print_holes();
 
-    #[cfg(debug_messages)]
-    log!("size: {:#x}", heap.end_address - heap.start_address);
+    debug!("size: {:#x}", heap.end_address - heap.start_address);
 
     assert!(heap.end_address - heap.start_address > KHEAP_INITIAL_SIZE);
 
-    #[cfg(debug_messages)]
-    log!("free i");
+    debug!("free i");
 
     free(i);
 
-    #[cfg(debug_messages)]
-    log!("size: {:#x}", heap.end_address - heap.start_address);
+    debug!("size: {:#x}", heap.end_address - heap.start_address);
 
     #[cfg(debug_messages)]
     heap.print_holes();
 
     assert!(heap.end_address - heap.start_address == HEAP_MIN_SIZE);
 
-    #[cfg(debug_messages)]
-    log!("free h");
+    debug!("free h");
 
     free(h);
 
@@ -231,21 +202,18 @@ fn heap_alloc_align() {
             let before = heap.index.get(0).0 as usize;
             let before_size = (unsafe { &*heap.index.get(0).0 }).size;
 
-            #[cfg(debug_messages)]
-            log!("before: addr @ {:#x}, size {:#x}", before, before_size);
+            debug!("before: addr @ {:#x}, size {:#x}", before, before_size);
 
             let alignment = 1 << i;
             let ptr = alloc_aligned::<u8>(size, alignment);
             //let ptr = alloc::<u8>(size);
 
+            debug!("({}): {:#x} % {} == {}", size, ptr as usize, alignment, (ptr as usize) % alignment);
+
             #[cfg(debug_messages)]
-            {
-                log!("({}): {:#x} % {} == {}", size, ptr as usize, alignment, (ptr as usize) % alignment);
+            heap.print_holes();
 
-                heap.print_holes();
-
-                log!("free");
-            }
+            debug!("free");
 
             free(ptr);
 
@@ -267,29 +235,24 @@ fn heap_alloc_align_2() {
 
     let h = alloc::<u32>(2048);
 
-    #[cfg(debug_messages)]
-    log!("h (2048): {:#x}", h as usize);
+    debug!("h (2048): {:#x}", h as usize);
 
     for size in 1..32 {
         for i in 0..16 {
             let before = heap.index.get(0).0 as usize;
             let before_size = (unsafe { &*heap.index.get(0).0 }).size;
 
-            #[cfg(debug_messages)]
-            log!("before: addr @ {:#x}, size {:#x}", before, before_size);
+            debug!("before: addr @ {:#x}, size {:#x}", before, before_size);
 
             let alignment = 1 << i;
             let ptr = alloc_aligned::<u8>(size, alignment);
-            //let ptr = alloc::<u8>(size);
 
-            #[cfg(debug_messages)]
-            log!("({}): {:#x} % {} == {}", size, ptr as usize, alignment, (ptr as usize) % alignment);
+            debug!("({}): {:#x} % {} == {}", size, ptr as usize, alignment, (ptr as usize) % alignment);
 
             #[cfg(debug_messages)]
             heap.print_holes();
 
-            #[cfg(debug_messages)]
-            log!("free");
+            debug!("free");
             
             free(ptr);
 
@@ -301,8 +264,7 @@ fn heap_alloc_align_2() {
         }
     }
 
-    #[cfg(debug_messages)]
-    log!("free h");
+    debug!("free h");
 
     free(h);
 
@@ -335,8 +297,7 @@ fn vec() {
     vec.push(9);
     vec.push(15);
 
-    #[cfg(debug_messages)]
-    log!("{:?}", vec);
+    debug!("{:?}", vec);
 
     assert!(vec.len() == 4);
 }

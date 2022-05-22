@@ -15,6 +15,12 @@ pub static mut TASKS: Vec<Task> = Vec::new();
 /// what task we're currently on
 pub static mut CURRENT_TASK: usize = 0;
 
+/// whether we're currently running a task
+pub static mut IN_TASK: bool = false;
+
+/// whether the current task was terminated before next task switch
+pub static mut CURRENT_TERMINATED: bool = false;
+
 /// get a reference to the next task to switch to
 pub fn get_next_task() -> Option<&'static Task> {
     unsafe {
@@ -56,5 +62,18 @@ pub fn switch_tasks() {
 pub fn add_task(task: Task) {
     unsafe {
         TASKS.push(task);
+    }
+}
+
+/// remove existing task
+pub fn remove_task(id: usize) {
+    unsafe {
+        if id < TASKS.len() {
+            TASKS.remove(id);
+        }
+        if id == CURRENT_TASK {
+            CURRENT_TASK = (CURRENT_TASK - 1) % TASKS.len();
+            CURRENT_TERMINATED = true;
+        }
     }
 }
