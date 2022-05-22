@@ -165,7 +165,7 @@ unsafe extern fn user_mode_test() -> ! {
 
     *ptr = 621;
 
-    if syscall_fork() == 0 {
+    if syscall_fork() != 0 {
         syscall_test_log(b"parent\0");
 
         if *ptr == 621 {
@@ -183,7 +183,7 @@ unsafe extern fn user_mode_test() -> ! {
 
     let proc = syscall_fork();
 
-    if proc == 0 {
+    if proc != 0 {
         for _i in 0..8 {
             syscall_test_log(b"OwO\0");
 

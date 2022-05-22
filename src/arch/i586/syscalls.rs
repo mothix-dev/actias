@@ -35,7 +35,7 @@ pub fn test_log(regs: &mut SyscallRegisters) {
 }
 
 /// forks task
-/// sets ebx to 0 in parent task, 1 in child task
+/// sets ebx to the child pid in parent task, 0 in child task
 pub fn fork(regs: &mut SyscallRegisters) {
     unsafe { IN_TASK = false; }
 
@@ -45,12 +45,12 @@ pub fn fork(regs: &mut SyscallRegisters) {
     let new_task =
         match fork_task(unsafe { CURRENT_TASK }) {
             Ok(task) => task,
-            Err(msg) => panic!("could not fork task: {}", msg),
+            Err(msg) => panic!("could not fork task: {}", msg), // do we really want to bring the whole system down if we can't fork a process?
         };
 
     // identify parent and child tasks
-    regs.ebx = 0;
-    new_task.state.registers.ebx = 1;
+    regs.ebx = new_task.id.try_into().unwrap();
+    new_task.state.registers.ebx = 0;
 
     unsafe { IN_TASK = true; }
 }
