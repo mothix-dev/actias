@@ -30,27 +30,24 @@ pub mod arch;
 #[cfg(target_platform = "ibmpc")]
 pub mod platform;
 
-/// Exception handling (panic)
 pub mod unwind;
 
-/// Logging code
 mod logging;
 
-/// text mode console
-mod console;
+pub mod console;
 
-/// memory management
 pub mod mm;
 
-/// various utility things
 pub mod util;
+
+pub mod tasks;
+pub mod syscalls;
+
+pub mod vfs;
 
 /// tests
 #[cfg(test)]
 pub mod test;
-
-pub mod tasks;
-pub mod syscalls;
 
 // we need this to effectively use our heap
 extern crate alloc;
@@ -187,15 +184,17 @@ unsafe extern fn user_mode_test() -> ! {
     let proc = syscall_fork();
 
     if proc == 0 {
-        asm!("int3"); // effectively crash this process
-
-        loop {
+        for _i in 0..8 {
             syscall_test_log(b"OwO\0");
 
             for _i in 0..1024 * 1024 * 128 { // slow things down
                 asm!("nop");
             }
         }
+
+        asm!("int3"); // effectively crash this process
+
+        loop {}
     } else {
         loop {
             syscall_test_log(b"UwU\0");

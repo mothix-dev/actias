@@ -145,9 +145,11 @@ pub fn kill_task(id: usize) -> Result<(), &'static str> {
     // TODO: signals, etc
 
     if let Some(task) = get_task(id) {
+        let pid = task.id;
+        
         remove_task(id);
 
-        log!("task {} (pid {}) exited", id, task.id);
+        log!("task {} (pid {}) exited", id, pid);
 
         Ok(())
     } else {
@@ -186,10 +188,10 @@ pub fn fork_task(id: usize) -> Result<&'static mut Task, &'static str> {
     state.copy_on_write_from(&mut current.state.pages, 0, kernel_start);
     state.copy_pages_from(dir, kernel_start, 1024);
     
+    // create new task with provided state
     let task = Task::from_state(state);
     let id = task.id;
 
-    // create new task with provided state
     add_task(task);
 
     // return reference to new task

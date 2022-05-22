@@ -12,19 +12,19 @@ pub struct Task {
 impl Task {
     /// creates a new task
     pub fn new() -> Self {
-        unsafe { TOTAL_TASKS += 1; }
-        Self {
-            state: Default::default(),
-            id: unsafe { TOTAL_TASKS },
-        }
+        Self::from_state(Default::default())
     }
 
     /// creates a new task with the provided state
     pub fn from_state(state: TaskState) -> Self {
         unsafe { TOTAL_TASKS += 1; }
+
+        let id = unsafe { TOTAL_TASKS };
+
+        debug!("new task with pid {}", id);
+
         Self {
-            state,
-            id: unsafe { TOTAL_TASKS },
+            state, id,
         }
     }
 }
