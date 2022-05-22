@@ -47,18 +47,19 @@ pub enum QemuExitCode {
 }
 
 /// exit qemu with code, useful for unit testing
-pub fn exit_qemu(exit_code: QemuExitCode) {
+pub fn exit_qemu(exit_code: QemuExitCode) -> ! {
     unsafe {
-        outb(0xf4, exit_code as u8)
+        outb(0xf4, exit_code as u8);
+        crate::arch::halt();
     }
 }
 
-pub fn exit_failure() {
+pub fn exit_failure() -> ! {
     log!("exiting (failed)");
     exit_qemu(QemuExitCode::Failed);
 }
 
-pub fn exit_success() {
+pub fn exit_success() -> ! {
     log!("exiting (success)");
     exit_qemu(QemuExitCode::Success);
 }

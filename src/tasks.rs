@@ -9,6 +9,32 @@ pub struct Task {
     pub id: usize,
 }
 
+impl Task {
+    /// creates a new task
+    pub fn new() -> Self {
+        unsafe { TOTAL_TASKS += 1; }
+        Self {
+            state: Default::default(),
+            id: unsafe { TOTAL_TASKS },
+        }
+    }
+
+    /// creates a new task with the provided state
+    pub fn from_state(state: TaskState) -> Self {
+        unsafe { TOTAL_TASKS += 1; }
+        Self {
+            state,
+            id: unsafe { TOTAL_TASKS },
+        }
+    }
+}
+
+impl Default for Task {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// list of all available tasks
 pub static mut TASKS: Vec<Task> = Vec::new();
 
@@ -20,6 +46,9 @@ pub static mut IN_TASK: bool = false;
 
 /// whether the current task was terminated before next task switch
 pub static mut CURRENT_TERMINATED: bool = false;
+
+/// count of all task ids, we don't want duplicates
+pub static mut TOTAL_TASKS: usize = 0;
 
 /// get a reference to the next task to switch to
 pub fn get_next_task() -> Option<&'static Task> {
@@ -76,4 +105,23 @@ pub fn remove_task(id: usize) {
             CURRENT_TERMINATED = true;
         }
     }
+}
+
+/// get reference to existing task
+pub fn get_task(id: usize) -> Option<&'static Task> {
+    unsafe {
+        TASKS.get(id)
+    }
+}
+
+/// get mutable reference to existing task
+pub fn get_task_mut(id: usize) -> Option<&'static mut Task> {
+    unsafe {
+        TASKS.get_mut(id)
+    }
+}
+
+/// get internal id of task with given pid
+pub fn pid_to_id(pid: usize) -> Option<usize> {
+    (unsafe { &mut TASKS }).iter().position(|task| task.id == pid)
 }

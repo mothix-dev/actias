@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 use crate::mm::heap::{KERNEL_HEAP, alloc, alloc_aligned, free, KHEAP_INITIAL_SIZE, HEAP_MIN_SIZE};
-use crate::console::{ColorCode, TextConsole, get_console};
+use crate::console::{ColorCode, get_console};
 use alloc::vec::Vec;
 
 /// custom test runner to run all tests
@@ -38,9 +38,7 @@ fn int() {
 /// test heap alloc/free
 #[test_case]
 fn heap_alloc_free() {
-    unsafe {
-        debug!("{:?}", KERNEL_HEAP);
-    }
+    debug!("{:?}", unsafe { KERNEL_HEAP });
 
     let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
 

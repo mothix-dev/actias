@@ -7,12 +7,11 @@ use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
 use super::halt;
 use crate::console::{get_console, PANIC_COLOR, ColorCode};
-use crate::tasks::{CURRENT_TASK, IN_TASK, get_current_task_mut, remove_task};
+use crate::tasks::{CURRENT_TASK, IN_TASK, get_current_task, get_current_task_mut};
 use super::paging::{PAGE_DIR, PageTableFlags};
 use crate::arch::{MEM_TOP, PAGE_SIZE};
-
-#[cfg(test)]
 use crate::platform::debug::exit_failure;
+use crate::arch::tasks::exit_current_task;
 
 /// IDT flags
 #[bitmask(u8)]
@@ -221,19 +220,6 @@ impl fmt::Display for PageFaultErrorCode {
     }
 }
 
-pub unsafe fn terminate_current_task() -> ! {
-    remove_task(CURRENT_TASK);
-
-    log!("task {} terminated", CURRENT_TASK);
-
-    // idle the cpu until the next task switch
-    IN_TASK = true;
-
-    loop {
-        asm!("sti; hlt");
-    }
-}
-
 unsafe fn generic_exception(name: &str, frame: ExceptionStackFrame) {
     let was_in_task = IN_TASK;
     IN_TASK = false;
@@ -248,14 +234,16 @@ unsafe fn generic_exception(name: &str, frame: ExceptionStackFrame) {
                 Default::default()
             };
 
-        log!("{} in task {} @ {:#x}", name, CURRENT_TASK, frame.instruction_pointer);
+        let id = get_current_task().unwrap().id;
+
+        log!("{} in task {} (pid {}) @ {:#x}", name, CURRENT_TASK, id, frame.instruction_pointer);
         log!("{:#?}", frame);
 
         if let Some(console) = get_console() {
             console.set_color(old_color);
         }
 
-        terminate_current_task();
+        exit_current_task();
     } else {
         if let Some(console) = get_console() {
             console.set_color(PANIC_COLOR);
@@ -264,10 +252,11 @@ unsafe fn generic_exception(name: &str, frame: ExceptionStackFrame) {
         log!("PANIC: {} @ {:#x}", name, frame.instruction_pointer);
         log!("{:#?}", frame);
         
-        #[cfg(test)]
-        exit_failure();
-
-        halt();
+        if cfg!(test) {
+            exit_failure();
+        } else {
+            halt();
+        }
     }
 }
 
@@ -285,26 +274,29 @@ unsafe fn generic_exception_error_code(name: &str, frame: ExceptionStackFrame, e
                 Default::default()
             };
 
-        log!("{} in task {} @ {:#x}, error code {:#x}", name, CURRENT_TASK, frame.instruction_pointer, error_code);
-        log!("{:#?}", frame);
+        let id = get_current_task().unwrap().id;
+
+        log!("{} in task {} (pid {}) @ {:#x}, error code {:#x}", name, CURRENT_TASK, id, frame.instruction_pointer, error_code);
+        debug!("{:#?}", frame);
 
         if let Some(console) = get_console() {
             console.set_color(old_color);
         }
 
-        terminate_current_task();
+        exit_current_task();
     } else {
         if let Some(console) = get_console() {
             console.set_color(PANIC_COLOR);
         }
 
         log!("PANIC: {} @ {:#x}, error code {:#x}", name, frame.instruction_pointer, error_code);
-        log!("{:#?}", frame);
+        debug!("{:#?}", frame);
         
-        #[cfg(test)]
-        exit_failure();
-
-        halt();
+        if cfg!(test) {
+            exit_failure();
+        } else {
+            halt();
+        }
     }
 }
 
@@ -350,12 +342,13 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     }
 
     log!("PANIC: double fault @ {:#x}", frame.instruction_pointer);
-    log!("{:#?}", frame);
+    debug!("{:#?}", frame);
 
-    #[cfg(test)]
-    exit_failure();
-
-    halt();
+    if cfg!(test) {
+        exit_failure();
+    } else {
+        halt();
+    }
 }
 
 /// exception handler for invalid tss

@@ -399,10 +399,8 @@ impl PageDirectory {
 
         debug!("tables_physical alloc @ {:#x}", tables_physical.pointer);
 
-        for i in 0..1024 {
-            unsafe {
-                (*tables_physical.pointer)[i] = 0;
-            }
+        for phys in (unsafe { *tables_physical.pointer }).iter_mut() {
+            *phys = 0;
         }
 
         PageDirectory {
@@ -427,8 +425,8 @@ impl PageDirectory {
                 let ptr = kmalloc(1024 * 4, true); // page table entries are 32 bits (4 bytes) wide
                 self.tables[table_idx] = ptr.pointer;
                 let table_ref = &mut (*self.tables[table_idx]);
-                for i in 0..1024 {
-                    table_ref.entries[i].0 = 0;
+                for entry in table_ref.entries.iter_mut() {
+                    entry.0 = 0;
                 }
                 (*self.tables_physical)[table_idx] = (ptr.phys_addr | 0x7) as u32; // present, read/write, user/supervisor
                 

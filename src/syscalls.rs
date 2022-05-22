@@ -6,4 +6,6 @@ pub enum Syscalls {
     IsComputerOn = 0,
     TestLog,
     Fork,
+    Exit,
+    GetPID,
 }

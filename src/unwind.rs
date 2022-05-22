@@ -11,8 +11,6 @@
  */
 
 use crate::console::{get_console, PANIC_COLOR};
-
-#[cfg(test)]
 use crate::platform::debug::exit_failure;
 
 #[panic_handler]
@@ -34,10 +32,11 @@ pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
         log!("PANIC: file='{}', line={} :: ?", file, line);
     }
     
-    #[cfg(test)]
-    exit_failure();
-
-    crate::arch::halt();
+    if cfg!(test) {
+        exit_failure();
+    } else {
+        crate::arch::halt();
+    }
 }
 
 #[allow(non_camel_case_types)]

@@ -1,6 +1,6 @@
 pub mod heap;
 
 pub fn init() {
-    log!("initializing heap");
+    debug!("initializing heap");
     heap::init();
 }

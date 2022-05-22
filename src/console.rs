@@ -161,7 +161,7 @@ impl core::fmt::Write for SimpleConsole {
 static mut CONSOLE: Option<Box<dyn TextConsole + Sync>> = None;
 
 pub fn init() {
-    log!("initializing console");
+    debug!("initializing console");
     unsafe {
         CONSOLE = Some(Box::new(create_console()));
     }

@@ -2,10 +2,20 @@
 
 use core::ffi::CStr;
 use super::ints::SyscallRegisters;
-use crate::tasks::{Task, get_current_task_mut, add_task, TASKS};
-use crate::arch::tasks::TaskState;
-use crate::arch::paging::{PAGE_DIR, PageDirectory};
-use crate::arch::LINKED_BASE;
+use crate::tasks::{IN_TASK, CURRENT_TASK, get_current_task, get_current_task_mut};
+use crate::arch::tasks::{exit_current_task, fork_task};
+
+/// amount of syscalls we have
+pub const NUM_SYSCALLS: usize = 5;
+
+/// list of function pointers for all available syscalls
+pub static SYSCALL_LIST: [fn(&mut SyscallRegisters) -> (); NUM_SYSCALLS] = [
+    is_computer_on,
+    test_log,
+    fork,
+    exit,
+    get_pid,
+];
 
 /// is computer on?
 /// sets ebx to 1 (true) if computer is on
@@ -16,52 +26,49 @@ pub fn is_computer_on(regs: &mut SyscallRegisters) {
 
 /// test syscall- logs a string
 pub fn test_log(regs: &mut SyscallRegisters) {
+    unsafe { IN_TASK = false; }
+
     let string = unsafe { CStr::from_ptr(regs.ebx as *const _).to_string_lossy().into_owned() };
     log!("{}", string);
+
+    unsafe { IN_TASK = true; }
 }
 
 /// forks task
 /// sets ebx to 0 in parent task, 1 in child task
 pub fn fork(regs: &mut SyscallRegisters) {
-    let current = get_current_task_mut().expect("no tasks?");
+    unsafe { IN_TASK = false; }
 
     // save state of current task
-    current.state.save(regs);
+    get_current_task_mut().unwrap().state.save(regs);
 
-    // create new task state
-    let mut state = TaskState {
-        registers: current.state.registers,
-        pages: PageDirectory::new(),
-        page_updates: current.state.page_updates,
-    };
+    let new_task =
+        match fork_task(unsafe { CURRENT_TASK }) {
+            Ok(task) => task,
+            Err(msg) => panic!("could not fork task: {}", msg),
+        };
 
-    // copy kernel pages, copy parent task's pages as copy on write
-    let kernel_start = LINKED_BASE >> 22;
-    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
-    state.copy_on_write_from(&mut current.state.pages, 0, kernel_start);
-    state.copy_pages_from(dir, kernel_start, 1024);
-
-    // set ebx of child
-    state.registers.ebx = 1;
-
-    add_task(Task {
-        id: unsafe { TASKS.len() },
-        state,
-    });
-
-    // set ebx contents of parent
+    // identify parent and child tasks
     regs.ebx = 0;
+    new_task.state.registers.ebx = 1;
+
+    unsafe { IN_TASK = true; }
 }
 
-/// amount of syscalls we have
-pub const NUM_SYSCALLS: usize = 3;
+/// exits task
+pub fn exit(_regs: &mut SyscallRegisters) {
+    exit_current_task();
+}
 
-/// list of function pointers for all available syscalls
-pub static SYSCALL_LIST: [fn(&mut SyscallRegisters) -> (); NUM_SYSCALLS] = [
-    is_computer_on,
-    test_log,
-    fork,
-];
+/// gets id of current task
+/// sets ebx to id
+pub fn get_pid(regs: &mut SyscallRegisters) {
+    unsafe { IN_TASK = false; }
+
+    regs.ebx = get_current_task().expect("no current task").id.try_into().unwrap();
+
+    unsafe { IN_TASK = true; }
+}
 
 /// platform-specific syscall handler
 #[no_mangle]
@@ -72,4 +79,3 @@ pub unsafe extern "C" fn syscall_handler(mut regs: SyscallRegisters) {
         SYSCALL_LIST[syscall_num](&mut regs);
     }
 }
-

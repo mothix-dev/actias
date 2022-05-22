@@ -39,10 +39,10 @@ pub fn halt() -> ! {
 
 /// initialize sub-modules
 pub fn init() {
-    log!("initializing GDT");
+    debug!("initializing GDT");
     unsafe { gdt::init(); }
-    log!("initializing interrupts");
+    debug!("initializing interrupts");
     unsafe { ints::init(); }
-    log!("initializing paging");
+    debug!("initializing paging");
     unsafe { paging::init(); }
 }

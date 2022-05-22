@@ -85,13 +85,7 @@ pub extern fn kmain() -> ! {
     }
 
     #[cfg(not(test))]
-    {
-        log!("UwU");
-
-        switch_to_user_mode(user_mode_test as *const _);
-    }
-
-    arch::halt();
+    switch_to_user_mode(user_mode_test as *const _);
 }
 
 use core::arch::asm;
@@ -103,10 +97,7 @@ use arch::{LINKED_BASE, PAGE_SIZE};
 pub fn switch_to_user_mode(ptr: *const u32) -> ! {
     debug!("creating task");
 
-    let mut task = Task {
-        state: Default::default(),
-        id: 0,
-    };
+    let mut task = Task::new();
 
     // map page at top of user memory (right below kernel memory) for stack
     debug!("allocating stack");
@@ -139,6 +130,11 @@ unsafe fn syscall_is_computer_on() -> bool {
 }
 
 #[inline(always)]
+unsafe fn syscall_test_log(string: &[u8]) {
+    asm!("int 0x80", in("eax") Syscalls::TestLog as u32, in("ebx") &string[0] as *const _);
+}
+
+#[inline(always)]
 unsafe fn syscall_fork() -> u32 {
     let result: u32;
     asm!("int 0x80", in("eax") Syscalls::Fork as u32, out("ebx") result);
@@ -147,18 +143,28 @@ unsafe fn syscall_fork() -> u32 {
 }
 
 #[inline(always)]
-unsafe fn syscall_test_log(string: &[u8]) {
-    asm!("int 0x80", in("eax") Syscalls::TestLog as u32, in("ebx") &string[0] as *const _);
+#[allow(clippy::empty_loop)]
+unsafe fn syscall_exit() {
+    asm!("int 0x80", in("eax") Syscalls::Exit as u32);
+    loop {}
+}
+
+#[inline(always)]
+unsafe fn syscall_get_pid() -> u32 {
+    let result: u32;
+    asm!("int 0x80", in("eax") Syscalls::GetPID as u32, out("ebx") result);
+
+    result
 }
 
 unsafe extern fn user_mode_test() -> ! {
-    /*if syscall_is_computer_on() {
+    if syscall_is_computer_on() {
         syscall_test_log(b"computer is on\0");
     } else {
         syscall_test_log(b"computer is not on\0");
-    }*/
+    }
 
-    /*let ptr = (LINKED_BASE - PAGE_SIZE) as *mut u16;
+    let ptr = (LINKED_BASE - PAGE_SIZE) as *mut u16;
 
     *ptr = 621;
 
@@ -174,20 +180,11 @@ unsafe extern fn user_mode_test() -> ! {
         if *ptr == 621 {
             syscall_test_log(b"child: preserved\0");
         }
-    }*/
+
+        syscall_exit();
+    }
 
     let proc = syscall_fork();
-
-    /*loop {
-        if proc == 0 {
-            syscall_test_log(b"UwU\0");
-        } else {
-            syscall_test_log(b"OwO\0");
-        }
-        for _i in 0..1024 * 1024 { // slow things down
-            asm!("nop");
-        }
-    }*/
 
     if proc == 0 {
         asm!("int3"); // effectively crash this process
@@ -209,5 +206,5 @@ unsafe extern fn user_mode_test() -> ! {
         }
     }
 
-    loop {}
+    //loop {}
 }
