@@ -517,7 +517,7 @@ unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
     let end = start + size;
 
     for i in (start..end).step_by(PAGE_SIZE) {
-        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+        let page = dir.get_page(i, true).unwrap();
         dir.alloc_frame(page, false, true); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
 

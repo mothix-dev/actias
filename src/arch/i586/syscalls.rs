@@ -26,7 +26,7 @@ pub fn fork(regs: &mut SyscallRegisters) {
     let current = get_current_task_mut().expect("no tasks?");
 
     // save state of current task
-    current.state.save(&regs);
+    current.state.save(regs);
 
     // create new task state
     let mut state = TaskState {

@@ -24,10 +24,11 @@ macro_rules! log {
 /// works exactly the same as log!, however requres debug_messages to be set at compile time
 macro_rules! debug {
     ( $($arg:tt)* ) => ({
-        // Import the Writer trait (required by write!)
-        use core::fmt::Write;
-        
         #[cfg(debug_messages)]
-        let _ = write!(&mut crate::logging::Writer::get(module_path!()), $($arg)*);
+        {
+            // Import the Writer trait (required by write!)
+            use core::fmt::Write;
+            let _ = write!(&mut crate::logging::Writer::get(module_path!()), $($arg)*);
+        }
     })
 }

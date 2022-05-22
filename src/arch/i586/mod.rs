@@ -14,6 +14,8 @@ pub const KHEAP_START: usize = LINKED_BASE + 0x10000000;
 pub const PAGE_SIZE: usize = 0x1000;
 pub const INV_PAGE_SIZE: usize = !(PAGE_SIZE - 1);
 
+pub const MAX_STACK_FRAMES: usize = 1024;
+
 pub static mut MEM_SIZE: usize = 128 * 1024 * 1024; // TODO: get actual RAM size from BIOS
 
 /// initialize paging, just cleanly map our kernel to 3gb
@@ -24,6 +26,7 @@ pub extern fn x86_prep_page_table(buf: &mut [u32; 1024]) {
     }
 }
 
+/// halt system
 pub fn halt() -> ! {
     log!("halting");
 
@@ -34,6 +37,7 @@ pub fn halt() -> ! {
     }
 }
 
+/// initialize sub-modules
 pub fn init() {
     log!("initializing GDT");
     unsafe { gdt::init(); }

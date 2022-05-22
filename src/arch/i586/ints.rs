@@ -221,13 +221,130 @@ impl fmt::Display for PageFaultErrorCode {
     }
 }
 
+pub unsafe fn terminate_current_task() -> ! {
+    remove_task(CURRENT_TASK);
+
+    log!("task {} terminated", CURRENT_TASK);
+
+    // idle the cpu until the next task switch
+    IN_TASK = true;
+
+    loop {
+        asm!("sti; hlt");
+    }
+}
+
+unsafe fn generic_exception(name: &str, frame: ExceptionStackFrame) {
+    let was_in_task = IN_TASK;
+    IN_TASK = false;
+
+    if was_in_task {
+        let old_color: ColorCode = 
+            if let Some(console) = get_console() {
+                let color = console.get_color();
+                console.set_color(PANIC_COLOR);
+                color
+            } else {
+                Default::default()
+            };
+
+        log!("{} in task {} @ {:#x}", name, CURRENT_TASK, frame.instruction_pointer);
+        log!("{:#?}", frame);
+
+        if let Some(console) = get_console() {
+            console.set_color(old_color);
+        }
+
+        terminate_current_task();
+    } else {
+        if let Some(console) = get_console() {
+            console.set_color(PANIC_COLOR);
+        }
+
+        log!("PANIC: {} @ {:#x}", name, frame.instruction_pointer);
+        log!("{:#?}", frame);
+        
+        #[cfg(test)]
+        exit_failure();
+
+        halt();
+    }
+}
+
+unsafe fn generic_exception_error_code(name: &str, frame: ExceptionStackFrame, error_code: u32) {
+    let was_in_task = IN_TASK;
+    IN_TASK = false;
+
+    if was_in_task {
+        let old_color: ColorCode = 
+            if let Some(console) = get_console() {
+                let color = console.get_color();
+                console.set_color(PANIC_COLOR);
+                color
+            } else {
+                Default::default()
+            };
+
+        log!("{} in task {} @ {:#x}, error code {:#x}", name, CURRENT_TASK, frame.instruction_pointer, error_code);
+        log!("{:#?}", frame);
+
+        if let Some(console) = get_console() {
+            console.set_color(old_color);
+        }
+
+        terminate_current_task();
+    } else {
+        if let Some(console) = get_console() {
+            console.set_color(PANIC_COLOR);
+        }
+
+        log!("PANIC: {} @ {:#x}, error code {:#x}", name, frame.instruction_pointer, error_code);
+        log!("{:#?}", frame);
+        
+        #[cfg(test)]
+        exit_failure();
+
+        halt();
+    }
+}
+
+/// exception handler for divide by zero
+unsafe extern "x86-interrupt" fn divide_by_zero_handler(frame: ExceptionStackFrame) {
+    generic_exception("divide by zero", frame);
+}
+
 /// exception handler for breakpoint
 unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) {
     log!("breakpoint @ {:#x}", frame.instruction_pointer);
 }
 
+/// exception handler for overflow
+unsafe extern "x86-interrupt" fn overflow_handler(frame: ExceptionStackFrame) {
+    log!("overflow @ {:#x}", frame.instruction_pointer);
+}
+
+/// exception handler for bound range exceeded
+unsafe extern "x86-interrupt" fn bound_range_handler(frame: ExceptionStackFrame) {
+    generic_exception("bound range exceeded", frame);
+}
+
+/// exception handler for invalid opcode
+unsafe extern "x86-interrupt" fn invalid_opcode_handler(frame: ExceptionStackFrame) {
+    generic_exception("invalid opcode", frame);
+}
+
+/// exception handler for device not available
+unsafe extern "x86-interrupt" fn device_not_available_handler(frame: ExceptionStackFrame) {
+    generic_exception("device not available", frame);
+}
+
 /// exception handler for double fault
 unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, _error_code: u32) {
+    IN_TASK = false;
+
+    // switch to kernel page directory
+    PAGE_DIR.as_mut().unwrap().switch_to();
+
     if let Some(console) = get_console() {
         console.set_color(PANIC_COLOR);
     }
@@ -241,14 +358,38 @@ unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame
     halt();
 }
 
+/// exception handler for invalid tss
+unsafe extern "x86-interrupt" fn invalid_tss_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("invalid TSS", frame, error_code);
+}
+
+/// exception handler for segment not present
+unsafe extern "x86-interrupt" fn segment_not_present_handler(frame: ExceptionStackFrame, error_code: u32) {
+    // TODO: swap/page file
+
+    generic_exception_error_code("segment not present", frame, error_code);
+}
+
+/// exception handler for stack-segment fault
+unsafe extern "x86-interrupt" fn stack_segment_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("stack-segment fault", frame, error_code);
+}
+
+/// exception handler for general protection fault
+unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("general protection fault", frame, error_code);
+}
+
 /// exception handler for page fault
-unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, error_code: PageFaultErrorCode) {
+unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
+    // no longer in task, indicate as such
     let was_in_task = IN_TASK;
     IN_TASK = false;
 
+    // get reference to kernel page directory
     let dir = PAGE_DIR.as_mut().unwrap();
 
     // switch to kernel's page directory
@@ -266,7 +407,9 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
                 let flags: PageTableFlags = page.get_flags().into();
 
                 // is read/write flag unset and copy on write flag set?
-                if u16::from(flags & PageTableFlags::ReadWrite) == 0 && u16::from(flags & PageTableFlags::CopyOnWrite) > 0 {
+                if flags & PageTableFlags::ReadWrite == 0 && flags & PageTableFlags::CopyOnWrite != 0 {
+                    // this is a terrible copy on write implementation but at least it works
+
                     debug!("copy on write");
 
                     // get physical address of page
@@ -322,72 +465,55 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
             true // panic
         }
     {
-        if let Some(console) = get_console() {
-            console.set_color(PANIC_COLOR);
-        }
-
-        log!("PANIC: page fault @ {:#x}, error code {}", frame.instruction_pointer, error_code);
-        log!("accessed address {:#x}", address);
-        log!("{:#?}", frame);
-        
-        #[cfg(test)]
-        exit_failure();
-
-        halt();
+        generic_exception_error_code("page fault", frame, error_code);
     }
 
     IN_TASK = was_in_task;
 }
 
-/// exception handler for general protection fault
-unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
-    let was_in_task = IN_TASK;
-    IN_TASK = false;
+/// exception handler for x87 floating point exception
+unsafe extern "x86-interrupt" fn x87_fpu_exception_handler(frame: ExceptionStackFrame) {
+    generic_exception("x87 FPU exception", frame);
+}
 
-    if was_in_task {
-        let old_color: ColorCode = 
-            if let Some(console) = get_console() {
-                let color = console.get_color();
-                console.set_color(PANIC_COLOR);
-                color
-            } else {
-                Default::default()
-            };
+/// exception handler for alignment check
+unsafe extern "x86-interrupt" fn alignment_check_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("alignment check", frame, error_code);
+}
 
-        log!("general protection fault in task {} @ {:#x}, error code {:#x}", CURRENT_TASK, frame.instruction_pointer, error_code);
-        log!("{:#?}", frame);
+/// exception handler for SIMD floating point exception
+unsafe extern "x86-interrupt" fn simd_fpu_exception_handler(frame: ExceptionStackFrame) {
+    generic_exception("SIMD FPU exception", frame);
+}
 
-        remove_task(CURRENT_TASK);
+/// exception handler for virtualization exception
+unsafe extern "x86-interrupt" fn virtualization_exception_handler(frame: ExceptionStackFrame) {
+    generic_exception("virtualization exception", frame);
+}
 
-        log!("task {} terminated", CURRENT_TASK);
+/// exception handler for control protection exception
+unsafe extern "x86-interrupt" fn control_protection_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("control protection exception", frame, error_code);
+}
 
-        if let Some(console) = get_console() {
-            console.set_color(old_color);
-        }
+/// exception handler for hypervisor injection exception
+unsafe extern "x86-interrupt" fn hypervisor_injection_handler(frame: ExceptionStackFrame) {
+    generic_exception("hypervisor injection exception", frame);
+}
 
-        // idle the cpu until the next task switch
-        IN_TASK = true;
-        asm!("sti; hlt");
-    } else {
-        if let Some(console) = get_console() {
-            console.set_color(PANIC_COLOR);
-        }
+/// exception handler for VMM communication exception
+unsafe extern "x86-interrupt" fn vmm_exception_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("VMM commuication exception", frame, error_code);
+}
 
-        log!("PANIC: general protection fault @ {:#x}, error code {:#x}", frame.instruction_pointer, error_code);
-        log!("{:#?}", frame);
-        
-        #[cfg(test)]
-        exit_failure();
-
-        halt();
-    }
-
-    IN_TASK = was_in_task;
+/// exception handler for security exception
+unsafe extern "x86-interrupt" fn security_exception_handler(frame: ExceptionStackFrame, error_code: u32) {
+    generic_exception_error_code("security exception", frame, error_code);
 }
 
 /// structure of registers saved in the syscall handler
 #[repr(C, packed(32))]
-#[derive(Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone)]
 pub struct SyscallRegisters {
     pub ds: u32,
     pub edi: u32,
@@ -405,41 +531,34 @@ pub struct SyscallRegisters {
     pub ss: u32,
 }
 
-impl Default for SyscallRegisters {
-    fn default() -> Self {
-        Self {
-            ds: 0,
-            edi: 0,
-            esi: 0,
-            ebp: 0,
-            esp: 0,
-            ebx: 0,
-            edx: 0,
-            ecx: 0,
-            eax: 0,
-            eip: 0,
-            cs: 0,
-            eflags: 0,
-            useresp: 0,
-            ss: 0,
-        }
-    }
-}
-
 extern "C" {
     /// wrapper around syscall_handler to save and restore state
     fn syscall_handler_wrapper() -> !;
 }
 
-// todo: more handlers
-
 /// set up idt(r) and enable interrupts
 pub unsafe fn init() {
     // set up exception handlers
+    IDT[Exceptions::DivideByZero as usize] = IDTEntry::new(divide_by_zero_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::Overflow as usize] = IDTEntry::new(overflow_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::BoundRangeExceeded as usize] = IDTEntry::new(bound_range_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::InvalidOpcode as usize] = IDTEntry::new(invalid_opcode_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::DeviceNotAvailable as usize] = IDTEntry::new(device_not_available_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::DoubleFault as usize] = IDTEntry::new(double_fault_handler as *const (), IDTFlags::Exception);
-    IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::InvalidTSS as usize] = IDTEntry::new(invalid_tss_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::SegmentNotPresent as usize] = IDTEntry::new(segment_not_present_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::StackSegmentFault as usize] = IDTEntry::new(stack_segment_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::GeneralProtectionFault as usize] = IDTEntry::new(general_protection_fault_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::FloatingPoint as usize] = IDTEntry::new(x87_fpu_exception_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::AlignmentCheck as usize] = IDTEntry::new(alignment_check_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::SIMDFloatingPoint as usize] = IDTEntry::new(simd_fpu_exception_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::Virtualization as usize] = IDTEntry::new(virtualization_exception_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::ControlProtection as usize] = IDTEntry::new(control_protection_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::HypervisorInjection as usize] = IDTEntry::new(hypervisor_injection_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::VMMCommunication as usize] = IDTEntry::new(vmm_exception_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::Security as usize] = IDTEntry::new(security_exception_handler as *const (), IDTFlags::Exception);
 
     IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
 
@@ -449,6 +568,4 @@ pub unsafe fn init() {
     // load interrupt handler table
     let idt_desc = DescriptorTablePointer::new(&IDT);
     lidt(&idt_desc);
-
-    //asm!("sti"); // just in case lidt() doesn't enable interrupts
 }

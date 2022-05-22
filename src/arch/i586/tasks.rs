@@ -27,7 +27,7 @@ impl TaskState {
     }
 
     pub fn save(&mut self, regs: &SyscallRegisters) {
-        self.registers = regs.clone();
+        self.registers = *regs;
     }
 
     pub fn load(&self, regs: &mut SyscallRegisters) {
@@ -67,7 +67,7 @@ impl TaskState {
                     // disable write flag, enable copy on write
                     let mut flags: PageTableFlags = orig_page.get_flags().into();
                     
-                    if u16::from(flags & PageTableFlags::ReadWrite) > 0 {
+                    if flags & PageTableFlags::ReadWrite != 0 {
                         flags &= !PageTableFlags::ReadWrite;
                         flags |= PageTableFlags::CopyOnWrite;
                     }
@@ -98,7 +98,7 @@ impl TaskState {
     pub fn free_page(&mut self, addr: u32) {
         assert!(addr % PAGE_SIZE as u32 == 0, "address is not page aligned");
 
-        if let Some(page) = self.pages.get_page(addr.try_into().unwrap(), false) {
+        if let Some(page) = self.pages.get_page(addr, false) {
             unsafe {
                 let dir = PAGE_DIR.as_mut().unwrap();
 

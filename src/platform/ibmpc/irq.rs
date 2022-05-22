@@ -2,7 +2,7 @@
 
 use super::io::outb;
 use crate::arch::ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters};
-use crate::tasks::{CURRENT_TERMINATED, get_current_task_mut, switch_tasks};
+use crate::tasks::{IN_TASK, CURRENT_TERMINATED, get_current_task_mut, switch_tasks};
 use crate::arch::paging::PAGE_DIR;
 use crate::arch::LINKED_BASE;
 
@@ -10,12 +10,14 @@ use crate::arch::LINKED_BASE;
 unsafe extern "x86-interrupt" fn stub_handler(_frame: ExceptionStackFrame) {
     log!("unknown interrupt");
 
+    // reset master interrupt controller
     outb(0x20, 0x20);
 }
 
 unsafe extern "x86-interrupt" fn stub_handler_2(_frame: ExceptionStackFrame) {
     log!("unknown interrupt");
 
+    // reset slave interrupt controller
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -25,10 +27,18 @@ unsafe extern "x86-interrupt" fn stub_handler_2(_frame: ExceptionStackFrame) {
 pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     // TODO: task priority, task execution timers
 
-    // save state of current task
+    // we don't want to preempt the kernel- all sorts of bad things could happen
+    if !IN_TASK {
+        outb(0x20, 0x20);
+        return;
+    }
+
+    // has the current task been terminated?
     if CURRENT_TERMINATED {
+        // it no longer exists, so all we need to do is clear the flag
         CURRENT_TERMINATED = false;
     } else {
+        // save state of current task
         get_current_task_mut().expect("no tasks?").state.save(&regs);
     }
 
@@ -81,6 +91,7 @@ extern "C" {
     fn timer_handler_wrapper() -> !;
 }
 
+// init IRQs
 pub unsafe fn init() {
     // set up interrupt controller
     outb(0x20, 0x11);
@@ -94,8 +105,8 @@ pub unsafe fn init() {
     outb(0x21, 0x0);
     outb(0xa1, 0x0);
 
-    // initialize timer at 200 Hz
-    init_timer(200);
+    // initialize timer at 100 Hz
+    init_timer(100);
 
     // set up interrupt stubs
     for i in 33..40 {
@@ -106,5 +117,6 @@ pub unsafe fn init() {
         IDT[i] = IDTEntry::new(stub_handler_2 as *const (), IDTFlags::External);
     }
 
+    // set up interrupt handler for PIT
     IDT[32] = IDTEntry::new(timer_handler_wrapper as *const (), IDTFlags::External);
 }

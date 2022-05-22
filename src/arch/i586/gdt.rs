@@ -180,10 +180,6 @@ unsafe fn flush_tss() {
     asm!("ltr ax", in("ax") index);
 }
 
-extern "C" {
-    static init_stack: u32;
-}
-
 /// initialize GDT and TSS
 pub unsafe fn init() {
     // populate TSS
@@ -196,11 +192,6 @@ pub unsafe fn init() {
     TSS.gs = 0x13;
     //TSS.esp0 = 0xc03fffff;
     //TSS.iopb = size_of::<TaskStateSegment>() as u16; // size of TSS
-
-    debug!("esp0: {:#x}-{:#x} ({}-{})", (&STACK as *const _) as u32, TSS.esp0, (&STACK as *const _) as u32, TSS.esp0);
-
-    let stack_ptr = (&init_stack as *const _) as u32;
-    debug!("init_stack @ {:#x} ({})", stack_ptr, stack_ptr);
 
     // populate GDT
     GDT[1] = GDTEntry::new(0, 0x000fffff, GDTFlags::CodePriv0);
@@ -216,9 +207,4 @@ pub unsafe fn init() {
     lgdt(&gdt_desc);
 
     flush_tss();
-
-    let mut address: u32;
-    asm!("mov {0}, esp", out(reg) address);
-
-    debug!("esp: {:#x} ({})", address, address);
 }
