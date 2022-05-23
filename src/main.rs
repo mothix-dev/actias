@@ -4,6 +4,7 @@
 #![no_main]
 
 #![feature(panic_info_message)]
+
 #![feature(abi_x86_interrupt)]
 
 #![feature(custom_test_frameworks)]
@@ -15,6 +16,8 @@
 #![allow(clippy::missing_safety_doc)] // dont really want to write safety docs yet
 
 #![feature(core_c_str)]
+
+#![feature(arbitrary_enum_discriminant)] // we want errno to be numbered properly yet have a custom string field
 
 /// Macros, need to be loaded before everything else due to how rust parses
 #[macro_use]
@@ -44,6 +47,8 @@ pub mod tasks;
 pub mod syscalls;
 
 pub mod vfs;
+
+pub mod errno;
 
 /// tests
 #[cfg(test)]
@@ -185,9 +190,13 @@ unsafe extern fn user_mode_test() -> ! {
 
     if proc != 0 {
         for _i in 0..8 {
+            for _i in 0..1024 * 1024 * 64 { // slow things down
+                asm!("nop");
+            }
+
             syscall_test_log(b"OwO\0");
 
-            for _i in 0..1024 * 1024 * 128 { // slow things down
+            for _i in 0..1024 * 1024 * 64 {
                 asm!("nop");
             }
         }
