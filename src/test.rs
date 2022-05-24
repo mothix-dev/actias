@@ -69,7 +69,7 @@ fn int() {
 /// test heap alloc/free
 #[test_case]
 fn heap_alloc_free() {
-    debug!("{:?}", unsafe { KERNEL_HEAP });
+    debug!("{:?}", unsafe { KERNEL_HEAP.as_ref() });
 
     let heap = unsafe { KERNEL_HEAP.as_mut().unwrap() };
 

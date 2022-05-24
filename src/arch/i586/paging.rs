@@ -397,7 +397,7 @@ impl PageDirectory {
         let num_frames = unsafe { MEM_SIZE >> 12 };
         let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), true) };
 
-        debug!("tables_physical alloc @ {:#x}", tables_physical.pointer);
+        debug!("tables_physical alloc @ {:#x}", tables_physical.pointer as usize);
 
         for phys in (unsafe { *tables_physical.pointer }).iter_mut() {
             *phys = 0;

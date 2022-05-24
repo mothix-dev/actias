@@ -516,10 +516,12 @@ static ALLOCATOR: CustomAlloc = CustomAlloc;
 
 unsafe impl GlobalAlloc for CustomAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        debug!("global alloc: {:?}", layout);
         alloc_aligned::<u8>(layout.size(), layout.align())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        debug!("global dealloc: {:#x}, {:?}", ptr as usize, _layout);
         free::<u8>(ptr)
     }
 }
