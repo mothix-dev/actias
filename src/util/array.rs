@@ -1,10 +1,23 @@
 //! array utilities
 
-use core::mem::size_of;
-use core::ops::{Index, IndexMut, Drop};
-use core::cmp::{Ordering, PartialOrd};
-use core::marker::Copy;
-use crate::mm::heap::{alloc, free};
+use core::{
+    mem::size_of,
+    ops::{
+        Index,
+        IndexMut,
+        Drop
+    },
+    cmp::{
+        Ordering,
+        PartialOrd
+    },
+    marker::Copy,
+};
+use crate::mm::heap::{
+    alloc,
+    free
+};
+use alloc::vec::Vec;
 
 /// raw pointer as array of unknown size
 #[derive(Debug)]
@@ -252,5 +265,82 @@ impl BitSet {
             }
         }
         None
+    }
+}
+
+/// simple bitset that uses vec internally, dynamic size
+pub struct VecBitSet {
+    /// array of bytes that the bitset uses
+    pub array: Vec<u32>,
+
+    /// amount of bits we have set
+    pub bits_used: usize,
+}
+
+impl VecBitSet {
+    /// create a bitset and allocate memory for it
+    pub const fn new() -> Self {
+        Self {
+            array: Vec::new(), // always round up
+            bits_used: 0,
+        }
+    }
+
+    /// set a bit in the set
+    pub fn set(&mut self, addr: usize) {
+        let idx = addr / 32; // TODO: maybe replace with bitwise to improve speed? does it even matter on x86?
+        let off = addr % 32;
+        
+        if idx >= self.array.len() { // grow vec if necessary
+            for _i in 0..self.array.len() - idx {
+                self.array.push(0);
+            }
+        }
+
+        if (self.array[idx] & 1 << off) == 0 { // if bit is unset, increment bits_used and set bit
+            self.bits_used += 1;
+            self.array[idx] |= 1 << off;
+        }
+    }
+
+    /// clear a bit in the set
+    pub fn clear(&mut self, addr: usize) {
+        let idx = addr / 32;
+        let off = addr % 32;
+
+        if idx < self.array.len() {
+            if (self.array[idx] & 1 << off) > 0 { // if bit is set, decrement bits_used and clear bit
+                self.bits_used -= 1;
+                self.array[idx] &= !(1 << off);
+            }
+        }
+    }
+
+    /// check if bit is set
+    pub fn test(&self, addr: usize) -> bool {
+        let idx = addr / 32;
+        let off = addr % 32;
+
+        if idx >= self.array.len() {
+            false
+        } else {
+            (self.array[idx] & 1 << off) > 0
+        }
+    }
+
+    /// gets first unset bit
+    pub fn first_unset(&self) -> usize {
+        for i in 0..self.array.len() {
+            let f = self.array[i];
+            if f != 0xffffffff { // only test individual bits if there are bits to be tested
+                for j in 0..32 {
+                    let bit = 1 << j;
+                    if f & bit == 0 {
+                        return i * 32 + j;
+                    }
+                }
+            }
+        }
+        self.array.len() * 32
     }
 }

@@ -46,7 +46,7 @@ pub mod util;
 pub mod tasks;
 pub mod syscalls;
 
-pub mod vfs;
+pub mod fs;
 
 pub mod errno;
 
@@ -78,6 +78,8 @@ pub extern fn kmain() -> ! {
 
     console::init(); // init console
 
+    fs::init(); // init filesystems
+
     log!("{} v{}", NAME, VERSION);
 
     #[cfg(test)]
@@ -107,14 +109,14 @@ pub fn switch_to_user_mode(ptr: *const u32) -> ! {
     task.state.alloc_page((LINKED_BASE - PAGE_SIZE) as u32, false, true, false);
 
     debug!("adding task");
-    
+
     add_task(task);
 
     debug!("switching page tables");
 
     get_current_task_mut().expect("no tasks?").state.pages.switch_to();
 
-    log!("entering user mode @ {:#x}", ptr as u32);
+    debug!("entering user mode @ {:#x}", ptr as u32);
 
     unsafe {
         IN_TASK = true;
