@@ -1,29 +1,25 @@
 //! array utilities
 
 use core::{
-    mem::size_of,
-    ops::{
-        Index,
-        IndexMut,
-        Drop
-    },
-    cmp::{
-        Ordering,
-        PartialOrd
-    },
+    cmp::{Ordering, PartialOrd},
     marker::Copy,
+    mem::size_of,
+    ops::{Index, IndexMut, Drop},
 };
-use crate::mm::heap::{
-    alloc,
-    free
+//use crate::mm::heap::{alloc, free};
+use alloc::{
+    alloc::{Layout, alloc, dealloc},
+    vec::Vec,
 };
-use alloc::vec::Vec;
 
 /// raw pointer as array of unknown size
 #[derive(Debug)]
 pub struct RawPtrArray<T> {
     /// raw pointer to memory
     array: *mut T,
+
+    /// layout used when allocating our array, optional since we may not have allocated
+    layout: Option<Layout>,
 
     /// size of array
     pub size: usize,
@@ -32,10 +28,27 @@ pub struct RawPtrArray<T> {
 impl<T> RawPtrArray<T> {
     /// create new raw ptr array and allocate memory for it
     pub fn new(size: usize) -> Self {
-        // allocate memory
-        let array = alloc::<T>(size * size_of::<T>());
+        // get alignment for type
+        let align = Layout::new::<T>().align();
 
-        Self::place_at(array, size)
+        // create layout to allocate with
+        let layout = Layout::from_size_align(size * size_of::<T>(), align).unwrap();
+
+        // allocate memory
+        let array = unsafe { alloc(layout) };
+
+        // zero out array
+        for i in 0..size * size_of::<T>() {
+            unsafe {
+                (*array.add(i)) = 0;
+            }
+        }
+
+        Self {
+            array: array as *mut T,
+            layout: Some(layout),
+            size,
+        }
     }
 
     /// create new raw pointer array at provided address
@@ -49,6 +62,7 @@ impl<T> RawPtrArray<T> {
 
         Self {
             array: addr,
+            layout: None,
             size,
         }
     }
@@ -75,7 +89,12 @@ impl<T> IndexMut<usize> for RawPtrArray<T> {
 
 impl<T> Drop for RawPtrArray<T> {
     fn drop(&mut self) {
-        free(self.array);
+        // deallocate our memory if necessary
+        if let Some(layout) = self.layout {
+            unsafe {
+                dealloc(self.array as *mut u8, layout);
+            }
+        }
     }
 }
 
@@ -292,7 +311,7 @@ impl VecBitSet {
         let off = addr % 32;
         
         if idx >= self.array.len() { // grow vec if necessary
-            for _i in 0..self.array.len() - idx {
+            for _i in 0..=self.array.len() - idx {
                 self.array.push(0);
             }
         }

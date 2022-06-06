@@ -1,9 +1,11 @@
 //! i586 syscall handlers
 
 use core::ffi::CStr;
+use crate::{
+    tasks::{IN_TASK, CURRENT_TASK, get_current_task, get_current_task_mut},
+    arch::tasks::{exit_current_task, fork_task},
+};
 use super::ints::SyscallRegisters;
-use crate::tasks::{IN_TASK, CURRENT_TASK, get_current_task, get_current_task_mut};
-use crate::arch::tasks::{exit_current_task, fork_task};
 
 /// amount of syscalls we have
 pub const NUM_SYSCALLS: usize = 5;

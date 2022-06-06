@@ -8,10 +8,7 @@ use alloc::{
     boxed::Box,
     string::String,
 };
-use super::tree::{
-    File,
-    Directory,
-};
+use super::tree::{File, Directory};
 
 /// standard unix permissions bit field
 #[bitmask(u16)]

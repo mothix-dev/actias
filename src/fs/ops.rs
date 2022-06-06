@@ -3,22 +3,12 @@
 use alloc::{
     vec::Vec,
     boxed::Box,
-    string::{
-        String,
-        ToString,
-    },
+    string::{String, ToString},
 };
 use crate::errno::Errno;
 use super::{
-    tree::{
-        File,
-        LockType,
-        get_file_from_path,
-    },
-    vfs::{
-        Permissions,
-        ROOT_DIR,
-    },
+    tree::{File, LockType, get_file_from_path},
+    vfs::{Permissions, ROOT_DIR},
     MAX_FILES,
 };
 use crate::util::array::VecBitSet;

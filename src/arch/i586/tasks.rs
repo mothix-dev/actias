@@ -1,10 +1,18 @@
 //! low level i586-specific task switching
 
-use super::ints::SyscallRegisters;
-use super::paging::{PAGE_DIR, PageDirectory, PageTableFlags};
-use crate::arch::{PAGE_SIZE, LINKED_BASE};
+use super::{
+    ints::SyscallRegisters,
+    paging::{PAGE_DIR, PageDirectory, PageTableFlags},
+};
 use core::arch::asm;
-use crate::tasks::{CURRENT_TASK, IN_TASK, Task, remove_task, get_task, get_task_mut, add_task, pid_to_id};
+use crate::{
+    arch::{PAGE_SIZE, LINKED_BASE},
+    tasks::{
+        CURRENT_TASK, IN_TASK,
+        Task,
+        remove_task, get_task, get_task_mut, add_task, pid_to_id,
+    },
+};
 
 pub struct TaskState {
     pub registers: SyscallRegisters,

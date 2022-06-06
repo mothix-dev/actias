@@ -1,9 +1,11 @@
 //! POSIX errno
 
 use core::fmt;
+use alloc::string::ToString;
 
 /// error number and message
 #[repr(u32)]
+#[derive(Copy, Clone)]
 pub enum Errno {
     TooBig = 0,             // E2BIG
     PermissionDenied,       // EACCES
@@ -173,5 +175,11 @@ impl fmt::Display for Errno {
                 Self::Other(str) =>             str,
             }
         )
+    }
+}
+
+impl fmt::Debug for Errno {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Errno: {}", self.to_string())
     }
 }

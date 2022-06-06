@@ -1,17 +1,25 @@
 //! i586 low level interrupt/exception handling
 
-use core::arch::asm;
-use core::fmt;
+use core::{
+    arch::asm,
+    fmt,
+};
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lidt};
 use bitmask_enum::bitmask;
-use super::halt;
-use crate::console::{get_console, PANIC_COLOR, ColorCode};
-use crate::tasks::{CURRENT_TASK, IN_TASK, get_current_task, get_current_task_mut};
-use super::paging::{PAGE_DIR, PageTableFlags};
-use crate::arch::{MEM_TOP, PAGE_SIZE};
-use crate::platform::debug::exit_failure;
-use crate::arch::tasks::exit_current_task;
+use super::{
+    halt,
+    paging::{PAGE_DIR, PageTableFlags},
+};
+use crate::{
+    arch::{
+        MEM_TOP, PAGE_SIZE,
+        tasks::exit_current_task,
+    },
+    console::{PANIC_COLOR, ColorCode, get_console},
+    platform::debug::exit_failure,
+    tasks::{CURRENT_TASK, IN_TASK, get_current_task, get_current_task_mut},
+};
 
 /// IDT flags
 #[bitmask(u8)]

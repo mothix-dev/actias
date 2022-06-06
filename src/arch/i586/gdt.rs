@@ -3,8 +3,10 @@
 use aligned::{Aligned, A16};
 use x86::dtables::{DescriptorTablePointer, lgdt};
 use bitmask_enum::bitmask;
-use core::arch::asm;
-use core::mem::size_of;
+use core::{
+    arch::asm,
+    mem::size_of,
+};
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 

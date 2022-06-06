@@ -10,8 +10,10 @@
  * its use, and the author takes no liability.
  */
 
-use crate::console::{get_console, PANIC_COLOR};
-use crate::platform::debug::exit_failure;
+use crate::{
+    console::{get_console, PANIC_COLOR},
+    platform::debug::exit_failure,
+};
 
 #[panic_handler]
 pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {

@@ -122,7 +122,7 @@ pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Op
     } else {
         let dir_name = dirname(path);
         let file_name = basename(path)?;
-        let directory = get_directory_from_path(dir, &dir_name)?;
+        let directory = if dir_name.len() > 0 { get_directory_from_path(dir, &dir_name)? } else { dir };
         for file in directory.get_files_mut() {
             if file.get_name() == file_name {
                 return Some(file);
@@ -144,13 +144,13 @@ pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) 
             if let Some(name) = path.pop() {
                 for directory in dir.get_directories_mut() {
                     if directory.get_name() == name {
-                        return walk_tree(dir, path);
+                        return walk_tree(directory, path);
                     }
                 }
 
                 None
             } else {
-                None
+                Some(dir)
             }
         }
 

@@ -1,10 +1,14 @@
 //! IRQs
 
 use super::io::outb;
-use crate::arch::ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters};
-use crate::tasks::{IN_TASK, CURRENT_TERMINATED, get_current_task_mut, switch_tasks};
-use crate::arch::paging::PAGE_DIR;
-use crate::arch::LINKED_BASE;
+use crate::{
+    arch::{
+        LINKED_BASE,
+        ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters},
+        paging::PAGE_DIR,
+    },
+    tasks::{IN_TASK, CURRENT_TERMINATED, get_current_task_mut, switch_tasks},
+};
 
 /// interrupt stub handler for unhandled interrupts
 unsafe extern "x86-interrupt" fn stub_handler(_frame: ExceptionStackFrame) {

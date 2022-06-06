@@ -1,19 +1,20 @@
 //! x86 non-PAE paging
 // warning: this code is terrible. do not do anything like this
 
-use core::arch::asm;
-use core::fmt;
+use core::{
+    arch::asm,
+    default::Default,
+    fmt,
+    mem::size_of,
+};
 use bitmask_enum::bitmask;
-use core::default::Default;
-use core::mem::size_of;
-use crate::util::array::BitSet;
-use crate::mm::heap::{KERNEL_HEAP, KHEAP_INITIAL_SIZE};
+use crate::{
+    util::array::BitSet,
+    mm::KHEAP_INITIAL_SIZE,
+};
 use super::{MEM_SIZE, LINKED_BASE, KHEAP_START, PAGE_SIZE};
 
 extern "C" {
-    /// page directory, created in boot.S
-    //static page_directory: [PageDirEntry; 1024]; // TODO: consider putting this array in a struct?
-
     /// located at end of kernel, used for calculating placement address
     static kernel_end: u32;
 }
@@ -335,14 +336,14 @@ pub struct MallocResult<T> {
 
 /// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
 unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
-    if let Some(heap) = KERNEL_HEAP.as_mut() {
+    /*if let Some(heap) = KERNEL_HEAP.as_mut() {
         let pointer = heap.alloc::<T>(size, if align { PAGE_SIZE } else { 0 });
         let phys_addr = virt_to_phys(pointer as usize).unwrap();
 
         MallocResult {
             pointer, phys_addr,
         }
-    } else {
+    } else {*/
         if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
             PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
             PLACEMENT_ADDR += 0x1000; // increment by 4k- we don't want to overwrite things
@@ -360,7 +361,7 @@ unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
             pointer: (tmp + LINKED_BASE) as *mut T,
             phys_addr: tmp,
         }
-    }
+    //}
 }
 
 /// struct for page table
