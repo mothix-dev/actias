@@ -1,1 +1,5 @@
+# build artifacts go here
 target
+
+# The test utility generates this file, but it's not really source
+test.log
