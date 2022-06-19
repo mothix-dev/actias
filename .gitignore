@@ -1,5 +1,7 @@
 # build artifacts go here
 target
+image.iso
+iso_root
 
 # The test utility generates this file, but it's not really source
 test.log
