@@ -342,8 +342,10 @@ unsafe extern "x86-interrupt" fn device_not_available_handler(frame: ExceptionSt
 unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, _error_code: u32) {
     IN_TASK = false;
 
-    // switch to kernel page directory
-    PAGE_DIR.as_mut().unwrap().switch_to();
+    // switch to kernel's page directory if initialized
+    if let Some(dir) = PAGE_DIR.as_mut() {
+        dir.switch_to();
+    }
 
     if let Some(console) = get_console() {
         console.set_color(PANIC_COLOR);
@@ -390,16 +392,18 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     let was_in_task = IN_TASK;
     IN_TASK = false;
 
-    // get reference to kernel page directory
-    let dir = PAGE_DIR.as_mut().unwrap();
-
-    // switch to kernel's page directory
-    dir.switch_to();
+    // switch to kernel's page directory if initialized
+    if let Some(dir) = PAGE_DIR.as_mut() {
+        dir.switch_to();
+    }
 
     // rust moment
     if was_in_task &&
         // is there a current task?
         if let Some(current) = get_current_task_mut() {
+            // get reference to kernel's page directory
+            let dir = PAGE_DIR.as_mut().unwrap();
+
             // get current task's page entry for given address
             if let Some(page) = current.state.pages.get_page(address, false) {
                 let page = &mut *page;

@@ -66,12 +66,15 @@ impl PageTableEntry {
     }
 }
 
-impl fmt::Display for PageTableEntry {
+impl fmt::Debug for PageTableEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "PageTableEntry {{")?;
-        writeln!(f, "    address: {:#x},", self.0 & 0xfffff000)?;
-        writeln!(f, "    flags: {}", PageTableFlags((self.0 & 0x0fff) as u16))?;
-        write!(f, "}}")
+        let addr = (self.0 & 0xfffff000) as *const u8;
+        let flags = PageTableFlags((self.0 & 0x0fff) as u16);
+
+        f.debug_struct("PageTableEntry")
+         .field("address", &addr)
+         .field("flags", &flags)
+         .finish()
     }
 }
 
@@ -216,12 +219,15 @@ impl PageDirEntry {
     }
 }
 
-impl fmt::Display for PageDirEntry {
+impl fmt::Debug for PageDirEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "PageDirEntry {{")?;
-        writeln!(f, "    address: {:#x},", self.0 & 0xfffff000)?;
-        writeln!(f, "    flags: {}", PageDirFlags((self.0 & 0x0fff) as u16))?;
-        write!(f, "}}")
+        let addr = (self.0 & 0xfffff000) as *const u8;
+        let flags = PageDirFlags((self.0 & 0x0fff) as u16);
+
+        f.debug_struct("PageDirEntry")
+         .field("address", &addr)
+         .field("flags", &flags)
+         .finish()
     }
 }
 
@@ -455,6 +461,8 @@ impl PageDirectory {
                 page2.set_flags(flags);
                 page2.set_address((idx << 12) as u32);
                 self.page_updates = self.page_updates.wrapping_add(1); // we want this to be able to overflow
+
+                //debug!("allocated frame {:?}", page2);
 
                 Some((idx << 12) as u32)
             } else {
