@@ -59,8 +59,8 @@ pub struct MultibootInfo {
     /// we don't use this
     syms: [u32; 4],
 
-    mmap_length: u32,
-    mmap_addr: *mut u8,
+    /// allows us to iterate over memory mappings
+    mmap: MemMapList,
 
     drives_length: u32,
     drives_addr: *mut u8,
@@ -132,6 +132,15 @@ impl MultibootInfo {
             None
         }
     }
+
+    /// gets iterator over memory map entries if available
+    pub fn get_mmap(&self) -> Option<MemMapIter> {
+        if self.is_flag_set(6).unwrap() {
+            Some(MemMapIter::new(&self.mmap))
+        } else {
+            None
+        }
+    }
 }
 
 /// module provided by bootloader
@@ -170,6 +179,142 @@ impl fmt::Debug for MultibootModule {
          .field("end", &self.end)
          .field("string", &self.get_string())
          .finish()
+    }
+}
+
+/// different types of memory mapping
+#[repr(u32)]
+#[derive(Debug)]
+pub enum MappingKind {
+    /// unknown memory map
+    Unknown = 0,
+
+    /// available (presumably for system use)
+    Available,
+
+    /// reserved, not available
+    Reserved,
+
+    /// not sure, maybe either used by ACPI but reclaimable by the OS? maybe the other way around
+    AcpiReclaimable,
+
+    /// non volatile storage?
+    NVS,
+
+    /// bad memory
+    BadRAM,
+}
+
+/// struct that describes a region of memory and what it's used for
+#[repr(C)]
+#[derive(Debug)]
+pub struct MemMapEntry {
+    /// size of struct, can be greater than the default 20 bytes
+    pub size: u32,
+
+    /// base address of memory mapping
+    pub base_addr: u64,
+
+    /// how many bytes are mapped
+    pub length: u64,
+    
+    /// what kind of mapping is this
+    pub kind: MappingKind,
+}
+
+/// wrapper struct for list of memory mappings
+#[repr(C)]
+#[derive(Debug)]
+pub struct MemMapList {
+    /// number of memory mappings
+    length: u32,
+
+    /// pointer to start of array of memory mappings, stored as a sort of linked list
+    addr: *mut u8,
+}
+
+/// allows us to iterate over a list of memory mappings. we can't create an array since the entries don't have a fixed size
+#[derive(Debug)]
+pub struct MemMapIter<'a> {
+    /// list we're iterating over
+    list: &'a MemMapList,
+
+    /// our index in the list
+    index: usize,
+
+    /// address of the last entry we've accessed
+    current_addr: *const MemMapEntry,
+
+    /// whether we're on the first entry of the list and should just spit it out without moving to the next one
+    first_entry: bool,
+
+    /// whether we've finished iterating over the list, set when self.index >= self.list.length or we run into a zero sized entry
+    finished: bool,
+}
+
+impl<'a> MemMapIter<'a> {
+    /// creates a new iterator over a memory map list
+    pub fn new(list: &'a MemMapList) -> Self {
+        // maybe make unsafe since we can't guarantee that the memory map entries will be there?
+        Self {
+            list,
+            index: 0,
+            current_addr: (list.addr as usize + LINKED_BASE) as *const MemMapEntry, // get virtual address, assuming it's in the first 4 mb
+            first_entry: true,
+            finished: false,
+        }
+    }
+}
+
+impl<'a> Iterator for MemMapIter<'a> {
+    type Item = &'a MemMapEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished { // have we finished iterating?
+            None
+        } else if self.first_entry && self.list.length > 0 { // return the first element of the list before moving on
+            self.first_entry = false;
+
+            let entry = unsafe { &*self.current_addr };
+
+            if entry.size > 0 {
+                Some(entry)
+            } else {
+                self.finished = true;
+
+                None
+            }
+        } else if !self.first_entry && self.index + 1 < self.list.length as usize {
+            let size = unsafe { (&*self.current_addr).size } + 4; // add 4 to the size to account for the size value in the struct
+
+            self.current_addr = (self.current_addr as u32 + size) as *const MemMapEntry;
+
+            self.index += 1;
+
+            let entry = unsafe { &*self.current_addr };
+
+            if entry.size > 0 {
+                Some(entry)
+            } else {
+                self.finished = true;
+
+                None
+            }
+        } else {
+            self.finished = true;
+            
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.finished {
+            (0, Some(0)) // no more
+        } else {
+            let remaining = self.list.length as usize - self.index - if self.first_entry { 0 } else { 1 }; // how many elements we have remaining
+
+            (0, Some(remaining))
+        }
     }
 }
 
@@ -228,15 +373,23 @@ pub fn init() {
     debug!("modules: {:?}", modules);
 
     if let Some(modules) = modules {
-        if modules.len() > 0 {
-            let module = &modules[0];
-
+        for (index, module) in modules.iter().enumerate() {
             let contents = match core::str::from_utf8(module.get_contents()) {
                 Ok(string) => string,
                 Err(_) => "Invalid",
             };
 
-            debug!("module 0: {:?}: \"{}\"", module, contents);
+            debug!("module {}: {:?}: \"{}\"", index, module, contents);
+        }
+    }
+
+    let mut mmap_iter = info.get_mmap();
+
+    debug!("mmap: {:?}", mmap_iter);
+
+    if let Some(mmap_iter) = (&mut mmap_iter).as_mut() {
+        for region in mmap_iter {
+            debug!("{:?}", region);
         }
     }
 
