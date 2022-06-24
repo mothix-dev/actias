@@ -1,7 +1,6 @@
 //! POSIX errno
 
 use core::fmt;
-use alloc::string::ToString;
 
 /// error number and message
 #[repr(u32)]
@@ -180,6 +179,6 @@ impl fmt::Display for Errno {
 
 impl fmt::Debug for Errno {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Errno: {}", self.to_string())
+        write!(f, "Errno: {}", self)
     }
 }

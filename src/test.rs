@@ -153,7 +153,7 @@ impl File for TestFile {
         false
     }
 
-    fn read_at(&self, bytes: &mut [u8], offset: usize) -> Result<usize, Errno> {
+    fn read_at(&self, bytes: &mut [u8], _offset: usize) -> Result<usize, Errno> {
         let size = if bytes.len() > self.contents.len() { self.contents.len() } else { bytes.len() };
         for i in 0..size {
             bytes[i] = self.contents[i];
@@ -282,7 +282,7 @@ fn file_read() {
 
     log!("reading file @ {}", path);
 
-    let mut file = get_file_from_path(unsafe { TEST_DIR.as_mut().unwrap() }, path).unwrap();
+    let file = get_file_from_path(unsafe { TEST_DIR.as_mut().unwrap() }, path).unwrap();
 
     let mut buf = vec![0; file.get_size()];
     log!("file.read_at returned {:?}", file.read_at(buf.as_mut_slice(), 0));

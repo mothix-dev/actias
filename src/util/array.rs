@@ -5,6 +5,7 @@ use core::{
     marker::Copy,
     mem::size_of,
     ops::{Index, IndexMut, Drop},
+    slice,
 };
 //use crate::mm::heap::{alloc, free};
 use alloc::{
@@ -65,6 +66,16 @@ impl<T> RawPtrArray<T> {
             layout: None,
             size,
         }
+    }
+
+    /// returns a slice representation of this array
+    pub fn to_slice(&self) -> &[T] {
+        unsafe { slice::from_raw_parts(self.array, self.size) }
+    }
+
+    /// returns a mutable slice representation of this array
+    pub fn to_slice_mut(&mut self) -> &mut [T] {
+        unsafe { slice::from_raw_parts_mut(self.array, self.size) }
     }
 }
 
@@ -157,9 +168,10 @@ impl<T: PartialOrd + Copy> OrderedArray<T> {
                 // move every other item in the array over to make room
                 while iterator < self.size {
                     iterator += 1;
-                    let tmp2 = self.array[iterator]; // FIXME: core::mem::swap or core::mem::replace?
+                    /*let tmp2 = self.array[iterator];
                     self.array[iterator] = tmp;
-                    tmp = tmp2;
+                    tmp = tmp2;*/
+                    tmp = core::mem::replace(&mut self.array[iterator], tmp); // this should work? untested
                 }
                 self.size += 1;
             }
@@ -243,7 +255,7 @@ impl BitSet {
 
     /// set a bit in the set
     pub fn set(&mut self, addr: usize) {
-        let idx = addr / 32; // TODO: maybe replace with bitwise to improve speed? does it even matter on x86?
+        let idx = addr / 32;
         let off = addr % 32;
 
         if (self.array[idx] & 1 << off) == 0 { // if bit is unset, increment bits_used and set bit
@@ -307,7 +319,7 @@ impl VecBitSet {
 
     /// set a bit in the set
     pub fn set(&mut self, addr: usize) {
-        let idx = addr / 32; // TODO: maybe replace with bitwise to improve speed? does it even matter on x86?
+        let idx = addr / 32;
         let off = addr % 32;
         
         if idx >= self.array.len() { // grow vec if necessary
@@ -327,11 +339,9 @@ impl VecBitSet {
         let idx = addr / 32;
         let off = addr % 32;
 
-        if idx < self.array.len() {
-            if (self.array[idx] & 1 << off) > 0 { // if bit is set, decrement bits_used and clear bit
-                self.bits_used -= 1;
-                self.array[idx] &= !(1 << off);
-            }
+        if idx < self.array.len() && (self.array[idx] & 1 << off) > 0 { // if bit is set, decrement bits_used and clear bit
+            self.bits_used -= 1;
+            self.array[idx] &= !(1 << off);
         }
     }
 

@@ -117,12 +117,12 @@ pub trait Directory {
 /// gets a file object from the given path
 /// path should not be absolute (i.e. starting with /)
 pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Option<&'a mut Box<dyn File>> {
-    if path.chars().count() == 0 || path.chars().nth(0).unwrap() == '/' { // sanity check
+    if path.chars().count() == 0 || path.starts_with('/') { // sanity check
         None
     } else {
         let dir_name = dirname(path);
         let file_name = basename(path)?;
-        let directory = if dir_name.len() > 0 { get_directory_from_path(dir, &dir_name)? } else { dir };
+        let directory = if !dir_name.is_empty() { get_directory_from_path(dir, &dir_name)? } else { dir };
         for file in directory.get_files_mut() {
             if file.get_name() == file_name {
                 return Some(file);
@@ -136,7 +136,7 @@ pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Op
 /// gets a directory object from the given path
 /// path should not be absolute (i.e. starting with /)
 pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Option<&'a mut Box<dyn Directory>> {
-    if path.chars().count() == 0 || path.chars().nth(0).unwrap() == '/' { // sanity check
+    if path.chars().count() == 0 || path.starts_with('/') { // sanity check
         None
     } else {
         // recurse over tree

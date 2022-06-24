@@ -1,6 +1,8 @@
+//! heap and heap accessories
+
 use crate::arch::{
     KHEAP_START, PAGE_SIZE, INV_PAGE_SIZE, halt,
-    paging::alloc_page,
+    paging::alloc_pages,
 };
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -65,7 +67,7 @@ unsafe impl GlobalAlloc for CustomAlloc {
                         let old_size = heap.size();
                         
                         for i in (old_size..new_size).step_by(PAGE_SIZE) {
-                            alloc_page(heap.bottom() + i, true, true); // supervisor, read/write
+                            alloc_pages(heap.bottom() + i, 1, true, true); // supervisor, read/write
                         }
 
                         // expand heap

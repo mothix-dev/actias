@@ -161,6 +161,7 @@ unsafe fn syscall_get_pid() -> u32 {
     result
 }
 
+#[allow(clippy::empty_loop)]
 unsafe extern fn user_mode_test() -> ! {
     if syscall_is_computer_on() {
         syscall_test_log(b"computer is on\0");

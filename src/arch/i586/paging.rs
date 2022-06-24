@@ -1,6 +1,7 @@
 //! x86 non-PAE paging
 // warning: this code is terrible. do not do anything like this
 
+use alloc::alloc::{Layout, alloc};
 use core::{
     arch::asm,
     default::Default,
@@ -11,6 +12,7 @@ use bitmask_enum::bitmask;
 use crate::{
     util::array::BitSet,
     mm::KHEAP_INITIAL_SIZE,
+    platform::bootloader,
 };
 use super::{MEM_SIZE, LINKED_BASE, KHEAP_START, PAGE_SIZE};
 
@@ -342,14 +344,28 @@ pub struct MallocResult<T> {
 
 /// extremely basic malloc- doesn't support free, only useful for allocating effectively static data
 unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
-    /*if let Some(heap) = KERNEL_HEAP.as_mut() {
-        let pointer = heap.alloc::<T>(size, if align { PAGE_SIZE } else { 0 });
+    if crate::mm::KERNEL_HEAP.is_some() { // can we use the global allocator?
+        debug!("kmalloc: using global allocator");
+
+        // get memory layout for type
+        let layout =
+            if align {
+                Layout::from_size_align(size, PAGE_SIZE).unwrap()
+            } else {
+                Layout::from_size_align(size, Layout::new::<T>().align()).unwrap() // use recommended alignment for this type
+            };
+        
+        let pointer = alloc(layout) as *mut T;
+
+        // get physical address of allocated region
         let phys_addr = virt_to_phys(pointer as usize).unwrap();
 
         MallocResult {
             pointer, phys_addr,
         }
-    } else {*/
+    } else {
+        debug!("kmalloc: using bump allocator");
+
         if align && (PLACEMENT_ADDR & 0xfffff000) > 0 { // if alignment is requested and we aren't already aligned
             PLACEMENT_ADDR &= 0xfffff000; // round down to nearest 4k block
             PLACEMENT_ADDR += 0x1000; // increment by 4k- we don't want to overwrite things
@@ -367,7 +383,7 @@ unsafe fn kmalloc<T>(size: usize, align: bool) -> MallocResult<T> {
             pointer: (tmp + LINKED_BASE) as *mut T,
             phys_addr: tmp,
         }
-    //}
+    }
 }
 
 /// struct for page table
@@ -401,7 +417,7 @@ pub struct PageDirectory {
 impl PageDirectory {
     /// creates a new page directory, allocating memory for it in the process
     pub fn new() -> Self {
-        let num_frames = unsafe { MEM_SIZE >> 12 };
+        let num_frames = unsafe { MEM_SIZE >> 12 }; // FIXME: may have to use 4gb instead of MEM_SIZE if we need to access memory mapped things higher up in the address space
         let tables_physical = unsafe { kmalloc::<[u32; 1024]>(1024 * size_of::<u32>(), true) };
 
         debug!("tables_physical alloc @ {:#x}", tables_physical.pointer as usize);
@@ -414,7 +430,7 @@ impl PageDirectory {
             tables: [core::ptr::null_mut(); 1024],
             tables_physical: tables_physical.pointer, // shit breaks without this lmao
             tables_physical_addr: tables_physical.phys_addr as u32,
-            frame_set: BitSet::place_at(unsafe { kmalloc::<u32>(num_frames / 32 * size_of::<u32>(), false).pointer }, num_frames), // BitSet::new uses the global allocator, which isn't initialized yet!
+            frame_set: BitSet::place_at(unsafe { kmalloc::<u32>((num_frames / 32 * size_of::<u32>() as u64).try_into().unwrap(), false).pointer }, num_frames.try_into().unwrap()), // BitSet::new uses the global allocator, which isn't initialized yet!
             page_updates: 0,
         }
     }
@@ -473,6 +489,38 @@ impl PageDirectory {
         }
     }
 
+    /// allocates a frame for specified page at the specified address
+    pub unsafe fn alloc_frame_at(&mut self, address: u32, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool, force: bool) -> Option<u32> { // TODO: consider passing in flags?
+        let page2 = &mut *page; // pointer shenanigans to get around the borrow checker lmao
+        if page2.is_unused() {
+            assert!(address % PAGE_SIZE as u32 == 0, "frame address is not page aligned");
+            let idx = address as usize >> 12;
+
+            if force || !self.frame_set.test(idx) {
+                let mut flags = PageTableFlags::Present;
+                if !is_kernel {
+                    flags |= PageTableFlags::UserSupervisor;
+                }
+                if is_writeable {
+                    flags |= PageTableFlags::ReadWrite;
+                }
+
+                self.frame_set.set(idx);
+                page2.set_flags(flags);
+                page2.set_address((idx << 12) as u32);
+                self.page_updates = self.page_updates.wrapping_add(1); // we want this to be able to overflow
+
+                //debug!("allocated frame {:?}", page2);
+
+                Some((idx << 12) as u32)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     /// frees a frame, allowing other things to use it
     pub unsafe fn free_frame(&mut self, page: *mut PageTableEntry) -> Option<u32> {
         let page2 = &mut *page; // pointer shenanigans
@@ -491,7 +539,7 @@ impl PageDirectory {
     /// switch global page directory to this page directory
     pub fn switch_to(&self) {
         unsafe {
-            debug!("switching to page table @ phys {:#x}", self.tables_physical_addr);
+            //debug!("switching to page table @ phys {:#x}", self.tables_physical_addr);
 
             asm!(
                 "mov cr3, {0}",
@@ -520,15 +568,38 @@ impl Default for PageDirectory {
 }
 
 /// allocate region of memory
-unsafe fn alloc_region(dir: &mut PageDirectory, start: u32, size: u32) {
+pub unsafe fn alloc_region(dir: &mut PageDirectory, start: usize, size: usize) {
+    assert!(size >= PAGE_SIZE, "cannot allocate less than the page size");
+    assert!(start % PAGE_SIZE == 0, "start address needs to be page aligned");
+
     let end = start + size;
 
+    assert!(end % PAGE_SIZE == 0, "start address + size needs to be page aligned");
+
     for i in (start..end).step_by(PAGE_SIZE) {
-        let page = dir.get_page(i, true).unwrap();
-        dir.alloc_frame(page, false, true); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+        dir.alloc_frame(page, false, true).expect("couldn't allocate frame"); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
 
     debug!("mapped {:#x} - {:#x}", start, end);
+}
+
+/// allocate region of memory at specified address
+pub unsafe fn alloc_region_at(dir: &mut PageDirectory, start: usize, size: usize, phys_addr: u64, force: bool) {
+    assert!(size >= PAGE_SIZE, "cannot allocate less than the page size");
+    assert!(start % PAGE_SIZE == 0, "start address needs to be page aligned");
+
+    let end = start + size;
+
+    assert!(end % PAGE_SIZE == 0, "start address + size needs to be page aligned");
+
+    for i in (start..end).step_by(PAGE_SIZE) {
+        let phys = (i - start) as u64 + phys_addr;
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+        dir.alloc_frame_at(phys.try_into().unwrap(), page, false, true, force).expect("couldn't allocate frame"); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
+    }
+
+    debug!("mapped {:#x} - {:#x} @ phys {:#x} - {:#x}{}", start, end, phys_addr, (end - start) as u64 + phys_addr, if force { " (forced)" } else { "" });
 }
 
 /// our page directory
@@ -545,17 +616,20 @@ pub unsafe fn init() {
     // set up page directory struct
     let mut dir = PageDirectory::new();
 
-    // FIXME: map initial kernel memory allocations as global so they won't be invalidated from TLB flushes
+    // get reserved areas of memory from bootloader
+    bootloader::reserve_pages(&mut dir.frame_set);
+
+    // TODO: map initial kernel memory allocations as global so they won't be invalidated from TLB flushes
 
     debug!("mapping kernel memory");
 
-    // map first 4mb of memory to LINKED_BASE
-    alloc_region(&mut dir, LINKED_BASE as u32, 0x400000);
+    // map first 3mb of upper memory to LINKED_BASE + 1mb
+    alloc_region_at(&mut dir, LINKED_BASE + 0x100000, 0x300000, 0x100000, false);
 
     debug!("mapping heap memory");
 
     // map initial memory for kernel heap
-    alloc_region(&mut dir, KHEAP_START as u32, KHEAP_INITIAL_SIZE as u32);
+    alloc_region(&mut dir, KHEAP_START, KHEAP_INITIAL_SIZE);
 
     debug!("creating page table");
 
@@ -573,31 +647,63 @@ pub unsafe fn init() {
     }
 }
 
-/// allocate page and map to given address
-pub fn alloc_page(addr: usize, is_kernel: bool, is_writeable: bool) {
+/// allocate pages and map to given address
+/// num is in terms of pages, so num * PAGE_SIZE gives the amount of bytes mapped
+pub fn alloc_pages(addr: usize, num: usize, is_kernel: bool, is_writeable: bool) {
     assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
+
+    debug!("allocating {} page(s) @ {:#x}", num, addr);
 
     let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
 
-    let page = dir.get_page(addr.try_into().unwrap(), true).unwrap();
+    for i in (addr..addr + num * PAGE_SIZE).step_by(PAGE_SIZE) {
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
 
-    unsafe {
-        if dir.alloc_frame(page, is_kernel, is_writeable).is_some() {
-            asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+        unsafe {
+            if dir.alloc_frame(page, is_kernel, is_writeable).is_some() {
+                asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+            }
         }
     }
 }
 
-/// free page at given address
-pub fn free_page(addr: usize) {
+/// allocate pages at given physical address and map to given virtual address
+/// num is in terms of pages, so num * PAGE_SIZE gives the amount of bytes mapped
+pub fn alloc_pages_at(virt_addr: usize, num: usize, phys_addr: u64, is_kernel: bool, is_writeable: bool, force: bool) {
+    assert!(virt_addr % PAGE_SIZE == 0, "virtual address is not page aligned");
+    assert!(phys_addr % PAGE_SIZE as u64 == 0, "physical address is not page aligned");
+
+    debug!("allocating {} page(s) @ {:#x}, phys {:#x}", num, virt_addr, phys_addr);
+
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+    for i in (virt_addr..virt_addr + num * PAGE_SIZE).step_by(PAGE_SIZE) {
+        let phys = (i - virt_addr) as u64 + phys_addr;
+        let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+
+        unsafe {
+            if dir.alloc_frame_at(phys.try_into().unwrap(), page, is_kernel, is_writeable, force).is_some() {
+                asm!("invlpg [{0}]", in(reg) virt_addr); // invalidate this page in the TLB
+            } else {
+                panic!("could not allocate page");
+            }
+        }
+    }
+}
+
+/// free pages at given address
+/// num is in terms of pages, so num * PAGE_SIZE gives the amount of bytes mapped
+pub fn free_pages(addr: usize, num: usize) {
     assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
 
     let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
 
-    if let Some(page) = dir.get_page(addr.try_into().unwrap(), false) {
-        unsafe {
-            if dir.free_frame(page).is_some() {
-                asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+    for i in (addr..addr + num * PAGE_SIZE).step_by(PAGE_SIZE) {
+        if let Some(page) = dir.get_page(i.try_into().unwrap(), false) {
+            unsafe {
+                if dir.free_frame(page).is_some() {
+                    asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+                }
             }
         }
     }
