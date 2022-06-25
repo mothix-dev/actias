@@ -219,8 +219,8 @@ impl MultibootInfo {
             cmdline: self.get_cmdline().map(copy_str),
             mods: modules_copy,
             bootloader_name: self.get_bootloader_name().map(copy_str),
-            vbe: self.get_vbe().map(|v| *v),
-            framebuffer: self.get_framebuffer().map(|f| *f),
+            vbe: self.get_vbe().copied(),
+            framebuffer: self.get_framebuffer().copied(),
         }
     }
 

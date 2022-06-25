@@ -398,7 +398,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
     }
 
     // rust moment
-    if !was_in_task || was_in_task &&
+    if !was_in_task ||
         // is there a current task?
         if let Some(current) = get_current_task_mut() {
             // get reference to kernel's page directory
