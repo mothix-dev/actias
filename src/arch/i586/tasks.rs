@@ -104,10 +104,12 @@ impl TaskState {
         unsafe {
             let dir = PAGE_DIR.as_mut().unwrap();
 
-            if let Some(addr) = dir.alloc_frame(page, is_kernel, is_writeable) {
-                if invalidate {
-                    asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
-                }
+            match dir.alloc_frame(page, is_kernel, is_writeable) {
+                Ok(_) =>
+                    if invalidate {
+                        asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+                    },
+                Err(msg) => panic!("couldn't allocate page: {}", msg),
             }
         }
     }
@@ -120,8 +122,9 @@ impl TaskState {
             unsafe {
                 let dir = PAGE_DIR.as_mut().unwrap();
 
-                if let Some(addr) = dir.free_frame(page) {
-                    asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+                match dir.free_frame(page) {
+                    Ok(_) => asm!("invlpg [{0}]", in(reg) addr), // invalidate this page in the TLB
+                    Err(msg) => panic!("couldn't free page: {}", msg),
                 }
             }
         }

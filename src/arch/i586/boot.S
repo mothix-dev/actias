@@ -68,6 +68,7 @@ start:
 .section .text
 .globl start_high
 .extern kmain
+.extern STACK_TOP
 start_high:
     /* Clear identity mapping */
     movl $0, page_directory+0
@@ -80,7 +81,7 @@ start_high:
     mov %ax, %fs
     mov %ax, %gs
     
-    mov $0xc03fffff, %esp /* set stack to top of currently mapped memory, things get overwritten otherwise */
+    mov [STACK_TOP], %esp
     call kmain
     
     /* If kmain returns, loop forever */

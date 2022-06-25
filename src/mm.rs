@@ -65,10 +65,8 @@ unsafe impl GlobalAlloc for CustomAlloc {
 
                         // allocate new pages for heap
                         let old_size = heap.size();
-                        
-                        for i in (old_size..new_size).step_by(PAGE_SIZE) {
-                            alloc_pages(heap.bottom() + i, 1, true, true); // supervisor, read/write
-                        }
+
+                        alloc_pages(heap.bottom() + heap.size(), (new_size - old_size) / PAGE_SIZE, true, true); // supervisor, read/write
 
                         // expand heap
                         heap.extend(new_size - heap.size());

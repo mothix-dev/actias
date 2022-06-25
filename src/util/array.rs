@@ -1,8 +1,6 @@
 //! array utilities
 
 use core::{
-    cmp::{Ordering, PartialOrd},
-    marker::Copy,
     mem::size_of,
     ops::{Index, IndexMut, Drop},
     slice,
@@ -109,119 +107,6 @@ impl<T> Drop for RawPtrArray<T> {
     }
 }
 
-/// simple ordered array
-#[derive(Debug)]
-pub struct OrderedArray<T> where T: PartialOrd + Copy {
-    /// array we use internally
-    pub array: RawPtrArray<T>,
-
-    /// how many items we have in the array
-    pub size: usize,
-
-    /// how many items we can have in the array
-    pub max_size: usize,
-}
-
-impl<T: PartialOrd + Copy> OrderedArray<T> {
-    /// create an ordered array and allocate memory for it
-    pub fn new(max_size: usize) -> Self {
-        Self {
-            array: RawPtrArray::new(max_size),
-            max_size,
-            size: 0,
-        }
-    }
-
-    /// place an ordered array at an existing location in memory
-    pub fn place_at(addr: *mut T, max_size: usize) -> Self {
-        Self {
-            array: RawPtrArray::place_at(addr, max_size),
-            max_size,
-            size: 0,
-        }
-    }
-
-    /// insert an item into an ordered array
-    pub fn insert(&mut self, item: T) {
-        if self.size >= self.max_size {
-            panic!("attempted to insert into full ordered array"); // should we panic here or return Err?
-        } else {
-            // find index in array where we can place the new item
-            let mut iterator = 0;
-            while iterator < self.size {
-                let item2 = self.array[iterator];
-                match item2.partial_cmp(&item) {
-                    None | Some(Ordering::Greater) => break,
-                    _ => (),
-                };
-                iterator += 1;
-            }
-
-            if iterator == self.size { // item should be placed at end of array
-                self.size += 1;
-                self.array[iterator] = item;
-            } else { // item should be place somewhere inside array
-                // save item in the slot that the new item should be placed in, then replace it in the array with the new item
-                let mut tmp = self.array[iterator];
-                self.array[iterator] = item;
-                
-                // move every other item in the array over to make room
-                while iterator < self.size {
-                    iterator += 1;
-                    /*let tmp2 = self.array[iterator];
-                    self.array[iterator] = tmp;
-                    tmp = tmp2;*/
-                    tmp = core::mem::replace(&mut self.array[iterator], tmp); // this should work? untested
-                }
-                self.size += 1;
-            }
-        }
-    }
-
-    /// get a reference to an item in an ordered array
-    pub fn get(&self, index: usize) -> &T {
-        if index < self.size {
-            self.array.index(index)
-        } else {
-            panic!("attempted to index outside ordered array");
-        }
-    }
-
-    /// get a mutable reference to an item in an ordered array
-    pub fn get_mut(&mut self, index: usize) -> &mut T {
-        if index < self.size {
-            self.array.index_mut(index)
-        } else {
-            panic!("attempted to index outside ordered array");
-        }
-    }
-
-    /// remove an item from an ordered array
-    pub fn remove(&mut self, index: usize) {
-        if index < self.size {
-            for i in index..self.size {
-                self.array[i] = self.array[i + 1];
-            }
-            self.size -= 1;
-        } else {
-            panic!("attempted to remove outside ordered array");
-        }
-    }
-}
-
-impl<T: PartialOrd + Copy> Index<usize> for OrderedArray<T> {
-    type Output = T;
-    fn index(&self, i: usize) -> &T {
-        self.get(i)
-    }
-}
-
-impl<T: PartialOrd + Copy> IndexMut<usize> for OrderedArray<T> {
-    fn index_mut(&mut self, i: usize) -> &mut T {
-        self.get_mut(i)
-    }
-}
-
 /// simple bitset, acts sorta like an array but you access single bits
 pub struct BitSet {
     /// array of bytes that the bitset uses
@@ -255,6 +140,10 @@ impl BitSet {
 
     /// set a bit in the set
     pub fn set(&mut self, addr: usize) {
+        if addr >= self.size {
+            return;
+        }
+
         let idx = addr / 32;
         let off = addr % 32;
 
@@ -266,6 +155,10 @@ impl BitSet {
 
     /// clear a bit in the set
     pub fn clear(&mut self, addr: usize) {
+        if addr >= self.size {
+            return;
+        }
+
         let idx = addr / 32;
         let off = addr % 32;
 
@@ -277,9 +170,13 @@ impl BitSet {
 
     /// check if bit is set
     pub fn test(&self, addr: usize) -> bool {
-        let idx = addr / 32;
-        let off = addr % 32;
-        (self.array[idx] & 1 << off) > 0
+        if addr < self.size {
+            let idx = addr / 32;
+            let off = addr % 32;
+            (self.array[idx] & 1 << off) > 0
+        } else {
+            false
+        }
     }
 
     /// gets first unset bit
