@@ -55,6 +55,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fff2a6927b3bb87f9595d67196a70493f627687a71d87a0d692242c33f58c11"
 
 [[package]]
+name = "generic-array"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd48d33ec7f05fbfa152300fdad764757cbded343c1aa1cff2fbaf4134851803"
+dependencies = [
+ "typenum",
+ "version_check",
+]
+
+[[package]]
 name = "linked_list_allocator"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -100,6 +110,7 @@ dependencies = [
  "aligned",
  "bitmask-enum",
  "cc",
+ "generic-array",
  "linked_list_allocator",
  "num_enum",
  "x86",
@@ -165,10 +176,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "typenum"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcf81ac59edc17cc8697ff311e8f5ef2d99fcbd9817b34cec66f90b6c3dfd987"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d22af068fba1eb5edcb4aea19d382b2a3deb4c8f9d475c589b6ada9e0fd493ee"
+
+[[package]]
+name = "version_check"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "x86"
