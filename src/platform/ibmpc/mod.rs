@@ -78,3 +78,9 @@ pub fn create_console() -> SimpleConsole {
 
     console
 }
+
+pub fn get_initrd() -> Option<&'static [u8]> {
+    let info = crate::platform::bootloader::get_multiboot_info();
+
+    info.mods.map(|m| m[0].data())
+}

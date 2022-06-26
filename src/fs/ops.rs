@@ -7,7 +7,7 @@ use alloc::{
 };
 use crate::errno::Errno;
 use super::{
-    tree::{File, LockType, get_file_from_path},
+    tree::{File, LockKind, get_file_from_path},
     vfs::{Permissions, ROOT_DIR},
     MAX_FILES,
 };
@@ -264,8 +264,8 @@ impl FileDescriptor {
 
 
     /// lock file
-    /// lock behavior depends on the LockType provided
-    pub fn lock(&mut self, kind: LockType, size: isize) -> Result<(), Errno> {
+    /// lock behavior depends on the LockKind provided
+    pub fn lock(&mut self, kind: LockKind, size: isize) -> Result<(), Errno> {
         match self.get_mut_reference() {
             Some(file) => file.file.lock(kind, size),
             None => Err(Errno::BadFile),

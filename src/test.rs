@@ -5,10 +5,10 @@ use crate::{
     console::{ColorCode, get_console},
     fs::{
         tree::{
-            File, Directory, LockType,
+            File, Directory, SymLink, LockKind,
             get_file_from_path, get_directory_from_path,
         },
-        vfs::Permissions,
+        vfs::{Permissions, read_file},
     },
     errno::Errno,
 };
@@ -84,6 +84,7 @@ fn vec() {
 pub struct TestDirectory {
     pub files: Vec<Box<dyn File>>,
     pub directories: Vec<Box<dyn Directory>>,
+    pub links: Vec<Box<dyn SymLink>>,
     pub name: String,
 }
 
@@ -110,6 +111,14 @@ impl Directory for TestDirectory {
 
     fn get_directories_mut(&mut self) -> &mut Vec<Box<dyn Directory>> {
         &mut self.directories
+    }
+
+    fn get_links(&self) -> &Vec<Box<dyn SymLink>> {
+        &self.links
+    }
+
+    fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>> {
+        &mut self.links
     }
 
     fn get_name(&self) -> &str {
@@ -169,7 +178,7 @@ impl File for TestFile {
         Err(Errno::NotSupported)
     }
 
-    fn lock(&mut self, _kind: LockType, _size: isize) -> Result<(), Errno> {
+    fn lock(&mut self, _kind: LockKind, _size: isize) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
 
@@ -187,6 +196,7 @@ impl File for TestFile {
         self.contents.len()
     }
 }
+
 static mut TEST_DIR: Option<Box<dyn Directory>> = None;
 
 #[test_case]
@@ -209,9 +219,11 @@ fn file_create_tree() {
                                 Box::new(TestFile::new("testfile6", "this is testfile6")),
                             ],
                             directories: vec![],
+                            links: vec![],
                             name: "test3".to_string(),
                         }),
                     ],
+                    links: vec![],
                     name: "test1".to_string(),
                 }),
                 Box::new(TestDirectory {
@@ -219,48 +231,17 @@ fn file_create_tree() {
                         Box::new(TestFile::new("testfile3", "this is testfile3")),
                     ],
                     directories: vec![],
+                    links: vec![],
                     name: "test2".to_string(),
                 }),
             ],
-            name: "/".to_string(),
+            links: vec![],
+            name: "".to_string(),
         }));
     }
 
-    fn print_tree<'a>(dir: &'a Box<dyn Directory>, indent: usize) {
-        let mut spaces: Vec<u8> = Vec::new();
-
-        if indent > 0 {
-            for _i in 0..indent - 2 {
-                spaces.push(b' ');
-            }
-
-            spaces.push(b'-');
-            spaces.push(b' ');
-        }
-
-        log!("{}{}", core::str::from_utf8(&spaces).unwrap(), dir.get_name());
-
-        let dirs = dir.get_directories();
-        for dir2 in dirs {
-            print_tree(dir2, indent + 4);
-        }
-        
-        spaces.clear();
-
-        for _i in 0..indent + 2 {
-            spaces.push(b' ');
-        }
-
-        spaces.push(b'-');
-        spaces.push(b' ');
-
-        for file in dir.get_files() {
-            log!("{}{}", core::str::from_utf8(&spaces).unwrap(), file.get_name());
-        }
-    }
-
     unsafe {
-        print_tree(TEST_DIR.as_ref().unwrap(), 0);
+        crate::fs::tree::print_tree(TEST_DIR.as_ref().unwrap());
     }
 }
 
@@ -292,4 +273,18 @@ fn file_read() {
     log!("read \"{}\"", string);
 
     assert!(string == "this is testfile6");
+}
+
+fn read_file_to_string(path: &str) -> String {
+    let string = read_file(path).map(|buf| core::str::from_utf8(&buf).unwrap().to_string()).expect("could not read file");
+    log!("{:?}: {:?}", path, string);
+    string
+}
+
+#[test_case]
+fn vfs() {
+    assert!(read_file_to_string("/fs/initrd/testdir/testdir2/testfile.txt") == "yet another test file\n");
+    assert!(read_file_to_string("/fs/initrd/testfile3") == "this is another test file\n");
+    assert!(read_file_to_string("/fs/initrd/testdir2/testfile.txt") == "yet another test file\n");
+    assert!(read_file_to_string("/fs/initrd/testdir2/testdir3/testfile.txt") == "another test file\n");
 }

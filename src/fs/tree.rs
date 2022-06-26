@@ -2,8 +2,10 @@
 
 use crate::errno::Errno;
 use alloc::{
-    vec::Vec,
     boxed::Box,
+    format,
+    string::{String, ToString},
+    vec::Vec,
 };
 use super::{
     vfs::Permissions,
@@ -12,7 +14,7 @@ use super::{
 };
 
 /// controls how File::lock() locks
-pub enum LockType {
+pub enum LockKind {
     /// unlock a locked section
     Unlock,
 
@@ -70,8 +72,8 @@ pub trait File {
 
 
     /// lock file
-    /// lock behavior depends on the LockType provided
-    fn lock(&mut self, kind: LockType, size: isize) -> Result<(), Errno>;
+    /// lock behavior depends on the LockKind provided
+    fn lock(&mut self, kind: LockKind, size: isize) -> Result<(), Errno>;
 
 
     /// gets name of file
@@ -107,6 +109,13 @@ pub trait Directory {
     fn get_directories_mut(&mut self) -> &mut Vec<Box<dyn Directory>>;
 
 
+    /// gets links in directory
+    fn get_links(&self) -> &Vec<Box<dyn SymLink>>;
+
+    /// gets links in directory
+    fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>>;
+
+
     /// gets name of directory
     fn get_name(&self) -> &str;
 
@@ -114,37 +123,113 @@ pub trait Directory {
     fn set_name(&mut self, name: &str) -> Result<(), Errno>;
 }
 
+pub trait SymLink {
+    /// get permissions for link
+    fn get_permissions(&self) -> Permissions;
+
+    /// set permissions for link
+    fn set_permissions(&mut self, permissions: Permissions) -> Result<(), Errno>;
+
+
+    /// gets name of link
+    fn get_name(&self) -> &str;
+
+    /// sets name of link
+    fn set_name(&mut self, name: &str) -> Result<(), Errno>;
+
+
+    /// gets target of link
+    fn get_target(&self) -> &str;
+
+    /// sets target of link
+    fn set_target(&mut self, target: &str) -> Result<(), Errno>;
+}
+
+/// cleans up path, removing .s and ..s
+pub fn clean_up_path(path: &str) -> Option<String> {
+    let mut split = path.split('/').collect::<Vec<_>>();
+
+    let mut i = 0;
+    while i < split.len() {
+        if split[i] == "." {
+            split.remove(i);
+        } else if split[i] == ".." {
+            if i == 0 {
+                return None;
+            }
+
+            split.remove(i - 1);
+            split.remove(i - 1);
+            i -= 1;
+        } else if split[i].is_empty() {
+            split.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
+    Some(split.join("/"))
+}
+
 /// gets a file object from the given path
-/// path should not be absolute (i.e. starting with /)
 pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Option<&'a mut Box<dyn File>> {
-    if path.chars().count() == 0 || path.starts_with('/') { // sanity check
+    if path.is_empty() { // sanity check
         None
     } else {
-        let dir_name = dirname(path);
-        let file_name = basename(path)?;
-        let directory = if !dir_name.is_empty() { get_directory_from_path(dir, &dir_name)? } else { dir };
-        for file in directory.get_files_mut() {
-            if file.get_name() == file_name {
-                return Some(file);
-            }
+        let mut dir_name = dirname(path).to_string();
+        let mut file_name = basename(path)?.to_string();
+
+        while let Some(link) = get_directory_from_path(dir, &dir_name)?.get_links().iter().find(|l| l.get_name() == file_name) {
+            let target = format!("{}/{}", dir_name, link.get_target());
+
+            dir_name = dirname(&target).to_string(); // if we own the strings the borrow checker won't yell at us
+            file_name = basename(&target)?.to_string();
         }
 
-        None
+        get_directory_from_path(dir, &dir_name)?.get_files_mut().iter_mut().find(|f| f.get_name() == file_name)
     }
 }
 
 /// gets a directory object from the given path
-/// path should not be absolute (i.e. starting with /)
 pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Option<&'a mut Box<dyn Directory>> {
-    if path.chars().count() == 0 || path.starts_with('/') { // sanity check
-        None
+    if path.is_empty() { // sanity check
+        Some(dir)
     } else {
-        // recurse over tree
-        fn walk_tree<'a>(dir: &'a mut Box<dyn Directory>, mut path: Vec<&str>) -> Option<&'a mut Box<dyn Directory>> {
+        // recurse over tree to find symlinks
+        fn get_link(dir: &mut Box<dyn Directory>, path: Vec<&str>, index: usize) -> Option<String> {
+            if let Some(name) = path.get(index) {
+                if name.is_empty() {
+                    return get_link(dir, path, index + 1);
+                } else {
+                    for directory in dir.get_directories_mut() {
+                        if &directory.get_name() == name {
+                            return get_link(directory, path, index + 1);
+                        }
+                    }
+                }
+
+                for link in dir.get_links() {
+                    if &link.get_name() == name {
+                        //log!("found link {} to {}", link.get_name(), link.get_target());
+
+                        return clean_up_path(&format!("{}/{}/{}", path[..index].join("/"), link.get_target(), path[index + 1..].join("/")));
+                    }
+                }
+            }
+
+            None
+        }
+
+        // recurse over tree to find the directory
+        fn get_dir<'a>(dir: &'a mut Box<dyn Directory>, mut path: Vec<&str>) -> Option<&'a mut Box<dyn Directory>> {
             if let Some(name) = path.pop() {
-                for directory in dir.get_directories_mut() {
-                    if directory.get_name() == name {
-                        return walk_tree(directory, path);
+                if name.is_empty() {
+                    return get_dir(dir, path);
+                } else {
+                    for directory in dir.get_directories_mut() {
+                        if directory.get_name() == name {
+                            return get_dir(directory, path);
+                        }
                     }
                 }
 
@@ -154,7 +239,57 @@ pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) 
             }
         }
 
+        let mut path = path.to_string();
+
+        while let Some(new) = get_link(dir, path.split('/').collect::<Vec<_>>(), 0) {
+            path = new;
+        }
+
         let split = path.split('/').rev().collect::<Vec<_>>(); // reversed because popping off the end is faster
-        walk_tree(dir, split)
+
+        get_dir(dir, split)
     }
+}
+
+/// prints the contents of a directory recursively in tree-ish form
+#[allow(clippy::borrowed_box)] // we need box here
+pub fn print_tree(dir: &Box<dyn Directory>) {
+    fn _print_tree(dir: &'_ Box<dyn Directory>, indent: usize) {
+        let mut spaces: Vec<u8> = Vec::new();
+
+        if indent > 0 {
+            for _i in 0..indent - 2 {
+                spaces.push(b' ');
+            }
+
+            spaces.push(b'-');
+            spaces.push(b' ');
+        }
+
+        log!("{}{}/", core::str::from_utf8(&spaces).unwrap(), dir.get_name());
+
+        let dirs = dir.get_directories();
+        for dir2 in dirs {
+            _print_tree(dir2, indent + 4);
+        }
+        
+        spaces.clear();
+
+        for _i in 0..indent + 2 {
+            spaces.push(b' ');
+        }
+
+        spaces.push(b'-');
+        spaces.push(b' ');
+
+        for file in dir.get_files() {
+            log!("{}{}", core::str::from_utf8(&spaces).unwrap(), file.get_name());
+        }
+
+        for link in dir.get_links() {
+            log!("{}{} -> {}", core::str::from_utf8(&spaces).unwrap(), link.get_name(), link.get_target());
+        }
+    }
+
+    _print_tree(dir, 0);
 }

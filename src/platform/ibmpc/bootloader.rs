@@ -128,7 +128,7 @@ pub struct MultibootModuleCopy {
 }
 
 impl MultibootModuleCopy {
-    fn data(&self) -> &[u8] {
+    pub fn data(&self) -> &'static [u8] {
         let buf_size = (self.data_end - self.data_start) as usize;
 
         let num_pages =
@@ -156,7 +156,7 @@ impl MultibootModuleCopy {
         unsafe { slice::from_raw_parts(ptr, buf_size) }
     }
 
-    fn string(&self) -> &str {
+    pub fn string(&self) -> &str {
         self.string
     }
 }

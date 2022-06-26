@@ -16,6 +16,7 @@
 #![allow(clippy::missing_safety_doc)] // dont really want to write safety docs yet
 
 #![feature(core_c_str)]
+#![feature(cstr_from_bytes_until_nul)]
 
 #![feature(arbitrary_enum_discriminant)] // we want errno to be numbered properly yet have a custom string field
 
@@ -49,6 +50,8 @@ pub mod syscalls;
 pub mod fs;
 
 pub mod errno;
+
+pub mod tar;
 
 /// tests
 #[cfg(test)]

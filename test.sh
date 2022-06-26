@@ -3,7 +3,7 @@ shopt -s extglob
 
 cargo test --no-run || exit 1
 
-qemu-system-i386 -cpu pentium -machine type=pc-i440fx-3.1 -kernel target/i586-unknown-none/debug/deps/ockernel-!(*.d) -display none -chardev stdio,id=char0,logfile=test.log,signal=off -serial chardev:char0 -device isa-debug-exit,iobase=0xf4,iosize=0x01
+qemu-system-i386 -cpu pentium -machine type=pc-i440fx-3.1 -kernel target/i586-unknown-none/debug/deps/ockernel-!(*.d) -initrd test.tar -display none -chardev stdio,id=char0,logfile=test.log,signal=off -serial chardev:char0 -device isa-debug-exit,iobase=0xf4,iosize=0x01
 
 TEST_RESULT="$?"
 
