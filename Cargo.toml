@@ -9,10 +9,11 @@ authors = [ "velleda" ]
 [dependencies]
 aligned = "0.4"
 x86 = "0.47"
-bitmask-enum = "^1.1.3"
+bitmask-enum = "1.1"
 num_enum = { version = "0.5", default-features = false }
 linked_list_allocator = "0.9"
 generic-array = "0.14"
+goblin = { version = "0.5", default-features = false, features = [ "elf32", "elf64", "mach32", "mach64" ]}
 
 [build-dependencies]
 cc = "1.0"

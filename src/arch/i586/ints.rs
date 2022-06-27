@@ -415,49 +415,20 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
                 if flags & PageTableFlags::ReadWrite == 0 && flags & PageTableFlags::CopyOnWrite != 0 {
                     // this is a terrible copy on write implementation but at least it works
 
-                    debug!("copy on write");
+                    debug!("copy on write, accessed @ {:#x}", address);
 
-                    // get physical address of page
-                    let old_addr = page.get_address();
+                    let page_addr = address as u64 & !(PAGE_SIZE as u64 - 1);
+                    let page_mem = current.state.read_mem(page_addr, PAGE_SIZE, true).unwrap();
 
-                    // set page as unused so we can get a new frame
                     page.set_unused();
 
                     match dir.alloc_frame(page, false, true) {
-                        Ok(addr) => {
-                            debug!("copying");
+                        Ok(_) => {
+                            current.state.write_mem(page_addr, &page_mem, true).unwrap();
 
-                            // temporarily map the page we want to copy from and the page we want to copy to into memory
-                            let from_virt = MEM_TOP - PAGE_SIZE * 2 + 1;
-                            let to_virt = MEM_TOP - PAGE_SIZE + 1;
-
-                            let page_from = &mut *dir.get_page(from_virt as u32, true).expect("can't get page");
-                            page_from.set_flags(PageTableFlags::Present | PageTableFlags::ReadWrite);
-                            page_from.set_address(old_addr);
-                            asm!("invlpg [{0}]", in(reg) old_addr);
-
-                            let page_to = &mut *dir.get_page(to_virt as u32, true).expect("can't get page");
-                            page_to.set_flags(PageTableFlags::Present | PageTableFlags::ReadWrite);
-                            page_to.set_address(addr);
-                            asm!("invlpg [{0}]", in(reg) addr);
-
-                            // pointer shenanigans to get buffers we can copy
-                            let from_buf = &mut *(from_virt as *mut [u32; 256]);
-                            let to_buf = &mut *(to_virt as *mut [u32; 256]);
-
-                            // do the copy
-                            to_buf.copy_from_slice(from_buf);
-
-                            // set our temporary pages as unused so the data can't be accessed elsewhere
-                            page_from.set_unused();
-                            page_to.set_unused();
-
-                            // switch back to task's page directory
                             current.state.pages.switch_to();
 
-                            debug!("copied {:#x} -> {:#x}", old_addr, addr);
-                            
-                            false // don't panic
+                            false
                         },
                         Err(msg) => {
                             log!("couldn't allocate frame for copy on write: {}", msg);
@@ -475,7 +446,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
             true // panic
         }
     {
-        debug!("page fault, accessed @ {:#x}", address);
+        log!("page fault, accessed @ {:#x}", address);
         IN_TASK = was_in_task; // make sure generic handler knows whether we were in a task or not
         generic_exception_error_code("page fault", frame, error_code);
     }

@@ -30,6 +30,8 @@ pub fn is_computer_on(regs: &mut SyscallRegisters) {
 pub fn test_log(regs: &mut SyscallRegisters) {
     unsafe { IN_TASK = false; }
 
+    //log!("string @ {:#x}", regs.ebx);
+
     let string = unsafe { CStr::from_ptr(regs.ebx as *const _).to_string_lossy().into_owned() };
     log!("{}", string);
 

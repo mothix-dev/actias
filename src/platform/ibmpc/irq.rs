@@ -6,8 +6,9 @@ use crate::{
         LINKED_BASE,
         ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters},
         paging::PAGE_DIR,
+        halt,
     },
-    tasks::{IN_TASK, CURRENT_TERMINATED, get_current_task_mut, switch_tasks},
+    tasks::{IN_TASK, CURRENT_TERMINATED, get_current_task_mut, switch_tasks, num_tasks},
 };
 
 /// interrupt stub handler for unhandled interrupts
@@ -44,6 +45,11 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     } else {
         // save state of current task
         get_current_task_mut().expect("no tasks?").state.save(&regs);
+    }
+
+    if num_tasks() == 0 {
+        outb(0x20, 0x20);
+        halt();
     }
 
     // switch to next task

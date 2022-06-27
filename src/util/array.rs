@@ -4,6 +4,7 @@ use core::{
     mem::size_of,
     ops::{Index, IndexMut, Drop},
     slice,
+    fmt,
 };
 //use crate::mm::heap::{alloc, free};
 use alloc::{
@@ -193,6 +194,16 @@ impl BitSet {
             }
         }
         None
+    }
+}
+
+impl fmt::Debug for BitSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        for i in 0..self.size {
+            write!(f, "{}", if self.test(i) { 1 } else { 0 })?;
+        }
+
+        Ok(())
     }
 }
 

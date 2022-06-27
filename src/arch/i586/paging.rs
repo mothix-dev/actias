@@ -427,7 +427,6 @@ impl fmt::Debug for PageDirError {
 
 /// struct for page directory
 /// could be laid out better, but works fine for now
-#[repr(C)] // im pretty sure this guarantees the order and size of this struct
 pub struct PageDirectory {
     /// pointers to page tables
     pub tables: [*mut PageTable; 1024], // FIXME: maybe we want references here? too lazy to deal w borrow checking rn
@@ -495,6 +494,7 @@ impl PageDirectory {
     /// allocates a frame for specified page
     pub unsafe fn alloc_frame(&mut self, page: *mut PageTableEntry, is_kernel: bool, is_writeable: bool) -> Result<u32, PageDirError> { // TODO: consider passing in flags?
         if let Some(idx) = self.frame_set.first_unset() {
+            //log!("got phys {:#x}, idx {:#x}", (idx as u32) << 12, idx);
             self.alloc_frame_at((idx as u32) << 12, page, is_kernel, is_writeable, false)
         } else {
             Err(PageDirError::NoAvailableFrames)
@@ -507,6 +507,7 @@ impl PageDirectory {
         if page2.is_unused() {
             assert!(address % PAGE_SIZE as u32 == 0, "frame address is not page aligned");
             let idx = address as usize >> 12;
+            debug!("allocating @ phys {:#x}, idx {:#x}", address, idx);
 
             if force || !self.frame_set.test(idx) {
                 let mut flags = PageTableFlags::Present;
@@ -522,9 +523,9 @@ impl PageDirectory {
                 page2.set_address((idx << 12) as u32);
                 self.page_updates = self.page_updates.wrapping_add(1); // we want this to be able to overflow
 
-                //debug!("allocated frame {:?}", page2);
+                debug!("allocated frame {:?}", page2);
 
-                Ok((idx << 12) as u32)
+                Ok(address)
             } else {
                 Err(PageDirError::FrameInUse)
             }
@@ -538,6 +539,7 @@ impl PageDirectory {
         let page2 = &mut *page; // pointer shenanigans
         if !page2.is_unused() {
             let addr = page2.get_address();
+            //log!("freed phys {:#x}, idx {:#x}", addr, addr >> 12);
             self.frame_set.clear((addr >> 12) as usize);
             page2.set_unused();
             self.page_updates = self.page_updates.wrapping_add(1);
@@ -569,7 +571,13 @@ impl PageDirectory {
     pub fn virt_to_phys(&mut self, addr: u32) -> Option<u32> {
         let page = self.get_page(addr, false)?;
 
-        Some((unsafe { *page }).get_address() | (addr & (PAGE_SIZE as u32 - 1)))
+        let page2 = unsafe { &mut *page }; // pointer shenanigans
+
+        if page2.is_unused() {
+            None
+        } else {
+            Some((unsafe { *page }).get_address() | (addr & (PAGE_SIZE as u32 - 1)))
+        }
     }
 }
 
@@ -590,7 +598,7 @@ pub unsafe fn alloc_region(dir: &mut PageDirectory, start: usize, size: usize) {
 
     for i in (start..end).step_by(PAGE_SIZE) {
         let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
-        dir.alloc_frame(page, false, true).expect("couldn't allocate frame"); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
+        dir.alloc_frame(page, true, true).expect("couldn't allocate frame"); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
 
     debug!("mapped {:#x} - {:#x}", start, end);
@@ -608,7 +616,7 @@ pub unsafe fn alloc_region_at(dir: &mut PageDirectory, start: usize, size: usize
     for i in (start..end).step_by(PAGE_SIZE) {
         let phys = (i - start) as u64 + phys_addr;
         let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
-        dir.alloc_frame_at(phys.try_into().unwrap(), page, false, true, force).expect("couldn't allocate frame"); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
+        dir.alloc_frame_at(phys.try_into().unwrap(), page, true, true, force).expect("couldn't allocate frame"); // FIXME: switch to kernel mode when user tasks don't run in the kernel's address space
     }
 
     debug!("mapped {:#x} - {:#x} @ phys {:#x} - {:#x}{}", start, end, phys_addr, (end - start) as u64 + phys_addr, if force { " (forced)" } else { "" });
@@ -702,6 +710,10 @@ pub fn alloc_pages_at(virt_addr: usize, num: usize, phys_addr: u64, is_kernel: b
     for i in (virt_addr..virt_addr + num * PAGE_SIZE).step_by(PAGE_SIZE) {
         let phys = (i - virt_addr) as u64 + phys_addr;
         let page = dir.get_page(i.try_into().unwrap(), true).unwrap();
+
+        if force {
+            unsafe { (&mut *page).set_unused(); }
+        }
 
         unsafe {
             match dir.alloc_frame_at(phys.try_into().unwrap(), page, is_kernel, is_writeable, force) {

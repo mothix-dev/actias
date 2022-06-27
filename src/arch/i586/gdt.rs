@@ -171,7 +171,7 @@ static mut GDT: Aligned<A16, [GDTEntry; GDT_ENTRIES + 1]> = Aligned([GDTEntry(0)
 static mut TSS: Aligned<A16, TaskStateSegment> = Aligned(TaskStateSegment::new());
 
 /// size of kernel stack
-const STACK_SIZE: usize = 4096 * 10; // 40k
+const STACK_SIZE: usize = 4096 * 20; // 80k
 
 /// kernel stack
 static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];

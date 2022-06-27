@@ -83,7 +83,9 @@ pub fn get_current_task_mut() -> Option<&'static mut Task> {
 /// switch to the next task, making it the current task
 pub fn switch_tasks() {
     unsafe {
-        CURRENT_TASK = (CURRENT_TASK + 1) % TASKS.len();
+        if TASKS.len() != 0 {
+            CURRENT_TASK = (CURRENT_TASK + 1) % TASKS.len();
+        }
     }
 }
 
@@ -101,7 +103,9 @@ pub fn remove_task(id: usize) {
             TASKS.remove(id);
         }
         if id == CURRENT_TASK {
-            CURRENT_TASK = (CURRENT_TASK - 1) % TASKS.len();
+            if TASKS.len() != 0 {
+                CURRENT_TASK = (CURRENT_TASK - 1) % TASKS.len();
+            }
             CURRENT_TERMINATED = true;
         }
     }
@@ -124,4 +128,9 @@ pub fn get_task_mut(id: usize) -> Option<&'static mut Task> {
 /// get internal id of task with given pid
 pub fn pid_to_id(pid: usize) -> Option<usize> {
     (unsafe { &mut TASKS }).iter().position(|task| task.id == pid)
+}
+
+/// get number of tasks
+pub fn num_tasks() -> usize {
+    unsafe { TASKS.len() }
 }

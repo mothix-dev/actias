@@ -259,6 +259,19 @@ pub fn add_mount_point(name: &str, tree: Box<dyn Directory>) {
     }))
 }
 
+pub fn remove_mount_point(name: &str) {
+    let dir = get_directory_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, "/fs").expect("couldn't get filesystem directory");
+
+    let mounts = dir.get_directories_mut();
+
+    for i in 0..mounts.len() {
+        if mounts[i].get_name() == name {
+            mounts.remove(i);
+            break;
+        }
+    }
+}
+
 pub fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
     let file = get_file_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, path).ok_or(Errno::NoSuchFileOrDir)?;
 
