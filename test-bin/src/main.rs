@@ -86,14 +86,14 @@ fn _start() {
         if unsafe { TEST_STATIC == 621 } {
             syscall_test_log(b"parent: preserved\0");
         }
+        
+        syscall_exit();
     } else {
         syscall_test_log(b"child\0");
 
         if unsafe { TEST_STATIC == 621 } {
             syscall_test_log(b"child: preserved\0");
         }
-
-        syscall_exit();
     }
 
     let proc = syscall_fork();

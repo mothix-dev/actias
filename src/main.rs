@@ -91,8 +91,6 @@ pub extern fn kmain() -> ! {
     #[cfg(not(test))]
     {
         exec::exec("/fs/initrd/test-bin").unwrap();
-        //exec::exec("/fs/initrd/test").unwrap();
-        //add_user_mode_task(user_mode_test as *const _);
 
         start_multitasking();
     }
@@ -104,7 +102,7 @@ use core::arch::asm;
 pub fn start_multitasking() -> ! {
     unsafe {
         crate::tasks::IN_TASK = true;
-        crate::tasks::CURRENT_TERMINATED = true;
+        crate::tasks::CURRENT_TERMINATED = true; // prevents state from being stomped on in context switch
 
         asm!("sti; hlt");
 

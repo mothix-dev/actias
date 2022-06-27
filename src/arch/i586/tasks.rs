@@ -2,21 +2,21 @@
 
 use alloc::{
     alloc::{Layout, alloc, dealloc},
-    vec::Vec,
+    vec::Vec, collections::BTreeSet,
 };
 use core::arch::asm;
 use crate::{
     arch::{PAGE_SIZE, LINKED_BASE},
     errno::Errno,
     tasks::{
-        CURRENT_TASK, IN_TASK,
+        IN_TASK,
         Task,
-        remove_task, get_task, get_task_mut, add_task, pid_to_id,
+        remove_task, get_task, get_task_mut, add_task, get_current_task, add_page_reference, remove_page_reference, get_page_references,
     },
 };
 use super::{
     ints::SyscallRegisters,
-    paging::{PAGE_DIR, PageDirectory, PageTableFlags, alloc_pages_at, free_pages},
+    paging::{PAGE_DIR, PageDirectory, PageTableFlags, alloc_pages_at, free_pages, free_page_phys},
 };
 
 pub struct TaskState {
@@ -80,7 +80,7 @@ impl TaskState {
     /// all pages copied have the read/write flag unset, and if it was previously set, the copy on write flag
     /// 
     /// writing to any copied page will cause it to copy itself and all its data, and all writes will go to a new page
-    pub fn copy_on_write_from(&mut self, dir: &mut PageDirectory, start: usize, end: usize) {
+    pub fn copy_on_write_from(&mut self, dir: &mut PageDirectory, start: usize, end: usize, owner: usize) {
         assert!(start <= end);
         assert!(end <= 1024);
 
@@ -93,19 +93,47 @@ impl TaskState {
                 }
             } else {
                 for addr in ((i << 22)..((i + 1) << 22)).step_by(PAGE_SIZE) {
-                    let page = unsafe { &mut *self.pages.get_page(addr as u32, true).expect("couldn't create page table") };
                     let orig_page = unsafe { &mut *dir.get_page(addr as u32, false).expect("couldn't get page table") };
 
-                    // disable write flag, enable copy on write
-                    let mut flags: PageTableFlags = orig_page.get_flags().into();
-                    
-                    if flags & PageTableFlags::ReadWrite != 0 {
-                        flags &= !PageTableFlags::ReadWrite;
-                        flags |= PageTableFlags::CopyOnWrite;
-                    }
+                    if !orig_page.is_unused() {
+                        let page = unsafe { &mut *self.pages.get_page(addr as u32, true).expect("couldn't create page table") };
 
-                    page.set_flags(flags);
-                    page.set_address(orig_page.get_address());
+                        // disable write flag, enable copy on write
+                        let mut flags: PageTableFlags = orig_page.get_flags().into();
+                        
+                        if flags & PageTableFlags::ReadWrite != 0 {
+                            flags &= !PageTableFlags::ReadWrite;
+                            flags |= PageTableFlags::CopyOnWrite;
+                        }
+
+                        page.set_flags(flags);
+                        page.set_address(orig_page.get_address());
+
+                        add_page_reference(orig_page.get_address() as u64, owner);
+                    }
+                }
+            }
+        }
+    }
+
+    /// frees pages used by this task, and decreases the reference count on any partially copied pages
+    pub fn free_pages(&mut self) {
+        for i in 0..(LINKED_BASE >> 22) {
+            if !self.pages.tables[i].is_null() {
+                for addr in ((i << 22)..((i + 1) << 22)).step_by(PAGE_SIZE) {
+                    if let Some(page) = self.pages.get_page(addr as u32, false) {
+                        let page = unsafe { &mut *page };
+
+                        if (page.get_flags() & u16::from(PageTableFlags::CopyOnWrite)) > 0 {
+                            remove_page_reference(page.get_address() as u64);
+                        } else {
+                            // free the page if there aren't any references to it
+                            let phys = page.get_address() as u64;
+                            if !get_page_references().contains_key(&phys) {
+                                free_page_phys(phys);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -273,7 +301,7 @@ impl Default for TaskState {
 
 /// exits current task, cpu idles until next task switch
 pub fn exit_current_task() {
-    if let Err(msg) = kill_task(unsafe { CURRENT_TASK }) {
+    if let Err(msg) = kill_task(get_current_task().unwrap().id) {
         panic!("couldn't kill task: {}", msg);
     }
 
@@ -290,24 +318,13 @@ pub fn kill_task(id: usize) -> Result<(), &'static str> {
     // TODO: signals, etc
 
     if let Some(task) = get_task(id) {
-        let pid = task.id;
-        
-        remove_task(id);
+        remove_task(task.id);
 
-        log!("task {} (pid {}) exited", id, pid);
+        debug!("process {} exited", id);
 
         Ok(())
     } else {
         Err("couldn't get task")
-    }
-}
-
-/// kills task specified with PID
-pub fn kill_task_pid(pid: usize) -> Result<(), &'static str> {
-    if let Some(id) = pid_to_id(pid) {
-        kill_task(id)
-    } else {
-        Err("PID not found")
     }
 }
 
@@ -330,16 +347,21 @@ pub fn fork_task(id: usize) -> Result<&'static mut Task, &'static str> {
     // copy kernel pages, copy parent task's pages as copy on write
     let kernel_start = LINKED_BASE >> 22;
     let dir = unsafe { PAGE_DIR.as_mut().expect("no paging?") };
-    state.copy_on_write_from(&mut current.state.pages, 0, kernel_start);
-    //state.copy_pages_from(&mut current.state.pages, 0, kernel_start);
+    state.copy_on_write_from(&mut current.state.pages, 0, kernel_start, current.id);
     state.copy_pages_from(dir, kernel_start, 1024);
 
     // create new task with provided state
-    let task = Task::from_state(state);
+    let mut task = Task::from_state(state);
     let id = task.id;
+
+    // set new task's parent to current task's id
+    task.parent = Some(current.id);
+
+    // add child pid to parent's list of children
+    current.children.push(task.id);
 
     add_task(task);
 
     // return reference to new task
-    Ok(get_task_mut(pid_to_id(id).unwrap()).unwrap())
+    Ok(get_task_mut(id).unwrap())
 }

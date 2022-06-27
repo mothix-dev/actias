@@ -1,8 +1,10 @@
 //! i586 syscall handlers
 
 use core::ffi::CStr;
+use x86::current;
+
 use crate::{
-    tasks::{IN_TASK, CURRENT_TASK, get_current_task, get_current_task_mut},
+    tasks::{IN_TASK, get_current_task, get_current_task_mut},
     arch::tasks::{exit_current_task, fork_task},
 };
 use super::ints::SyscallRegisters;
@@ -47,7 +49,7 @@ pub fn fork(regs: &mut SyscallRegisters) {
     get_current_task_mut().unwrap().state.save(regs);
 
     let new_task =
-        match fork_task(unsafe { CURRENT_TASK }) {
+        match fork_task(get_current_task().unwrap().id) {
             Ok(task) => task,
             Err(msg) => panic!("could not fork task: {}", msg), // do we really want to bring the whole system down if we can't fork a process?
         };

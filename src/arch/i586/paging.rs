@@ -625,6 +625,9 @@ pub unsafe fn alloc_region_at(dir: &mut PageDirectory, start: usize, size: usize
 /// our page directory
 pub static mut PAGE_DIR: Option<PageDirectory> = None;
 
+/// how many reserved pages we have
+pub static mut NUM_RESERVED_PAGES: usize = 0;
+
 /// initializes paging
 pub unsafe fn init() {
     // calculate end of kernel in memory
@@ -643,7 +646,7 @@ pub unsafe fn init() {
     // get reserved areas of memory from bootloader
     bootloader::reserve_pages(&mut dir.frame_set);
 
-    let bits_used_reserved = dir.frame_set.bits_used;
+    NUM_RESERVED_PAGES = dir.frame_set.bits_used;
 
     // TODO: map initial kernel memory allocations as global so they won't be invalidated from TLB flushes
 
@@ -669,10 +672,19 @@ pub unsafe fn init() {
     // switch to our new page directory
     PAGE_DIR.as_ref().unwrap().switch_to();
 
-    if let Some(dir) = PAGE_DIR.as_ref() {
-        let bits_used = dir.frame_set.bits_used - bits_used_reserved;
-        let size = dir.frame_set.size - bits_used_reserved;
-        log!("{}mb total, {}/{} mapped ({}mb, {} pages reserved), {}% usage", MEM_SIZE / 1024 / 1024, bits_used, size, bits_used / 256, bits_used_reserved, (bits_used * 100) / size);
+    print_free();
+}
+
+pub fn print_free() {
+    if let Some(dir) = unsafe { PAGE_DIR.as_ref() } {
+        let reserved = unsafe { NUM_RESERVED_PAGES };
+        let mem_size = unsafe { MEM_SIZE };
+
+        let bits_used = dir.frame_set.bits_used - reserved;
+        let size = dir.frame_set.size - reserved;
+        log!("{}mb total, {}/{} mapped ({}mb, {} pages reserved), {}% usage", mem_size / 1024 / 1024, bits_used, size, bits_used / 256, reserved, (bits_used * 100) / size);
+    } else {
+        log!("no page directory :(");
     }
 }
 
@@ -741,6 +753,15 @@ pub fn free_pages(addr: usize, num: usize) {
             }
         }
     }
+}
+
+/// given the physical address of a page, set it as unused
+pub fn free_page_phys(phys: u64) {
+    assert!(phys % PAGE_SIZE as u64 == 0, "address is not page aligned");
+
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+    dir.frame_set.clear((phys >> 12).try_into().unwrap());
 }
 
 /// convert virtual to physical address

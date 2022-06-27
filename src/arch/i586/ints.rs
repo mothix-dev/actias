@@ -18,7 +18,7 @@ use crate::{
     },
     console::{PANIC_COLOR, ColorCode, get_console},
     platform::debug::exit_failure,
-    tasks::{CURRENT_TASK, IN_TASK, get_current_task, get_current_task_mut},
+    tasks::{IN_TASK, get_current_task, get_current_task_mut, remove_page_reference},
 };
 
 /// IDT flags
@@ -244,7 +244,7 @@ unsafe fn generic_exception(name: &str, frame: ExceptionStackFrame) {
 
         let id = get_current_task().unwrap().id;
 
-        log!("{} in task {} (pid {}) @ {:#x}", name, CURRENT_TASK, id, frame.instruction_pointer);
+        log!("{} in process {} @ {:#x}", name, id, frame.instruction_pointer);
         log!("{:#?}", frame);
 
         if let Some(console) = get_console() {
@@ -284,7 +284,7 @@ unsafe fn generic_exception_error_code(name: &str, frame: ExceptionStackFrame, e
 
         let id = get_current_task().unwrap().id;
 
-        log!("{} in task {} (pid {}) @ {:#x}, error code {:#x}", name, CURRENT_TASK, id, frame.instruction_pointer, error_code);
+        log!("{} in process {} @ {:#x}, error code {:#x}", name, id, frame.instruction_pointer, error_code);
         debug!("{:#?}", frame);
 
         if let Some(console) = get_console() {
@@ -417,6 +417,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
 
                     debug!("copy on write, accessed @ {:#x}", address);
 
+                    let old_addr = page.get_address();
                     let page_addr = address as u64 & !(PAGE_SIZE as u64 - 1);
                     let page_mem = current.state.read_mem(page_addr, PAGE_SIZE, true).unwrap();
 
@@ -425,6 +426,8 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
                     match dir.alloc_frame(page, false, true) {
                         Ok(_) => {
                             current.state.write_mem(page_addr, &page_mem, true).unwrap();
+
+                            remove_page_reference(old_addr as u64);
 
                             current.state.pages.switch_to();
 

@@ -24,7 +24,10 @@ pub fn exec(path: &str) -> Result<(), Errno> {
 
     match exec_as(&mut task, path) {
         Ok(_) => Ok(add_task(task)),
-        Err(err) => Err(err),
+        Err(err) => {
+            task.state.free_pages();
+            Err(err)
+        },
     }
 }
 
