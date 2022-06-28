@@ -1,8 +1,8 @@
 pub mod debug;
-pub mod io;
 pub mod vga;
 pub mod irq;
 pub mod bootloader;
+pub mod keyboard;
 
 use crate::{
     console::{TextConsole, SimpleConsole},

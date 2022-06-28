@@ -1,7 +1,6 @@
 //! i586 syscall handlers
 
 use core::ffi::CStr;
-use x86::current;
 
 use crate::{
     tasks::{IN_TASK, get_current_task, get_current_task_mut},
@@ -10,7 +9,7 @@ use crate::{
 use super::ints::SyscallRegisters;
 
 /// amount of syscalls we have
-pub const NUM_SYSCALLS: usize = 5;
+pub const NUM_SYSCALLS: usize = 6;
 
 /// list of function pointers for all available syscalls
 pub static SYSCALL_LIST: [fn(&mut SyscallRegisters) -> (); NUM_SYSCALLS] = [
@@ -19,6 +18,7 @@ pub static SYSCALL_LIST: [fn(&mut SyscallRegisters) -> (); NUM_SYSCALLS] = [
     fork,
     exit,
     get_pid,
+    exec,
 ];
 
 /// is computer on?
@@ -72,6 +72,39 @@ pub fn get_pid(regs: &mut SyscallRegisters) {
     unsafe { IN_TASK = false; }
 
     regs.ebx = get_current_task().expect("no current task").id.try_into().unwrap();
+
+    unsafe { IN_TASK = true; }
+}
+
+/// replaces this process's address space with that of a new process at the path provided
+pub fn exec(regs: &mut SyscallRegisters) {
+    unsafe { IN_TASK = false; }
+
+    let path = unsafe { CStr::from_ptr(regs.ebx as *const _).to_string_lossy().into_owned() };
+
+    debug!("exec()ing {} as pid {}", path, get_current_task().unwrap().id);
+
+    let mut new_task = get_current_task().unwrap().recreate();
+
+    if let Err(err) = crate::exec::exec_as(&mut new_task, &path) {
+        log!("error exec()ing: {}", err);
+
+        new_task.state.free_pages();
+    } else {
+        let mut task = get_current_task_mut().unwrap();
+
+        // free pages of old task
+        task.state.free_pages();
+
+        // exec_as only touches the state, so we can just replace the state and be fine
+        task.state = new_task.state;
+
+        // page table has been replaced, so switch to it
+        task.state.pages.switch_to();
+
+        // registers have been changed, update them
+        *regs = task.state.registers;
+    }
 
     unsafe { IN_TASK = true; }
 }

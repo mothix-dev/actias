@@ -171,15 +171,16 @@ static mut GDT: Aligned<A16, [GDTEntry; GDT_ENTRIES + 1]> = Aligned([GDTEntry(0)
 static mut TSS: Aligned<A16, TaskStateSegment> = Aligned(TaskStateSegment::new());
 
 /// size of kernel stack
-const STACK_SIZE: usize = 4096 * 20; // 80k
+pub const STACK_SIZE: usize = 768 * 1024;
 
 /// kernel stack
-static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+pub static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 #[no_mangle]
 pub static STACK_TOP: &u8 = unsafe { &STACK[STACK_SIZE - 1] };
 
-static mut INTERRUPT_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+/// kernel stack for interrupt handlers
+pub static mut INTERRUPT_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
 /// flush TSS
 unsafe fn flush_tss() {

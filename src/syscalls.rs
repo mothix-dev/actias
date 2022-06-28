@@ -8,4 +8,5 @@ pub enum Syscalls {
     Fork,
     Exit,
     GetPID,
+    Exec,
 }

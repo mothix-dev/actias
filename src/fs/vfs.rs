@@ -272,6 +272,30 @@ pub fn remove_mount_point(name: &str) {
     }
 }
 
+pub fn add_device(name: &str, tree: Box<dyn Directory>) {
+    let dir = get_directory_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, "/dev").expect("couldn't get device directory");
+    let permissions = dir.get_permissions();
+
+    dir.get_directories_mut().push(Box::new(MountPoint { // we can just do this again since it works lmao
+        dir: tree,
+        permissions,
+        name: name.to_string(),
+    }))
+}
+
+pub fn remove_device(name: &str) {
+    let dir = get_directory_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, "/dev").expect("couldn't get device directory");
+
+    let devices = dir.get_directories_mut();
+
+    for i in 0..devices.len() {
+        if devices[i].get_name() == name {
+            devices.remove(i);
+            break;
+        }
+    }
+}
+
 pub fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
     let file = get_file_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, path).ok_or(Errno::NoSuchFileOrDir)?;
 
@@ -296,8 +320,13 @@ pub fn init() {
     vfs_mkdir("/proc");
     vfs_mkdir("/fs");
 
+    // add console device
+    add_device("console", crate::console::make_console_device());
+
     // mount initrd
     if let Some(initrd) = crate::platform::get_initrd() {
         add_mount_point("initrd", crate::tar::make_tree(TarIterator::new(initrd)));
     }
+
+    //print_tree(unsafe { ROOT_DIR.as_ref().unwrap() });
 }

@@ -55,6 +55,8 @@ pub mod tar;
 
 pub mod exec;
 
+pub mod keysym;
+
 /// tests
 #[cfg(test)]
 pub mod test;
@@ -67,6 +69,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 use platform::debug::exit_success;
+
+use crate::arch::tasks::idle_until_switch;
 
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
@@ -92,20 +96,6 @@ pub extern fn kmain() -> ! {
     {
         exec::exec("/fs/initrd/test-bin").unwrap();
 
-        start_multitasking();
-    }
-}
-
-use core::arch::asm;
-
-/// start multitasking
-pub fn start_multitasking() -> ! {
-    unsafe {
-        crate::tasks::IN_TASK = true;
-        crate::tasks::CURRENT_TERMINATED = true; // prevents state from being stomped on in context switch
-
-        asm!("sti; hlt");
-
-        loop {}
+        idle_until_switch(); // this also enables multitasking
     }
 }

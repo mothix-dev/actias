@@ -2,19 +2,20 @@
 // warning: this code is terrible. do not do anything like this
 
 use alloc::alloc::{Layout, alloc};
+use bitmask_enum::bitmask;
 use core::{
     arch::asm,
     default::Default,
     fmt,
     mem::size_of,
 };
-use bitmask_enum::bitmask;
 use crate::{
     util::array::BitSet,
     mm::KHEAP_INITIAL_SIZE,
     platform::bootloader,
 };
 use super::{MEM_SIZE, LINKED_BASE, KHEAP_START, PAGE_SIZE};
+use x86::tlb::flush;
 
 extern "C" {
     /// located at end of kernel, used for calculating placement address
@@ -702,7 +703,7 @@ pub fn alloc_pages(addr: usize, num: usize, is_kernel: bool, is_writeable: bool)
 
         unsafe {
             match dir.alloc_frame(page, is_kernel, is_writeable) {
-                Ok(_) => asm!("invlpg [{0}]", in(reg) addr), // invalidate this page in the TLB
+                Ok(_) => flush(addr), // invalidate this page in the TLB
                 Err(msg) => panic!("couldn't allocate page: {}", msg),
             }
         }
@@ -729,7 +730,7 @@ pub fn alloc_pages_at(virt_addr: usize, num: usize, phys_addr: u64, is_kernel: b
 
         unsafe {
             match dir.alloc_frame_at(phys.try_into().unwrap(), page, is_kernel, is_writeable, force) {
-                Ok(_) => asm!("invlpg [{0}]", in(reg) virt_addr), // invalidate this page in the TLB
+                Ok(_) => flush(virt_addr), // invalidate this page in the TLB
                 Err(msg) => panic!("couldn't allocate page: {}", msg),
             }
         }

@@ -5,7 +5,7 @@ use crate::arch::{
     paging::free_page_phys,
 };
 use alloc::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     vec::Vec,
 };
 use core::fmt;
@@ -36,6 +36,16 @@ impl Task {
             state, id,
             children: Vec::new(),
             parent: None,
+        }
+    }
+
+    /// recreates this task with a default state
+    pub fn recreate(&self) -> Self {
+        Self {
+            state: Default::default(),
+            id: self.id,
+            children: self.children.to_vec(),
+            parent: self.parent,
         }
     }
 }
@@ -199,7 +209,7 @@ pub fn get_current_task_mut() -> Option<&'static mut Task> {
 /// switch to the next task, making it the current task
 pub fn switch_tasks() {
     unsafe {
-        if TASKS.len() != 0 {
+        if !TASKS.is_empty() {
             CURRENT_TASK = (CURRENT_TASK + 1) % TASKS.len();
         }
     }
@@ -237,7 +247,7 @@ pub fn remove_task(pid: usize) {
                 TASKS.remove(id);
 
                 if id == CURRENT_TASK {
-                    if TASKS.len() != 0 {
+                    if !TASKS.is_empty() {
                         CURRENT_TASK = (CURRENT_TASK - 1) % TASKS.len();
                     }
                     CURRENT_TERMINATED = true;

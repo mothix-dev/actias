@@ -2,14 +2,14 @@
 
 use alloc::{
     alloc::{Layout, alloc, dealloc},
-    vec::Vec, collections::BTreeSet,
+    vec::Vec,
 };
 use core::arch::asm;
 use crate::{
     arch::{PAGE_SIZE, LINKED_BASE},
     errno::Errno,
     tasks::{
-        IN_TASK,
+        IN_TASK, CURRENT_TERMINATED,
         Task,
         remove_task, get_task, get_task_mut, add_task, get_current_task, add_page_reference, remove_page_reference, get_page_references,
     },
@@ -18,6 +18,7 @@ use super::{
     ints::SyscallRegisters,
     paging::{PAGE_DIR, PageDirectory, PageTableFlags, alloc_pages_at, free_pages, free_page_phys},
 };
+use x86::tlb::flush;
 
 pub struct TaskState {
     pub registers: SyscallRegisters,
@@ -132,6 +133,8 @@ impl TaskState {
                             if !get_page_references().contains_key(&phys) {
                                 free_page_phys(phys);
                             }
+
+                            page.set_unused();
                         }
                     }
                 }
@@ -153,7 +156,8 @@ impl TaskState {
             match dir.alloc_frame(page, is_kernel, is_writeable) {
                 Ok(_) =>
                     if invalidate {
-                        asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+                        flush(addr as usize); // invalidate this page in the TLB
+
                     },
                 Err(msg) => panic!("couldn't allocate page: {}", msg),
             }
@@ -171,7 +175,7 @@ impl TaskState {
                 match dir.free_frame(page) {
                     Ok(_) =>
                         if invalidate {
-                            asm!("invlpg [{0}]", in(reg) addr); // invalidate this page in the TLB
+                            flush(addr as usize); // invalidate this page in the TLB
                         },
                     Err(msg) => panic!("couldn't free page: {}", msg),
                 }
@@ -196,7 +200,7 @@ impl TaskState {
 
         // align start and end addresses to page boundaries
         if start % PAGE_SIZE_U64 != 0 {
-            start = start & !(PAGE_SIZE_U64 - 1);
+            start &= !(PAGE_SIZE_U64 - 1);
             offset = addr - start;
         }
 
@@ -256,10 +260,8 @@ impl TaskState {
         debug!("mapping task mem out");
 
         // map memory back
-        let mut j = 0;
-        for i in (mem.ptr as usize..mem.ptr as usize + mem.buf_len).step_by(PAGE_SIZE) {
+        for (j, i) in (mem.ptr as usize..mem.ptr as usize + mem.buf_len).step_by(PAGE_SIZE).enumerate() {
             alloc_pages_at(i, 1, mem.existing_phys[j], true, true, true);
-            j += 1;
         }
 
         // free memory back to heap
@@ -299,18 +301,27 @@ impl Default for TaskState {
     }
 }
 
-/// exits current task, cpu idles until next task switch
-pub fn exit_current_task() {
-    if let Err(msg) = kill_task(get_current_task().unwrap().id) {
-        panic!("couldn't kill task: {}", msg);
-    }
+/// idle the cpu until the next task switch
+pub fn idle_until_switch() -> ! {
+    debug!("idling until next context switch");
 
-    // idle the cpu until the next task switch
-    unsafe { IN_TASK = true; }
+    unsafe {
+        IN_TASK = true;
+        CURRENT_TERMINATED = true;
+    }
 
     loop {
         unsafe { asm!("sti; hlt"); }
     }
+}
+
+/// exits current task, cpu idles until next task switch
+pub fn exit_current_task() -> ! {
+    if let Err(msg) = kill_task(get_current_task().unwrap().id) {
+        panic!("couldn't kill task: {}", msg);
+    }
+
+    idle_until_switch();
 }
 
 /// kills specified task

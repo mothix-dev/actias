@@ -16,14 +16,20 @@ pub struct VGAConsole {
 }
 
 impl RawTextConsole for VGAConsole {
-    fn write_char(&mut self, x: u16, y: u16, color: ColorCode, c: u8) {
-        self.buffer[y as usize * self.width + x as usize] = (((color.background as u16) & 0xf) << 12) | (((color.foreground as u16) & 0xf) << 8) | (c as u16);
+    fn write_char(&mut self, x: u16, y: u16, color: ColorCode, c: char) {
+        let character =
+            if c as u32 > 0x100 {
+                b'?'
+            } else {
+                c as u8
+            };
+        self.buffer[y as usize * self.width + x as usize] = (((color.background as u16) & 0xf) << 12) | (((color.foreground as u16) & 0xf) << 8) | (character as u16);
     }
 
     fn clear(&mut self, x0: u16, y0: u16, x1: u16, y1: u16, color: ColorCode) {
         let color2 = (((color.background as u16) & 0xf) << 12) | (((color.foreground as u16) & 0xf) << 8);
-        for y in y0..y1 {
-            for x in x0..x1 {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
                 self.buffer[y as usize * self.width + x as usize] = color2 | ((b' ') as u16);
             }
         }

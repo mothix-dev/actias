@@ -19,7 +19,7 @@ use generic_array::{
 use crate::{
     errno::Errno,
     fs::{
-        tree::{File, Directory, SymLink, LockKind, get_directory_from_path},
+        tree::{File, Directory, SymLink, get_directory_from_path},
         vfs::Permissions,
         basename, dirname,
     },
@@ -363,10 +363,6 @@ impl File for TarFile {
     
     fn truncate(&mut self, _size: usize) -> Result<(), Errno> {
         Err(Errno::ReadOnlyFileSystem)
-    }
-
-    fn lock(&mut self, _kind: LockKind, _size: isize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 
     fn get_name(&self) -> &str {

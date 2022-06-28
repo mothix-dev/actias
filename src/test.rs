@@ -5,7 +5,7 @@ use crate::{
     console::{ColorCode, get_console},
     fs::{
         tree::{
-            File, Directory, SymLink, LockKind,
+            File, Directory, SymLink,
             get_file_from_path, get_directory_from_path,
         },
         vfs::{Permissions, read_file},
@@ -177,11 +177,6 @@ impl File for TestFile {
     fn truncate(&mut self, _size: usize) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
-
-    fn lock(&mut self, _kind: LockKind, _size: isize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
 
     fn get_name(&self) -> &str {
         &self.name

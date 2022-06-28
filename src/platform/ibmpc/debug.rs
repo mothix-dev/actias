@@ -12,7 +12,7 @@
  * its use, and the author takes no liability.
  */
 
-use super::io::{inb, outb};
+use x86::io::{inb, outb};
 
 /// Write a string to the output channel
 ///

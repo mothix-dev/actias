@@ -14,8 +14,7 @@ use crate::{
 };
 use goblin::elf::{
     Elf,
-    program_header::{PT_PHDR, PT_LOAD, PT_INTERP},
-    section_header::{SHT_NULL, SHT_PROGBITS, SHT_NOBITS},
+    program_header::{PT_LOAD, PT_INTERP},
 };
 
 /// spawn a process from the given path
@@ -23,7 +22,11 @@ pub fn exec(path: &str) -> Result<(), Errno> {
     let mut task = Task::new();
 
     match exec_as(&mut task, path) {
-        Ok(_) => Ok(add_task(task)),
+        Ok(_) => {
+            debug!("adding task");
+            add_task(task);
+            Ok(())
+        },
         Err(err) => {
             task.state.free_pages();
             Err(err)
@@ -33,6 +36,8 @@ pub fn exec(path: &str) -> Result<(), Errno> {
 
 /// replace a task's address space with that of the program at the given path
 pub fn exec_as(task: &mut Task, path: &str) -> Result<(), Errno> {
+    debug!("exec_as: {:?}", path);
+
     let buffer = read_file(path).unwrap();
 
     let elf = Elf::parse(&buffer).map_err(|_| Errno::ExecutableFormatErr)?;
@@ -42,6 +47,8 @@ pub fn exec_as(task: &mut Task, path: &str) -> Result<(), Errno> {
     } else {
         //log!("got elf: {:#?}", elf);
         let entry = elf.entry;
+
+        debug!("allocating stack");
 
         // alloc stack for task
         task.state.alloc_page((LINKED_BASE - PAGE_SIZE) as u32, false, true, false);
@@ -93,30 +100,6 @@ pub fn exec_as(task: &mut Task, path: &str) -> Result<(), Errno> {
                     return Err(Errno::ExecutableFormatErr);
                 },
                 _ => debug!("unknown program header {:?}", ph.p_type),
-            }
-        }
-
-        for sh in elf.section_headers {
-            debug!("{:?}", sh);
-
-            match sh.sh_type {
-                SHT_NULL => (),
-                SHT_PROGBITS => {
-                    let start: usize = sh.sh_offset.try_into().map_err(|_| Errno::ExecutableFormatErr)?;
-                    let end: usize = (sh.sh_offset + sh.sh_size).try_into().map_err(|_| Errno::ExecutableFormatErr)?;
-
-                    debug!("data @ {:#x} - {:#x}", sh.sh_addr, sh.sh_addr + sh.sh_size);
-                    
-                    task.state.write_mem(sh.sh_addr, &buffer[start..end], sh.is_writable()).map_err(|_| Errno::ExecutableFormatErr)?;
-                },
-                SHT_NOBITS => {
-                    let data: Vec<u8> = vec![sh.sh_size.try_into().expect("program header size too big"); 0];
-
-                    debug!("data @ {:#x} - {:#x}", sh.sh_addr, sh.sh_addr + sh.sh_size);
-                    
-                    task.state.write_mem(sh.sh_addr, &data, sh.is_writable()).map_err(|_| Errno::ExecutableFormatErr)?;
-                },
-                _ => debug!("unknown section header {:?}", sh.sh_type),
             }
         }
 

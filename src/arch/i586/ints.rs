@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     arch::{
-        MEM_TOP, PAGE_SIZE,
+        PAGE_SIZE,
         tasks::exit_current_task,
     },
     console::{PANIC_COLOR, ColorCode, get_console},
@@ -524,6 +524,17 @@ extern "C" {
 
 /// set up idt(r) and enable interrupts
 pub unsafe fn init() {
+    /*fn idt_vector(vector: usize, handler: *const (), flags: IDTFlags) {
+        debug!("setting up vector {:#x} with handler {:#x}, flags {:?}", vector, handler as usize, flags);
+        unsafe {
+            IDT[vector] = IDTEntry::new(handler, flags);
+        }
+        debug!("done");
+    }*/
+
+    debug!("idt @ {:#x}", &IDT as *const _ as usize);
+
+    debug!("setting up exception vectors");
     // set up exception handlers
     IDT[Exceptions::DivideByZero as usize] = IDTEntry::new(divide_by_zero_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
@@ -546,6 +557,7 @@ pub unsafe fn init() {
     IDT[Exceptions::VMMCommunication as usize] = IDTEntry::new(vmm_exception_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Security as usize] = IDTEntry::new(security_exception_handler as *const (), IDTFlags::Exception);
 
+    debug!("setting up syscall vector");
     IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
 
     // init irq handlers

@@ -14,7 +14,7 @@ use super::{
 };
 
 /// controls how File::lock() locks
-pub enum LockKind {
+/*pub enum LockKind {
     /// unlock a locked section
     Unlock,
 
@@ -26,7 +26,7 @@ pub enum LockKind {
 
     /// test if a section is locked
     Test
-}
+}*/
 
 pub trait File {
     /// get permissions for file
@@ -73,7 +73,7 @@ pub trait File {
 
     /// lock file
     /// lock behavior depends on the LockKind provided
-    fn lock(&mut self, kind: LockKind, size: isize) -> Result<(), Errno>;
+    //fn lock(&mut self, kind: LockKind, size: isize) -> Result<(), Errno>;
 
 
     /// gets name of file
@@ -176,13 +176,13 @@ pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Op
     if path.is_empty() { // sanity check
         None
     } else {
-        let mut dir_name = dirname(path).to_string();
+        let mut dir_name = dirname(path);
         let mut file_name = basename(path)?.to_string();
 
         while let Some(link) = get_directory_from_path(dir, &dir_name)?.get_links().iter().find(|l| l.get_name() == file_name) {
             let target = format!("{}/{}", dir_name, link.get_target());
 
-            dir_name = dirname(&target).to_string(); // if we own the strings the borrow checker won't yell at us
+            dir_name = dirname(&target); // if we own the strings the borrow checker won't yell at us
             file_name = basename(&target)?.to_string();
         }
 
