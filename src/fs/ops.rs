@@ -5,7 +5,7 @@ use alloc::{
     boxed::Box,
     string::{String, ToString},
 };
-use crate::errno::Errno;
+use crate::types::Errno;
 use super::{
     tree::{File, get_file_from_path},
     vfs::{Permissions, ROOT_DIR},

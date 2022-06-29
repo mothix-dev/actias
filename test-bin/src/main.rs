@@ -1,11 +1,13 @@
 #![no_std]
 #![no_main]
 
-#[path="../..//syscalls.rs"]
+#[path="../../syscalls.rs"]
 pub mod syscalls;
 
-use core::arch::asm;
-use core::panic::PanicInfo;
+use core::{
+    arch::asm,
+    panic::PanicInfo,
+};
 
 #[panic_handler]
 fn panic_handler(_info: &PanicInfo) -> ! {
@@ -16,7 +18,7 @@ fn panic_handler(_info: &PanicInfo) -> ! {
 static mut TEST_STATIC: usize = 0;
 
 #[no_mangle]
-fn _start() {
+pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, _envp: *const *const u8) {
     if syscalls::is_computer_on() {
         syscalls::test_log(b"computer is on\0");
     } else {
@@ -38,7 +40,23 @@ fn _start() {
             syscalls::test_log(b"parent: preserved\0");
         }
 
-        syscalls::exec(b"/fs/initrd/test-bin2\0");
+        let file = b"/fs/initrd/test-bin2\0";
+
+        let args: [*const u8; 4] = [
+            file as *const u8,
+            b"test arg 1\0" as *const u8,
+            b"test arg 2\0" as *const u8,
+            0 as *const u8,
+        ];
+
+        let env: [*const u8; 3] = [
+            //0xb0000000 as *const u8,
+            b"env test 1\0" as *const u8,
+            b"env test 2\0" as *const u8,
+            0 as *const u8,
+        ];
+
+        syscalls::exec(file, &args, &env);
     } else {
         syscalls::test_log(b"child\0");
 

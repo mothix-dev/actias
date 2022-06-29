@@ -13,6 +13,7 @@ use crate::{
     util::array::BitSet,
     mm::KHEAP_INITIAL_SIZE,
     platform::bootloader,
+    tasks::{IN_TASK, get_current_task_mut},
 };
 use super::{MEM_SIZE, LINKED_BASE, KHEAP_START, PAGE_SIZE};
 use x86::tlb::flush;
@@ -526,7 +527,7 @@ impl PageDirectory {
 
                 debug!("allocated frame {:?}", page2);
 
-                Ok(address)
+                Ok((idx << 12) as u32)
             } else {
                 Err(PageDirError::FrameInUse)
             }
@@ -689,7 +690,23 @@ pub fn print_free() {
     }
 }
 
+// sync with current task's page table if we haven't fully switched to kernel mode
+fn sync_with_task(addr: usize, num: usize) {
+    let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+    if unsafe { IN_TASK } {
+        let current = get_current_task_mut().unwrap();
+
+        // copy from the kernel's page directory to the task's
+        current.state.copy_pages_from(dir, addr >> 22, ((addr + num * PAGE_SIZE) >> 22) + 1);
+
+        // the task's page directory is now up to date (at least for our purposes)
+        current.state.page_updates = dir.page_updates;
+    }
+}
+
 /// allocate pages and map to given address
+/// 
 /// num is in terms of pages, so num * PAGE_SIZE gives the amount of bytes mapped
 pub fn alloc_pages(addr: usize, num: usize, is_kernel: bool, is_writeable: bool) {
     assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
@@ -708,9 +725,12 @@ pub fn alloc_pages(addr: usize, num: usize, is_kernel: bool, is_writeable: bool)
             }
         }
     }
+
+    sync_with_task(addr, num);
 }
 
 /// allocate pages at given physical address and map to given virtual address
+/// 
 /// num is in terms of pages, so num * PAGE_SIZE gives the amount of bytes mapped
 pub fn alloc_pages_at(virt_addr: usize, num: usize, phys_addr: u64, is_kernel: bool, is_writeable: bool, force: bool) {
     assert!(virt_addr % PAGE_SIZE == 0, "virtual address is not page aligned");
@@ -735,9 +755,12 @@ pub fn alloc_pages_at(virt_addr: usize, num: usize, phys_addr: u64, is_kernel: b
             }
         }
     }
+
+    sync_with_task(virt_addr, num);
 }
 
 /// free pages at given address
+/// 
 /// num is in terms of pages, so num * PAGE_SIZE gives the amount of bytes mapped
 pub fn free_pages(addr: usize, num: usize) {
     assert!(addr % PAGE_SIZE == 0, "address is not page aligned");
@@ -754,6 +777,8 @@ pub fn free_pages(addr: usize, num: usize) {
             }
         }
     }
+
+    sync_with_task(addr, num);
 }
 
 /// given the physical address of a page, set it as unused

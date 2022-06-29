@@ -19,14 +19,6 @@ pub const MAX_STACK_FRAMES: usize = 1024;
 
 pub static mut MEM_SIZE: u64 = 0; // filled in later by BIOS or something similar
 
-/// initialize paging, just cleanly map our kernel to 3gb
-#[no_mangle]
-pub extern fn x86_prep_page_table(buf: &mut [u32; 1024]) {
-    for i in 0u32 .. 1024 {
-        buf[i as usize] = i * 0x1000 + 3;
-    }
-}
-
 /// halt system
 pub fn halt() -> ! {
     log!("halting");
@@ -53,4 +45,9 @@ pub fn init() {
 
     debug!("initializing paging");
     unsafe { paging::init(); }
+}
+
+pub fn init_after_heap() {
+    debug!("bootloader init after heap");
+    bootloader::init_after_heap();
 }

@@ -1,4 +1,4 @@
-use crate::keysym::KeySym;
+use crate::types::KeySym;
 use lazy_static::lazy_static;
 
 lazy_static! {

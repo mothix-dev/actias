@@ -1,6 +1,5 @@
 //! generic text mode console interface and ANSI terminal emulator
 
-use num_enum::FromPrimitive;
 use alloc::{
     boxed::Box,
     format,
@@ -14,13 +13,13 @@ use core::{
 };
 use crate::{
     platform::create_console,
-    keysym::KeySym,
     fs::{
         tree::{File, Directory, SymLink},
         vfs::Permissions,
     },
-    errno::Errno,
+    types::{Errno, KeySym},
 };
+use num_enum::FromPrimitive;
 use x86::io::{inb, outb};
 
 /// text colors
@@ -121,7 +120,7 @@ pub trait RawTextConsole {
 
 const MAX_KEYS_BUFFERED: usize = 1024;
 
-/// ok well it's not that simple anymore but i dont care
+/// ok well it's not that simple anymore but i don't care
 pub struct SimpleConsole {
     /// raw console we're outputting with
     pub raw: Box<dyn RawTextConsole + Sync>,
@@ -258,7 +257,7 @@ impl SimpleConsole {
                         self.control_mode = 0;
 
                         // convert buffer into string for ease of use
-                        let string = self.control_buf.to_vec().into_iter().collect::<String>();
+                        let string = self.control_buf.iter().copied().collect::<String>();
 
                         // parse command
                         match c {
@@ -437,14 +436,14 @@ impl SimpleConsole {
 
                             // report the cursor's position
                             'n' => if string.parse::<u16>().unwrap_or(0) == 6 {
-                                if self.raw_mode {
-                                    log!("FIXME: implement raw mode");
-                                } else {
-                                    self.lines.append(&mut (format!("\x1b[{};{}R", self.cursor_y + 1, self.cursor_x + 1).bytes().collect()));
+                                let mut bytes: Vec<u8> = format!("\x1b[{};{}R", self.cursor_y + 1, self.cursor_x + 1).bytes().collect();
+                                
+                                if self.lines.len() + bytes.len() <= MAX_KEYS_BUFFERED {
+                                    self.lines.append(&mut bytes);
                                 }
                             },
 
-                            _ => (),
+                            _ => debug!("unsupported ANSI control string: \"{}{}\"", string, c),
                         }
 
                         self.control_buf.clear();
@@ -489,8 +488,10 @@ impl SimpleConsole {
 
     // input a string into the line buffer or raw input buffer
     fn puts_inputted(&mut self, s: &str) {
-        for c in s.chars() {
-            self.putc_inputted(c);
+        if (self.raw_mode && self.lines.len() + s.len() <= MAX_KEYS_BUFFERED) || (!self.raw_mode && self.lines.len() + self.line.len() + s.len() <= MAX_KEYS_BUFFERED) {
+            for c in s.chars() {
+                self.putc_inputted(c);
+            }
         }
     }
 
@@ -548,7 +549,7 @@ impl TextConsole for SimpleConsole {
             KeySym::Shift | KeySym::LeftShift | KeySym::RightShift => self.shift_state = state,
             KeySym::Alt | KeySym::AltGr => self.alt_state = state,
 
-            _ => if self.lines.len() < MAX_KEYS_BUFFERED && state {
+            _ => if state {
                 match key {
                     KeySym::Escape => self.input_sequence(""),
 
@@ -591,8 +592,10 @@ impl TextConsole for SimpleConsole {
                     KeySym::F19 => self.input_sequence("[33~"),
                     KeySym::F20 => self.input_sequence("[34~"),
 
-                    _ => if self.raw_mode && (key as u16) < 0x0100 {
-                        self.lines.push(key as u8);
+                    _ => if self.raw_mode {
+                        if (key as u16) < 0x0100 && self.lines.len() < MAX_KEYS_BUFFERED {
+                            self.lines.push(key as u8);
+                        }
                     } else {
                         match key {
                             KeySym::Backspace => if !self.line.is_empty() {
@@ -600,17 +603,19 @@ impl TextConsole for SimpleConsole {
                                 self.line.pop();
                             },
                             KeySym::Linefeed => {
-                                // output a newline and add it to line
-                                self.putc('\n');
-                                self.line.push('\n');
-    
-                                // add cooked line to buffer
-                                self.lines.append(&mut (self.line.to_vec().into_iter().collect::<String>().bytes().collect()));
-    
-                                // clear current line
-                                self.line.clear();
+                                if self.lines.len() + self.line.len() < MAX_KEYS_BUFFERED {
+                                    // output a newline and add it to line
+                                    self.putc('\n');
+                                    self.line.push('\n');
+        
+                                    // add cooked line to buffer
+                                    self.lines.append(&mut (self.line.iter().copied().collect::<String>().bytes().collect()));
+        
+                                    // clear current line
+                                    self.line.clear();
+                                }
                             },
-                            _ => if (key as u16) < 0x0100 {
+                            _ => if (key as u16) < 0x0100 && self.lines.len() + self.line.len() < MAX_KEYS_BUFFERED {
                                 self.putc_inputted(key as u8 as char); // writes the char to screen and inputs it in the line buffer
                             },
                         }

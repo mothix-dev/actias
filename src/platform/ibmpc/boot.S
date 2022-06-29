@@ -10,10 +10,6 @@
  * its use, and the author takes no liability.
  */
 
-/*
-TODO: rewrite in NASM? or some other assembler
-*/
-
 /* The kernel is linked to run at 3GB */
 LINKED_BASE = 0xC0000000
 

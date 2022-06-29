@@ -3,8 +3,8 @@
 use bitmask_enum::bitmask;
 use core::fmt;
 use crate::{
-    errno::Errno,
     tar::TarIterator,
+    types::Errno,
 };
 use alloc::{
     boxed::Box,

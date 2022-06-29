@@ -1,6 +1,6 @@
 //! vfs tree
 
-use crate::errno::Errno;
+use crate::types::Errno;
 use alloc::{
     boxed::Box,
     format,

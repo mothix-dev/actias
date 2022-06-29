@@ -18,7 +18,7 @@ use crate::{
 #[panic_handler]
 pub fn panic_implementation(info: &::core::panic::PanicInfo) -> ! {
     let (file,line) = match info.location() {
-        Some(loc) => (loc.file(), loc.line(),),
+        Some(loc) => (loc.file(), loc.line()),
         None => ("", 0),
     };
 
@@ -69,7 +69,7 @@ static _UA_SEARCH_PHASE: _Unwind_Action = 1;
 #[derive(Clone,Copy)]
 pub struct _Unwind_Exception {
     exception_class: u64,
-    exception_cleanup: fn(_Unwind_Reason_Code,*const _Unwind_Exception),
+    exception_cleanup: fn(_Unwind_Reason_Code, *const _Unwind_Exception),
     private: [u64; 2],
 }
 
@@ -77,5 +77,5 @@ pub struct _Unwind_Exception {
 #[allow(non_snake_case)]
 #[allow(clippy::empty_loop)]
 pub fn _Unwind_Resume() {
-    loop {}
+    crate::arch::halt();
 }

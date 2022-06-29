@@ -17,6 +17,15 @@ use alloc::{
 };
 use bootloader::{FramebufferKind, get_multiboot_info};
 
+/// initialize paging, just cleanly map our kernel to 3gb
+#[no_mangle]
+pub extern fn x86_prep_page_table(buf: &mut [u32; 1024]) {
+    for i in 0u32 .. 1024 {
+        buf[i as usize] = i * 0x1000 + 3;
+    }
+}
+
+/// creates a system console
 pub fn create_console() -> SimpleConsole {
     let mut phys_addr = 0xb8000;
     let mut width = 80;
@@ -79,8 +88,9 @@ pub fn create_console() -> SimpleConsole {
     console
 }
 
+/// gets a reference to initrd data if one exists
 pub fn get_initrd() -> Option<&'static [u8]> {
     let info = crate::platform::bootloader::get_multiboot_info();
 
-    info.mods.map(|m| m[0].data())
+    info.mods.as_ref().map(|m| m[0].data())
 }

@@ -10,7 +10,7 @@ use crate::{
         },
         vfs::{Permissions, read_file},
     },
-    errno::Errno,
+    types::Errno,
 };
 use alloc::{
     boxed::Box,

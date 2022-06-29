@@ -17,12 +17,12 @@ use generic_array::{
     typenum::{U8, U12},
 };
 use crate::{
-    errno::Errno,
     fs::{
         tree::{File, Directory, SymLink, get_directory_from_path},
         vfs::Permissions,
         basename, dirname,
     },
+    types::Errno,
 };
 
 const BLOCK_SIZE: usize = 512;

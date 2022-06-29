@@ -2,7 +2,7 @@
 
 /// list of syscalls- we want this to be the same across all platforms
 #[repr(usize)]
-pub enum Syscalls {
+pub enum Syscall {
     IsComputerOn = 0,
     TestLog,
     Fork,

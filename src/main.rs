@@ -25,13 +25,13 @@
 mod macros;
 
 // architecture specific modules
-#[path="arch/i586/mod.rs"]
 #[cfg(target_arch = "i586")]
+#[path="arch/i586/mod.rs"]
 pub mod arch;
 
 // platform specific modules
-#[path="platform/ibmpc/mod.rs"]
 #[cfg(target_platform = "ibmpc")]
+#[path="platform/ibmpc/mod.rs"]
 pub mod platform;
 
 pub mod unwind;
@@ -39,23 +39,13 @@ pub mod unwind;
 mod logging;
 
 pub mod console;
-
-pub mod mm;
-
-pub mod util;
-
-pub mod tasks;
-pub mod syscalls;
-
-pub mod fs;
-
-pub mod errno;
-
-pub mod tar;
-
 pub mod exec;
-
-pub mod keysym;
+pub mod fs;
+pub mod mm;
+pub mod tar;
+pub mod tasks;
+pub mod types;
+pub mod util;
 
 /// tests
 #[cfg(test)]
@@ -67,11 +57,6 @@ extern crate alloc;
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(test)]
-use platform::debug::exit_success;
-
-use crate::arch::tasks::idle_until_switch;
-
 // kernel entrypoint (called by arch/<foo>/boot.S)
 #[no_mangle]
 pub extern fn kmain() -> ! {
@@ -79,6 +64,8 @@ pub extern fn kmain() -> ! {
     arch::init(); // platform specific initialization
 
     mm::init(); // init memory management/heap/etc
+
+    arch::init_after_heap(); // platform specific init after we have a functioning heap
 
     console::init(); // init console
 
@@ -89,13 +76,12 @@ pub extern fn kmain() -> ! {
     #[cfg(test)]
     {
         test_main();
-        exit_success();
+        platform::debug::exit_success();
     }
 
     #[cfg(not(test))]
     {
-        exec::exec("/fs/initrd/test-bin").unwrap();
-
-        idle_until_switch(); // this also enables multitasking
+        exec::exec("/fs/initrd/test-bin", &[], &[]).unwrap();
+        arch::tasks::idle_until_switch(); // this also enables multitasking
     }
 }

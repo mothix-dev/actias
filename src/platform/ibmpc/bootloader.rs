@@ -99,7 +99,7 @@ pub struct MultibootInfoCopy {
     pub cmdline: Option<&'static str>,
 
     /// modules provided by bootloader
-    pub mods: Option<&'static [MultibootModuleCopy]>,
+    pub mods: Option<&'static mut [MultibootModuleCopy]>,
 
     /// name of bootloader
     pub bootloader_name: Option<&'static str>,
@@ -129,35 +129,41 @@ pub struct MultibootModuleCopy {
 
 impl MultibootModuleCopy {
     pub fn data(&self) -> &'static [u8] {
-        let buf_size = (self.data_end - self.data_start) as usize;
-
-        let num_pages =
-            if buf_size % PAGE_SIZE != 0 {
-                (buf_size + PAGE_SIZE) / PAGE_SIZE
-            } else {
-                buf_size / PAGE_SIZE
-            };
-        
-        let buf_size_aligned = num_pages * PAGE_SIZE;
-        
-        debug!("buf size {:#x}, aligned to {:#x}", buf_size, buf_size_aligned);
-
-        let layout = Layout::from_size_align(buf_size_aligned, PAGE_SIZE).unwrap();
-        let ptr = unsafe { alloc(layout) };
-
-        assert!(ptr as usize % PAGE_SIZE == 0); // make absolutely sure pointer is page aligned
-
-        // free memory we're going to remap
-        free_pages(ptr as usize, num_pages);
-
-        // remap memory
-        alloc_pages_at(ptr as usize, num_pages, self.data_start as u64, true, true, true);
-
-        unsafe { slice::from_raw_parts(ptr, buf_size) }
+        self.data.unwrap()
     }
 
     pub fn string(&self) -> &str {
         self.string
+    }
+
+    pub fn map_data(&mut self) {
+        if self.data.is_none() {
+            let buf_size = (self.data_end - self.data_start) as usize;
+
+            let num_pages =
+                if buf_size % PAGE_SIZE != 0 {
+                    (buf_size + PAGE_SIZE) / PAGE_SIZE
+                } else {
+                    buf_size / PAGE_SIZE
+                };
+            
+            let buf_size_aligned = num_pages * PAGE_SIZE;
+            
+            debug!("buf size {:#x}, aligned to {:#x}", buf_size, buf_size_aligned);
+
+            let layout = Layout::from_size_align(buf_size_aligned, PAGE_SIZE).unwrap();
+            let ptr = unsafe { alloc(layout) };
+
+            assert!(ptr as usize % PAGE_SIZE == 0); // make absolutely sure pointer is page aligned
+
+            // free memory we're going to remap
+            free_pages(ptr as usize, num_pages);
+
+            // remap memory
+            alloc_pages_at(ptr as usize, num_pages, self.data_start as u64, true, true, true);
+
+            self.data = Some(unsafe { slice::from_raw_parts(ptr, buf_size) });
+        }
     }
 }
 
@@ -204,7 +210,7 @@ impl MultibootInfo {
                         new_module.string = copy_str(unsafe { CStr::from_ptr((old_module.string as usize + LINKED_BASE) as *const _).to_str().unwrap_or("") });
                     }
 
-                    Some(&*new)
+                    Some(new)
                 } else {
                     None
                 }
@@ -623,6 +629,11 @@ pub fn get_multiboot_info() -> &'static MultibootInfoCopy {
     unsafe { MULTIBOOT_INFO.as_ref().unwrap() }
 }
 
+/// gets mutable copy of multiboot info. only used here since having other parts of the kernel able to modify it could be bad?
+fn get_multiboot_info_mut() -> &'static mut MultibootInfoCopy {
+    unsafe { MULTIBOOT_INFO.as_mut().unwrap() }
+}
+
 /// saves me from typing a bit
 const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
@@ -739,4 +750,13 @@ pub unsafe fn init() {
             }
         }
     }*/
+}
+
+/// initialization to be run after the heap is initialized
+pub fn init_after_heap() {
+    if let Some(mods) = get_multiboot_info_mut().mods.as_mut() {
+        for module in mods.iter_mut() {
+            module.map_data();
+        }
+    }
 }

@@ -34,7 +34,7 @@ unsafe extern "x86-interrupt" fn stub_handler_2(_frame: ExceptionStackFrame) {
 pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
     // TODO: task priority, task execution timers
 
-    debug!("context switch!");
+    //debug!("context switch!");
 
     // we don't want to preempt the kernel- all sorts of bad things could happen
     if !IN_TASK {
@@ -44,6 +44,7 @@ pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
 
     if num_tasks() == 0 {
         outb(0x20, 0x20);
+        // just halt and wait for interrupts. maybe something will happen
         loop {
             asm!("sti; hlt");
         }
@@ -105,12 +106,6 @@ unsafe extern "x86-interrupt" fn keyboard_handler(_frame: ExceptionStackFrame) {
         };
         
         let state: bool = input & 0x80 == 0; // true = press, false = release
-
-        if state {
-            debug!("key down {:#x}", key);
-        } else {
-            debug!("key up {:#x}", key);
-        }
 
         if let Some(console) = get_console() {
             let keysym =

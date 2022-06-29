@@ -6,17 +6,21 @@ use alloc::{
 };
 use core::arch::asm;
 use crate::{
-    arch::{PAGE_SIZE, LINKED_BASE},
-    errno::Errno,
     tasks::{
         IN_TASK, CURRENT_TERMINATED,
         Task,
         remove_task, get_task, get_task_mut, add_task, get_current_task, add_page_reference, remove_page_reference, get_page_references,
     },
+    types::Errno,
 };
 use super::{
+    PAGE_SIZE, LINKED_BASE,
     ints::SyscallRegisters,
-    paging::{PAGE_DIR, PageDirectory, PageTableFlags, alloc_pages_at, free_pages, free_page_phys},
+    paging::{
+        PAGE_DIR,
+        PageDirectory, PageTableFlags,
+        alloc_pages_at, free_page_phys,
+    },
 };
 use x86::tlb::flush;
 
@@ -145,7 +149,7 @@ impl TaskState {
     /// allocate a page at the specified address
     /// 
     /// we can't use the page directory's alloc_frame function, since it'll overwrite data
-    pub fn alloc_page(&mut self, addr: u32, is_kernel: bool, is_writeable: bool, invalidate: bool) {
+    pub fn alloc_page(&mut self, addr: u32, is_kernel: bool, is_writeable: bool, invalidate: bool) -> usize {
         assert!(addr % PAGE_SIZE as u32 == 0, "address is not page aligned");
 
         let page = self.pages.get_page(addr, true).unwrap();
@@ -154,11 +158,13 @@ impl TaskState {
             let dir = PAGE_DIR.as_mut().unwrap();
 
             match dir.alloc_frame(page, is_kernel, is_writeable) {
-                Ok(_) =>
+                Ok(phys) => {
                     if invalidate {
                         flush(addr as usize); // invalidate this page in the TLB
+                    }
 
-                    },
+                    phys as usize
+                },
                 Err(msg) => panic!("couldn't allocate page: {}", msg),
             }
         }
@@ -185,6 +191,10 @@ impl TaskState {
 
     pub fn virt_to_phys(&mut self, addr: u32) -> Option<u32> {
         self.pages.virt_to_phys(addr)
+    }
+
+    pub fn check_ptr(&mut self, addr: *const u8) -> bool {
+        self.pages.virt_to_phys(addr as u32).is_some()
     }
 
     fn map_task_in(&mut self, addr: u64, len: u64, is_writable: bool) -> Result<MappedMem, Errno> {
@@ -228,26 +238,25 @@ impl TaskState {
             existing_phys.push(dir.virt_to_phys(i.try_into().unwrap()).unwrap().into());
         }
 
-        debug!("existing_phys: {:?}", existing_phys);
-
-        // free memory we're going to remap
-        free_pages(ptr as usize, ((end - start) / PAGE_SIZE_U64) as usize);
+        debug!("existing_phys: {:x?}", existing_phys);
 
         // loop over pages, get physical address of each page and map it in or create new page and alloc mem
         for i in (start..end).step_by(PAGE_SIZE) {
-            // calculate physical address
-            let phys_addr = if let Some(phys) = self.virt_to_phys(i.try_into().map_err(|_| Errno::NotEnoughSpace)?) {
-                phys
-            } else {
-                self.alloc_page(i.try_into().map_err(|_| Errno::NotEnoughSpace)?, false, is_writable, false);
-
-                self.virt_to_phys(i.try_into().map_err(|_| Errno::NotEnoughSpace)?).ok_or(Errno::NotEnoughSpace)?
+            // get the physical address of the page at the given address, or allocate a new one if there isn't one mapped
+            let phys_addr = match self.virt_to_phys(i.try_into().map_err(|_| Errno::NotEnoughSpace)?) {
+                Some(phys) => phys,
+                None => self.alloc_page(i.try_into().map_err(|_| Errno::NotEnoughSpace)?, false, is_writable, false) as u32,
             };
 
-            debug!("phys addr: {}", phys_addr);
+            debug!("{:x} @ phys addr: {:x}", i, phys_addr);
+
+            // todo: maybe change this to debug_assert at some point? its prolly hella slow
+            assert!(!existing_phys.contains(&(phys_addr as u64)), "kernel trampling on process memory");
+
+            let virt = ptr as usize + (i - start) as usize;
 
             // remap memory
-            alloc_pages_at(ptr as usize + (i - start) as usize, 1, phys_addr as u64, true, true, true);
+            alloc_pages_at(virt, 1, phys_addr as u64, true, true, true);
         }
 
         // get slice to copy to
@@ -261,6 +270,7 @@ impl TaskState {
 
         // map memory back
         for (j, i) in (mem.ptr as usize..mem.ptr as usize + mem.buf_len).step_by(PAGE_SIZE).enumerate() {
+            debug!("virt @ {:x}, phys @ {:x}", i, mem.existing_phys[j]);
             alloc_pages_at(i, 1, mem.existing_phys[j], true, true, true);
         }
 
@@ -273,7 +283,7 @@ impl TaskState {
         let mapped = self.map_task_in(addr, data.len() as u64, is_writable)?;
         
         // copy memory
-        debug!("writing {} bytes from slice", data.len());
+        debug!("writing {} bytes from slice @ {:#x}", data.len(), addr);
         mapped.data.clone_from_slice(data);
 
         self.map_task_out(mapped);
@@ -292,6 +302,51 @@ impl TaskState {
         self.map_task_out(mapped);
 
         Ok(res)
+    }
+
+    /// finds available area in task's memory of given size
+    /// 
+    /// start is optional, and provides an offset to start searching at (if you want to keep null pointers null, for example)
+    pub fn find_hole(&mut self, start: usize, size: usize) -> Option<usize> {
+        let mut hole_start: Option<usize> = None;
+
+        for i in 0..(LINKED_BASE >> 22) {
+            if self.pages.tables[i].is_null() {
+                let addr = i << 22;
+
+                if addr < start && addr + (1 << 22) > start {
+                    if addr + (1 << 22) - start >= size {
+                        return Some(start);
+                    } else {
+                        hole_start = Some(start);
+                    }
+                } else if if let Some(start) = hole_start { addr - start <= size } else { false } {
+                    return hole_start;
+                } else if size <= (1 << 22) && addr >= start {
+                    return Some(addr);
+                } else if hole_start.is_none() {
+                    hole_start = Some(addr);
+                }
+            } else {
+                for addr in ((i << 22)..((i + 1) << 22)).step_by(PAGE_SIZE) {
+                    let orig_page = unsafe { &mut *self.pages.get_page(addr as u32, false).expect("couldn't get page table") };
+
+                    if orig_page.is_unused() {
+                        if if let Some(start) = hole_start { addr - start <= size } else { false } {
+                            return hole_start;
+                        } else if size <= PAGE_SIZE && addr >= start {
+                            return Some(addr);
+                        } else if hole_start.is_none() && addr >= start {
+                            hole_start = Some(addr);
+                        }
+                    } else {
+                        hole_start = None;
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
