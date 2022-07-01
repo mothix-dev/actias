@@ -8,8 +8,11 @@ use core::arch::asm;
 use crate::{
     tasks::{
         IN_TASK, CURRENT_TERMINATED,
-        Task,
-        remove_task, get_task, get_task_mut, add_task, get_current_task, add_page_reference, remove_page_reference, get_page_references,
+        Task, BlockKind,
+        add_task, remove_task, 
+        get_task, get_task_mut, get_current_task, get_current_task_mut,
+        add_page_reference, remove_page_reference, get_page_references,
+        switch_tasks,
     },
     types::Errno,
 };
@@ -21,6 +24,7 @@ use super::{
         PageDirectory, PageTableFlags,
         alloc_pages_at, free_page_phys,
     },
+    syscalls::{read_handler, write_handler},
 };
 use x86::tlb::flush;
 
@@ -430,4 +434,81 @@ pub fn fork_task(id: usize) -> Result<&'static mut Task, &'static str> {
 
     // return reference to new task
     Ok(get_task_mut(id).unwrap())
+}
+
+/// perform a context switch, saving the state of the current task and switching to the next one in line
+pub fn context_switch(regs: &mut SyscallRegisters) -> bool {
+    // has the current task been terminated?
+    if unsafe { CURRENT_TERMINATED } {
+        // it no longer exists, so all we need to do is clear the flag
+        unsafe { CURRENT_TERMINATED = false; }
+    } else {
+        // save state of current task
+        get_current_task_mut().expect("no tasks?").state.save(regs);
+    }
+
+    // do we have a task to switch to?
+    if switch_tasks() {
+        // load state of new current task
+        let current = get_current_task_mut().expect("no tasks?");
+
+        current.state.load(regs);
+
+        // get reference to global page directory
+        let dir = unsafe { PAGE_DIR.as_mut().expect("paging not initialized") };
+
+        // has the kernel page directory been updated?
+        if current.state.page_updates != dir.page_updates {
+            // get page directory index of the start of the kernel's address space
+            let idx = LINKED_BASE >> 22;
+
+            // copy from the kernel's page directory to the task's
+            current.state.copy_pages_from(dir, idx, 1024);
+
+            // the task's page directory is now up to date (at least for our purposes)
+            current.state.page_updates = dir.page_updates;
+        }
+
+        // switch to task's page directory
+        current.state.pages.switch_to();
+
+        // was the current task just unblocked?
+        if !current.blocked && current.just_unblocked {
+            current.just_unblocked = false;
+
+            if current.blocked_err != Errno::None {
+                // yes, and we encountered an error
+                debug!("unblocked to error {}", current.blocked_err);
+                regs.eax = current.blocked_err as u32;
+            } else {
+                // yes, finish handling what the task was blocked for
+                debug!("task just unblocked");
+
+                match current.block_kind {
+                    BlockKind::None => (),
+                    BlockKind::Read(_) => {
+                        if let Err(err) = read_handler(regs) {
+                            debug!("syscall error: {}", err);
+                            regs.eax = err as u32;
+                        } else {
+                            regs.eax = 0; // make sure we don't throw an error
+                        }
+                    },
+                    BlockKind::Write(_) => {
+                        if let Err(err) = write_handler(regs) {
+                            debug!("syscall error: {}", err);
+                            regs.eax = err as u32;
+                        } else {
+                            regs.eax = 0; // make sure we don't throw an error
+                        }
+                    },
+                }
+            }
+        }
+
+        true
+    } else {
+        // no, idle until next context switch
+        false
+    }
 }

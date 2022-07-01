@@ -9,32 +9,45 @@ use core::{
     mem::size_of,
 };
 use crate::{
-    tasks::{IN_TASK, get_current_task, get_current_task_mut},
+    tasks::{IN_TASK, get_current_task, get_current_task_mut, BlockKind},
     arch::tasks::{exit_current_task, fork_task},
     types::Errno,
+    fs::ops::{OpenFlags, FileDescriptor, SeekKind},
+    platform::irq::MISSED_SWITCHES,
 };
-use super::ints::SyscallRegisters;
+use super::{
+    PAGE_SIZE,
+    ints::SyscallRegisters,
+    tasks::{context_switch, idle_until_switch},
+};
 
 /// function prototype for individual syscall handlers
 type SyscallHandler = fn(&mut SyscallRegisters) -> Result<(), Errno>;
 
 /// amount of syscalls we have
-pub const NUM_SYSCALLS: usize = 6;
+pub const NUM_SYSCALLS: usize = 12;
 
 /// list of function pointers for all available syscalls
 pub static SYSCALL_LIST: [SyscallHandler; NUM_SYSCALLS] = [
-    is_computer_on,
-    test_log,
-    fork,
-    exit,
-    get_pid,
-    exec,
+    is_computer_on_handler,
+    test_log_handler,
+    fork_handler,
+    exit_handler,
+    get_pid_handler,
+    exec_handler,
+    open_handler,
+    close_handler,
+    write_handler,
+    read_handler,
+    seek_handler,
+    truncate_handler,
 ];
 
 /// makes sure a pointer is valid
 /// 
 /// wrapper around TaskState.check_ptr to make usage easier in syscall handlers
 fn check_ptr(ptr: *const u8) -> Result<(), Errno> {
+    debug!("checking ptr @ {:#x}", ptr as usize);
     if get_current_task_mut().unwrap().state.check_ptr(ptr) {
         Ok(())
     } else {
@@ -42,19 +55,30 @@ fn check_ptr(ptr: *const u8) -> Result<(), Errno> {
     }
 }
 
+/// makes sure a slice is valid, given a pointer to its start and its length
+fn check_slice(ptr: *const u8, len: usize) -> Result<(), Errno> {
+    check_ptr(ptr)?;
+
+    for i in (ptr as usize..ptr as usize + len).step_by(PAGE_SIZE) {
+        check_ptr(i as *const _)?;
+    }
+
+    Ok(())
+}
+
 /// is computer on?
 /// 
 /// sets ebx to 1 (true) if computer is on
 /// 
 /// if computer is off, behavior is undefined
-pub fn is_computer_on(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+pub fn is_computer_on_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
     regs.ebx = 1;
 
     Ok(())
 }
 
 /// test syscall- logs a string
-pub fn test_log(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+pub fn test_log_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
     check_ptr(regs.ebx as *const _)?;
     let string = unsafe { CStr::from_ptr(regs.ebx as *const _).to_string_lossy() };
 
@@ -62,15 +86,13 @@ pub fn test_log(regs: &mut SyscallRegisters) -> Result<(), Errno> {
 
     log!("{}", string);
 
-    unsafe { IN_TASK = true; }
-
     Ok(())
 }
 
 /// forks task
 /// 
 /// sets ebx to the child pid in parent task, 0 in child task
-pub fn fork(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+pub fn fork_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
     unsafe { IN_TASK = false; }
 
     // save state of current task
@@ -87,25 +109,21 @@ pub fn fork(regs: &mut SyscallRegisters) -> Result<(), Errno> {
         Err(msg) => log!("could not fork pid {}: {}", pid, msg),
     };
 
-    unsafe { IN_TASK = true; }
-
     Ok(())
 }
 
 /// exits task
-pub fn exit(_regs: &mut SyscallRegisters) -> Result<(), Errno> {
+pub fn exit_handler(_regs: &mut SyscallRegisters) -> Result<(), Errno> {
     exit_current_task();
 }
 
 /// gets id of current task
 /// 
 /// sets ebx to id
-pub fn get_pid(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+pub fn get_pid_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
     unsafe { IN_TASK = false; }
 
     regs.ebx = get_current_task().expect("no current task").id.try_into().unwrap();
-
-    unsafe { IN_TASK = true; }
 
     Ok(())
 }
@@ -133,7 +151,7 @@ fn parse_ptr_array(ptr: *const *const u8) -> Result<Vec<String>, Errno> {
 }
 
 /// replaces this process's address space with that of a new process at the path provided
-pub fn exec(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+pub fn exec_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
     check_ptr(regs.ebx as *const _)?;
     let path = unsafe { CStr::from_ptr(regs.ebx as *const _).to_string_lossy() };
 
@@ -167,8 +185,6 @@ pub fn exec(regs: &mut SyscallRegisters) -> Result<(), Errno> {
 
             debug!("done exec()ing");
         
-            unsafe { IN_TASK = true; }
-        
             Ok(())
         },
         Err(err) => {
@@ -178,21 +194,167 @@ pub fn exec(regs: &mut SyscallRegisters) -> Result<(), Errno> {
     }
 }
 
-/// platform-specific syscall handler
+/// opens a file, returning a file descriptor
+/// 
+/// path of the file to open is a pointer to a null terminated string in ebx, flags are provided in register ecx
+/// 
+/// new file descriptor is placed in ebx
+pub fn open_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+    check_ptr(regs.ebx as *const _)?;
+    let path = unsafe { CStr::from_ptr(regs.ebx as *const _).to_string_lossy() };
+    let flags = OpenFlags::from(regs.ecx as u8);
+
+    unsafe { IN_TASK = false; }
+
+    debug!("open @ {} with flags {:?}", path, flags);
+
+    regs.ebx = get_current_task_mut().unwrap().open(&path, flags)?.try_into().map_err(|_| Errno::FileDescTooBig)?;
+
+    debug!("opened fd {}", regs.ebx);
+
+    Ok(())
+}
+
+/// closes a file descriptor
+/// 
+/// file descriptor is given in ebx
+pub fn close_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+    unsafe { IN_TASK = false; }
+
+    get_current_task_mut().unwrap().close(regs.ebx as usize)
+}
+
+/// writes to a file
+/// 
+/// file descriptor is provided in ebx, ecx and edx store the pointer to and length of the slice to write
+/// 
+/// number of bytes written is returned in ebx
+pub fn write_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+    let desc = regs.ebx as FileDescriptor;
+    check_slice(regs.ecx as *const _, regs.edx as usize)?;
+    let slice = unsafe { core::slice::from_raw_parts(regs.ecx as *mut u8, regs.edx as usize) };
+
+    unsafe { IN_TASK = false; }
+
+    let file = get_current_task_mut().unwrap().get_open_file(desc)?;
+
+    debug!("writing max {} bytes to fd {}", regs.edx, desc);
+
+    // do we have any space to read?
+    if file.can_write(1)? { // TODO: check for non blocking flag
+        regs.ebx = get_current_task_mut().unwrap().get_open_file(desc)?.write(slice)?.try_into().map_err(|_| Errno::ValueOverflow)?;
+        debug!("wrote {} bytes to fd {}", regs.ebx, desc);
+
+        Ok(())
+    } else if file.should_block {
+        // no, block task until we do
+        debug!("can't write, blocking task");
+
+        get_current_task_mut().unwrap().block(BlockKind::Write(desc));
+
+        // force a context switch immediately, as we don't want to be doing anything more with this task
+        // and we want to be able to pick back up immediately by retrying this syscall
+        unsafe {
+            MISSED_SWITCHES += 1;
+        }
+
+        Ok(())
+    } else {
+        Err(Errno::TryAgain)
+    }
+}
+
+/// reads from a file
+/// 
+/// file descriptor is provided in ebx, ecx and edx store the pointer to and length of the slice to read into
+/// 
+/// number of bytes read is returned in ebx
+pub fn read_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+    let desc = regs.ebx as FileDescriptor;
+    check_slice(regs.ecx as *const _, regs.edx as usize)?;
+    let slice = unsafe { core::slice::from_raw_parts_mut(regs.ecx as *mut u8, regs.edx as usize) };
+
+    unsafe { IN_TASK = false; }
+
+    let file = get_current_task_mut().unwrap().get_open_file(desc)?;
+
+    debug!("reading max {} bytes from fd {}", regs.edx, desc);
+
+    // do we have any space to read?
+    if file.can_read(1)? { // TODO: check for non blocking flag
+        regs.ebx = file.read(slice)?.try_into().map_err(|_| Errno::ValueOverflow)?;
+        debug!("read {} bytes from fd {}", regs.ebx, desc);
+
+        Ok(())
+    } else if file.should_block {
+        // no, block task until we do
+        debug!("nothing to read, blocking task");
+
+        get_current_task_mut().unwrap().block(BlockKind::Read(desc));
+
+        unsafe {
+            MISSED_SWITCHES += 1;
+        }
+
+        Ok(())
+    } else {
+        Err(Errno::TryAgain)
+    }
+}
+
+/// seek a file descriptor to a specific part of a file
+/// 
+/// file descriptor is provided in ebx, offset is provided in ecx, seek mode is provided in edx
+/// 
+/// new offset of file descriptor is returned in ebx
+pub fn seek_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+    let desc = regs.ebx as FileDescriptor;
+    let offset = regs.ecx as isize;
+
+    if regs.edx > 2 { Err(Errno::InvalidSeek)?; }
+    let kind = SeekKind::from(regs.edx as u8);
+
+    unsafe { IN_TASK = false; }
+
+    regs.ebx = get_current_task_mut().unwrap().get_open_file(desc)?.seek(offset, kind)?.try_into().map_err(|_| Errno::ValueOverflow)?;
+
+    Ok(())
+}
+
+/// truncate a file to a certain size
+/// 
+/// file descriptor is provided in ebx, new size is provided in ecx
+pub fn truncate_handler(regs: &mut SyscallRegisters) -> Result<(), Errno> {
+    let desc = regs.ebx as FileDescriptor;
+    let size = regs.ecx as usize;
+
+    unsafe { IN_TASK = false; }
+
+    get_current_task_mut().unwrap().get_open_file(desc)?.truncate(size)
+}
+
+/// platform-specific syscall handler, will find the specific syscall to run from the eax register and insert the errno returned by the syscall handler
 #[no_mangle]
 pub unsafe extern "C" fn syscall_handler(mut regs: SyscallRegisters) {
     let syscall_num = regs.eax as usize;
+    regs.eax = 0;
 
     if syscall_num < NUM_SYSCALLS {
-        match SYSCALL_LIST[syscall_num](&mut regs) {
-            Ok(()) => (),
-            Err(err) => {
-                log!("syscall error: {}", err);
-                exit_current_task(); // TODO: signals
-            }
+        debug!("running syscall {}", syscall_num);
+        if let Err(err) = SYSCALL_LIST[syscall_num](&mut regs) {
+            debug!("syscall error: {}", err);
+            regs.eax = err as u32;
         }
+
+        // if we try and fail to context switch during a syscall (or just need to immediately context switch after regardless),
+        // perform a context switch now so we don't spend too much cpu time on one process
+        if MISSED_SWITCHES > 0 && !context_switch(&mut regs) {
+            idle_until_switch();
+        }
+
+        IN_TASK = true;
     } else {
-        log!("bad syscall {}", syscall_num);
+        debug!("bad syscall {}", syscall_num);
         exit_current_task();
     }
 }

@@ -208,6 +208,7 @@ impl fmt::Debug for BitSet {
 }
 
 /// simple bitset that uses vec internally, dynamic size
+#[derive(Clone)]
 pub struct VecBitSet {
     /// array of bytes that the bitset uses
     pub array: Vec<u32>,

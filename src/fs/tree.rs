@@ -36,6 +36,19 @@ pub trait File {
     fn set_permissions(&mut self, permissions: Permissions) -> Result<(), Errno>;
 
 
+    /// gets uid of the owner of this file
+    fn get_owner(&self) -> usize;
+
+    /// sets uid of the owner of this file
+    fn set_owner(&mut self, owner: usize) -> Result<(), Errno>;
+
+    /// gets gid of the owner of this file
+    fn get_group(&self) -> usize;
+
+    /// sets gid of the owner of this file
+    fn set_group(&mut self, group: usize) -> Result<(), Errno>;
+
+
     /// write all bytes contained in slice to file
     //fn write(&mut self, bytes: &[u8]) -> Result<usize, Errno>;
 
@@ -95,11 +108,30 @@ pub trait Directory {
     fn set_permissions(&mut self, permissions: Permissions) -> Result<(), Errno>;
 
 
+    /// gets uid of the owner of this file
+    fn get_owner(&self) -> usize;
+
+    /// sets uid of the owner of this file
+    fn set_owner(&mut self, owner: usize) -> Result<(), Errno>;
+
+    /// gets gid of the owner of this file
+    fn get_group(&self) -> usize;
+
+    /// sets gid of the owner of this file
+    fn set_group(&mut self, group: usize) -> Result<(), Errno>;
+
+
     /// gets files in directory
     fn get_files(&self) -> &Vec<Box<dyn File>>;
 
     /// gets files in directory
     fn get_files_mut(&mut self) -> &mut Vec<Box<dyn File>>;
+
+    /// creates a file in the directory
+    fn create_file(&mut self, name: &str) -> Result<(), Errno>;
+
+    /// deletes a file in the directory
+    fn delete_file(&mut self, name: &str) -> Result<(), Errno>;
 
 
     /// gets directories in directory
@@ -108,12 +140,24 @@ pub trait Directory {
     /// gets directories in directory
     fn get_directories_mut(&mut self) -> &mut Vec<Box<dyn Directory>>;
 
+    /// creates a subdirectory in the directory
+    fn create_directory(&mut self, name: &str) -> Result<(), Errno>;
+
+    /// deletes a subdirectory in the directory
+    fn delete_directory(&mut self, name: &str) -> Result<(), Errno>;
+
 
     /// gets links in directory
     fn get_links(&self) -> &Vec<Box<dyn SymLink>>;
 
     /// gets links in directory
     fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>>;
+
+    /// creates a symlink in the directory
+    fn create_link(&mut self, name: &str, target: &str) -> Result<(), Errno>;
+
+    /// deletes a symlink in the directory
+    fn delete_link(&mut self, name: &str) -> Result<(), Errno>;
 
 
     /// gets name of directory
@@ -129,6 +173,19 @@ pub trait SymLink {
 
     /// set permissions for link
     fn set_permissions(&mut self, permissions: Permissions) -> Result<(), Errno>;
+
+
+    /// gets uid of the owner of this file
+    fn get_owner(&self) -> usize;
+
+    /// sets uid of the owner of this file
+    fn set_owner(&mut self, owner: usize) -> Result<(), Errno>;
+
+    /// gets gid of the owner of this file
+    fn get_group(&self) -> usize;
+
+    /// sets gid of the owner of this file
+    fn set_group(&mut self, group: usize) -> Result<(), Errno>;
 
 
     /// gets name of link
@@ -171,6 +228,9 @@ pub fn clean_up_path(path: &str) -> Option<String> {
     Some(split.join("/"))
 }
 
+/// how many symlinks we can follow before giving up
+const MAX_SYMLINKS: usize = 32;
+
 /// gets a file object from the given path
 pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Option<&'a mut Box<dyn File>> {
     if path.is_empty() { // sanity check
@@ -178,12 +238,19 @@ pub fn get_file_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) -> Op
     } else {
         let mut dir_name = dirname(path);
         let mut file_name = basename(path)?.to_string();
+        let mut i = 0;
 
         while let Some(link) = get_directory_from_path(dir, &dir_name)?.get_links().iter().find(|l| l.get_name() == file_name) {
+            if i > MAX_SYMLINKS {
+                return None;
+            }
+
             let target = format!("{}/{}", dir_name, link.get_target());
 
             dir_name = dirname(&target); // if we own the strings the borrow checker won't yell at us
             file_name = basename(&target)?.to_string();
+
+            i += 1;
         }
 
         get_directory_from_path(dir, &dir_name)?.get_files_mut().iter_mut().find(|f| f.get_name() == file_name)
@@ -196,14 +263,16 @@ pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) 
         Some(dir)
     } else {
         // recurse over tree to find symlinks
-        fn get_link(dir: &mut Box<dyn Directory>, path: Vec<&str>, index: usize) -> Option<String> {
-            if let Some(name) = path.get(index) {
+        fn get_link(dir: &mut Box<dyn Directory>, path: Vec<&str>, index: usize, depth: usize) -> Option<String> {
+            if depth > MAX_SYMLINKS {
+                None
+            } else if let Some(name) = path.get(index) {
                 if name.is_empty() {
-                    return get_link(dir, path, index + 1);
+                    return get_link(dir, path, index + 1, depth + 1);
                 } else {
                     for directory in dir.get_directories_mut() {
                         if &directory.get_name() == name {
-                            return get_link(directory, path, index + 1);
+                            return get_link(directory, path, index + 1, depth + 1);
                         }
                     }
                 }
@@ -215,9 +284,11 @@ pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) 
                         return clean_up_path(&format!("{}/{}/{}", path[..index].join("/"), link.get_target(), path[index + 1..].join("/")));
                     }
                 }
-            }
 
-            None
+                None
+            } else {
+                None
+            }
         }
 
         // recurse over tree to find the directory
@@ -241,7 +312,7 @@ pub fn get_directory_from_path<'a>(dir: &'a mut Box<dyn Directory>, path: &str) 
 
         let mut path = path.to_string();
 
-        while let Some(new) = get_link(dir, path.split('/').collect::<Vec<_>>(), 0) {
+        while let Some(new) = get_link(dir, path.split('/').collect::<Vec<_>>(), 0, 0) {
             path = new;
         }
 

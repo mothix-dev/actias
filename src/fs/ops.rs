@@ -1,85 +1,130 @@
 //! operations on files with file descriptors
 
 use alloc::{
-    vec::Vec,
     boxed::Box,
     string::{String, ToString},
 };
+use bitmask_enum::bitmask;
 use crate::types::Errno;
+use num_enum::FromPrimitive;
 use super::{
-    tree::{File, get_file_from_path},
+    tree::{File, get_file_from_path, get_directory_from_path},
     vfs::{Permissions, ROOT_DIR},
-    MAX_FILES,
+    dirname, basename,
 };
-use crate::util::array::VecBitSet;
-use core::ops::Drop;
 
-/// list of open files
-static mut OPEN_FILES: Vec<Option<OpenFile>> = Vec::new();
+/// numerical file descriptor
+pub type FileDescriptor = usize;
 
-/// bitset of available system file descriptors
-static mut FILE_DESCRIPTOR_BITSET: VecBitSet = VecBitSet::new();
+/// describes how a file will be opened
+#[bitmask(u8)]
+#[derive(PartialOrd, FromPrimitive)]
+pub enum OpenFlags {
+    #[num_enum(default)]
+    None        = Self(0),
+    Read        = Self(1 << 0),
+    Write       = Self(1 << 1),
+    Append      = Self(1 << 2),
+    Create      = Self(1 << 3),
+    Truncate    = Self(1 << 4),
+    NonBlocking = Self(1 << 5),
+}
 
 /// stores information about an open file
-pub struct OpenFile<'a> {
-    /// file descriptor number
-    pub descriptor: usize,
-
+pub struct OpenFile {
     /// reference to file
-    pub file: &'a mut Box<dyn File>,
+    pub file: &'static mut Box<dyn File>,
 
     /// absolute path to file
     pub path: String,
 
+    /// offset into the file
+    pub offset: usize,
 
+    /// can we read from this file?
+    pub can_read: bool,
+
+    /// can we write to this file?
+    pub can_write: bool,
+
+    /// should we block the current thread while trying to access this file?
+    pub should_block: bool,
+
+    /// should we always append to this file when writing to it?
+    pub should_append: bool,
 }
 
-/// opens a file for writing
-pub fn open(path: &str) -> Result<FileDescriptor, Errno> {
-    // TODO: modes
+impl Clone for OpenFile {
+    fn clone(&self) -> Self {
+        let file = get_file_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, &self.path).expect("couldn't open file");
 
-    let file = match get_file_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, path) {
-        Some(file) => file,
-        None => return Err(Errno::NoSuchFileOrDir),
+        OpenFile {
+            file,
+            path: self.path.to_string(),
+            offset: self.offset,
+            can_read: self.can_read,
+            can_write: self.can_write,
+            should_block: self.should_block,
+            should_append: self.should_append,
+        }
+    }
+}
+
+/// opens a file
+pub fn open(path: &str, flags: OpenFlags) -> Result<OpenFile, Errno> {
+    let file =
+        if let Some(file) = get_file_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, path) {
+            file
+        } else if flags & OpenFlags::Create != OpenFlags::None {
+            let dirname = dirname(path);
+            let filename = basename(path).ok_or(Errno::NoSuchFileOrDir)?;
+
+            let dir = get_directory_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, &dirname).ok_or(Errno::NoSuchFileOrDir)?;
+
+            dir.create_file(filename)?;
+
+            get_file_from_path(dir, filename).ok_or(Errno::NoSuchFileOrDir)?
+        } else {
+            Err(Errno::NoSuchFileOrDir)?
+        };
+    
+    if flags & OpenFlags::Truncate != OpenFlags::None {
+        file.truncate(0)?;
+    }
+
+    let mut opened = OpenFile {
+        file,
+        path: path.to_string(),
+        offset: 0,
+        can_read: false,
+        can_write: false,
+        should_block: flags & OpenFlags::NonBlocking == OpenFlags::None,
+        should_append: flags & OpenFlags::Append != OpenFlags::None,
     };
 
-    let descriptor = unsafe { FILE_DESCRIPTOR_BITSET.first_unset() };
-
-    if descriptor >= MAX_FILES {
-        Err(Errno::TooManyFilesOpen)
-    } else {
-        unsafe { FILE_DESCRIPTOR_BITSET.set(descriptor); }
-
-        let open = OpenFile {
-            descriptor,
-            file,
-            path: path.to_string(),
-        };
-
-        unsafe { OPEN_FILES[descriptor] = Some(open); }
-
-        Ok(FileDescriptor::new(descriptor))
+    if flags & OpenFlags::Read != OpenFlags::None {
+        opened.can_read = true;
     }
-}
 
-/// closes a file given its descriptor number
-pub fn close_file(descriptor: usize) {
-    unsafe {
-        FILE_DESCRIPTOR_BITSET.clear(descriptor);
-        OPEN_FILES[descriptor] = None;
+    if flags & OpenFlags::Write != OpenFlags::None {
+        opened.can_write = true;
     }
-}
 
-/// closes a file descriptor
-pub fn close(file: &mut FileDescriptor) {
-    close_file(file.index);
-    file.valid = false;
+    if flags & OpenFlags::Append != OpenFlags::None {
+        opened.can_write = true;
+        opened.seek(0, SeekKind::End)?;
+    }
+
+    Ok(opened)
 }
 
 /// controls how FileDescriptor::seek() seeks
-pub enum SeekType {
+#[repr(u8)]
+#[derive(FromPrimitive)]
+pub enum SeekKind {
     /// set file writing offset to provided offset
-    Set,
+    #[num_enum(default)]
+    Set = 0,
 
     /// add the provided offset to the current file offset
     Current,
@@ -88,179 +133,137 @@ pub enum SeekType {
     End,
 }
 
-/// file descriptor- contains a numbered reference to a file
-pub struct FileDescriptor {
-    /// index of this file descriptor into the file descriptor vec
-    index: usize,
-
-    /// offset for writing into the file
-    pub offset: usize,
-
-    /// whether this file descriptor is valid or not
-    valid: bool,
-}
-
-impl FileDescriptor {
-    /// creates a new file descriptor from a file descriptor id
-    fn new(index: usize) -> Self {
-        Self {
-            index,
-            offset: 0,
-            valid: true,
-        }
-    }
-
-    /// get reference to our file
-    fn get_reference(&self) -> Option<&OpenFile<'static>> {
-        if self.valid {
-            unsafe { OPEN_FILES.get(self.index)?.as_ref() }
-        } else {
-            None
-        }
-    }
-
-    /// get mutable reference to our file
-    fn get_mut_reference(&self) -> Option<&mut OpenFile<'static>> {
-        if self.valid {
-            unsafe { OPEN_FILES.get_mut(self.index)?.as_mut() }
-        } else {
-            None
-        }
-    }
-
-
+impl OpenFile {
     /// get permissions for file
-    pub fn get_permissions(&mut self) -> Result<Permissions, Errno> {
-        match self.get_reference() {
-            Some(file) => Ok(file.file.get_permissions()),
-            None => Err(Errno::BadFile),
-        }
+    pub fn get_permissions(&mut self) -> Permissions {
+        self.file.get_permissions()
     }
 
     /// set permissions for file
     pub fn set_permissions(&mut self, permissions: Permissions) -> Result<(), Errno> {
-        match self.get_mut_reference() {
-            Some(file) => file.file.set_permissions(permissions),
-            None => Err(Errno::BadFile),
-        }
+        self.file.set_permissions(permissions)
     }
 
 
     /// write all bytes contained in slice to file
     pub fn write(&mut self, bytes: &[u8]) -> Result<usize, Errno> {
-        match self.get_mut_reference() {
-            Some(file) => {
-                let amt = file.file.write_at(bytes, self.offset)?;
-                self.offset += amt;
-                Ok(amt)
-            },
-            None => Err(Errno::BadFile),
+        if self.can_write {
+            if self.should_append {
+                self.seek(0, SeekKind::End)?;
+            }
+
+            let amt = self.file.write_at(bytes, self.offset)?;
+            self.offset += amt;
+            Ok(amt)
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
     /// write all bytes contained in slice to file at offset
     pub fn write_at(&mut self, bytes: &[u8], offset: usize) -> Result<usize, Errno> {
-        match self.get_mut_reference() {
-            Some(file) => file.file.write_at(bytes, offset),
-            None => Err(Errno::BadFile),
+        if self.can_write {
+            self.file.write_at(bytes, offset)
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
     /// checks if there's enough room to write the provided amount of bytes into the file
-    pub fn can_write(&mut self, space: usize) -> bool {
-        match self.get_reference() {
-            Some(file) => file.file.can_write_at(space, self.offset),
-            None => false,
+    pub fn can_write(&mut self, space: usize) -> Result<bool, Errno> {
+        if self.can_write {
+            Ok(self.file.can_write_at(space, self.offset))
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
     /// checks if there's enough room to write the provided amount of bytes into the file at the provided offset
-    pub fn can_write_at(&mut self, space: usize, offset: usize) -> bool {
-        match self.get_reference() {
-            Some(file) => file.file.can_write_at(space, offset),
-            None => false,
+    pub fn can_write_at(&mut self, space: usize, offset: usize) -> Result<bool, Errno> {
+        if self.can_write {
+            Ok(self.file.can_write_at(space, offset))
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
 
     /// read from file into provided slice
     pub fn read(&mut self, bytes: &mut [u8]) -> Result<usize, Errno> {
-        match self.get_mut_reference() {
-            Some(file) => {
-                let amt = file.file.read_at(bytes, self.offset)?;
-                self.offset += amt;
-                Ok(amt)
-            },
-            None => Err(Errno::BadFile),
+        if self.can_read {
+            let amt = self.file.read_at(bytes, self.offset)?;
+            self.offset += amt;
+            Ok(amt)
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
     /// read from file at offset into provided slice
     pub fn read_at(&mut self, bytes: &mut [u8], offset: usize) -> Result<usize, Errno> {
-        match self.get_reference() {
-            Some(file) => file.file.read_at(bytes, offset),
-            None => Err(Errno::BadFile),
+        if self.can_read {
+            self.file.read_at(bytes, offset)
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
     /// checks if there's enough room to read the provided amount of bytes from the file
-    pub fn can_read(&mut self, space: usize) -> bool {
-        match self.get_reference() {
-            Some(file) => file.file.can_read_at(space, self.offset),
-            None => false,
+    pub fn can_read(&mut self, space: usize) -> Result<bool, Errno> {
+        if self.can_read {
+            Ok(self.file.can_read_at(space, self.offset))
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
     /// checks if there's enough room to read the provided amount of bytes from the file at the provided offset
-    pub fn can_read_at(&mut self, space: usize, offset: usize) -> bool {
-        match self.get_reference() {
-            Some(file) => file.file.can_read_at(space, offset),
-            None => false,
+    pub fn can_read_at(&mut self, space: usize, offset: usize) -> Result<bool, Errno> {
+        if self.can_read {
+            Ok(self.file.can_read_at(space, offset))
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
 
     /// seek file
-    /// seek behavior depends on the SeekType provided
-    pub fn seek(&mut self, offset: isize, kind: SeekType) -> Result<usize, Errno> {
-        match self.get_reference() {
-            Some(file) => {
-                let size = file.file.get_size();
+    /// seek behavior depends on the SeekKind provided
+    pub fn seek(&mut self, offset: isize, kind: SeekKind) -> Result<usize, Errno> {
+        let size = self.file.get_size();
 
-                match kind {
-                    SeekType::Set => self.offset = offset as usize,
-                    SeekType::Current => {
-                        if offset > 0 {
-                            self.offset = self.offset.wrapping_add(offset as usize); // we can wrap since if it goes below zero it'll be bigger than the file size, and thus fail
-                        } else {
-                            self.offset = self.offset.wrapping_sub((-offset) as usize);
-                        }
-                    },
-                    SeekType::End => {
-                        if offset > 0 {
-                            return Err(Errno::InvalidSeek);
-                        } else {
-                            self.offset = size.wrapping_sub((-offset) as usize);
-                        }
-                    },
-                }
-
-                if self.offset > size {
-                    Err(Errno::InvalidSeek)
+        match kind {
+            SeekKind::Set => self.offset = offset as usize,
+            SeekKind::Current => {
+                if offset > 0 {
+                    self.offset = self.offset.wrapping_add(offset as usize); // we can wrap since if it goes below zero it'll be bigger than the file size, and thus fail
                 } else {
-                    Ok(self.offset)
+                    self.offset = self.offset.wrapping_sub((-offset) as usize);
                 }
             },
-            None => Err(Errno::BadFile),
+            SeekKind::End => {
+                if offset > 0 {
+                    return Err(Errno::InvalidSeek);
+                } else {
+                    self.offset = size.wrapping_sub((-offset) as usize);
+                }
+            },
+        }
+
+        if self.offset > size {
+            Err(Errno::InvalidSeek)
+        } else {
+            Ok(self.offset)
         }
     }
 
 
     /// truncate file, setting its size to the provided size
     pub fn truncate(&mut self, size: usize) -> Result<(), Errno> {
-        match self.get_mut_reference() {
-            Some(file) => file.file.truncate(size),
-            None => Err(Errno::BadFile),
+        if self.can_write {
+            self.file.truncate(size)
+        } else {
+            Err(Errno::BadFile)
         }
     }
 
@@ -268,32 +271,17 @@ impl FileDescriptor {
     /// lock file
     /// lock behavior depends on the LockKind provided
     /*pub fn lock(&mut self, kind: LockKind, size: isize) -> Result<(), Errno> {
-        match self.get_mut_reference() {
-            Some(file) => file.file.lock(kind, size),
-            None => Err(Errno::BadFile),
-        }
+        self.file.lock(kind, size)
     }*/
 
 
     /// gets name of file
     pub fn get_name(&mut self) -> &str {
-        match self.get_reference() {
-            Some(file) => file.file.get_name(),
-            None => "",
-        }
+        self.file.get_name()
     }
 
     /// sets name of file
     pub fn set_name(&mut self, name: &str) -> Result<(), Errno> {
-        match self.get_mut_reference() {
-            Some(file) => file.file.set_name(name),
-            None => Err(Errno::BadFile),
-        }
-    }
-}
-
-impl Drop for FileDescriptor {
-    fn drop(&mut self) {
-        close(self);
+        self.file.set_name(name)
     }
 }

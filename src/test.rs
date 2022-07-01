@@ -97,6 +97,22 @@ impl Directory for TestDirectory {
         Err(Errno::NotSupported)
     }
 
+    fn get_owner(&self) -> usize {
+        0
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn get_group(&self) -> usize {
+        0
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
     fn get_files(&self) -> &Vec<Box<dyn File>> {
         &self.files
     }
@@ -119,6 +135,30 @@ impl Directory for TestDirectory {
 
     fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>> {
         &mut self.links
+    }
+
+    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
     }
 
     fn get_name(&self) -> &str {
@@ -151,6 +191,22 @@ impl File for TestFile {
     }
 
     fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn get_owner(&self) -> usize {
+        0
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn get_group(&self) -> usize {
+        0
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
 

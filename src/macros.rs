@@ -18,7 +18,7 @@ macro_rules! log {
         // Import the Writer trait (required by write!)
         use core::fmt::Write;
         let _ = write!(&mut crate::logging::DebugWriter::get(module_path!()), $($arg)*);
-        let _ = write!(&mut crate::logging::ConsoleWriter::get(module_path!()), $($arg)*);
+        //let _ = write!(&mut crate::logging::ConsoleWriter::get(module_path!()), $($arg)*);
     })
 }
 

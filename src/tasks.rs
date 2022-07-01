@@ -1,21 +1,61 @@
 //! tasks and task switching
 
-use crate::arch::{
-    tasks::TaskState,
-    paging::free_page_phys,
+use crate::{
+    arch::{
+        tasks::TaskState,
+        paging::free_page_phys,
+    },
+    fs::ops::{OpenFile, FileDescriptor, OpenFlags, open},
+    util::array::VecBitSet,
+    types::Errno,
 };
 use alloc::{
     collections::BTreeMap,
-    vec::Vec,
+    vec, vec::Vec,
 };
 use core::fmt;
 
+/// arbitrary limit for the maximum amount of files a task can have open at once
+const MAX_OPEN_FILES: usize = 2048;
+
+#[derive(Copy, Clone)]
+pub enum BlockKind {
+    None,
+    Read(FileDescriptor),
+    Write(FileDescriptor),
+}
+
 /// structure for task, contains task state, flags, etc
 pub struct Task {
+    /// state of this task. contains saved registers, page directory, etc
     pub state: TaskState,
+    
+    /// pid of this task
     pub id: usize,
+
+    /// pids of children of this task
     pub children: Vec<usize>,
+
+    /// pid of parent of this task, if one exists
     pub parent: Option<usize>,
+
+    /// list of all files this task has open
+    pub files: Vec<Option<OpenFile>>,
+
+    /// bitset to accelerate finding a slot for a new open file
+    pub files_bit_set: VecBitSet,
+
+    /// whether this task is blocked and has to wait for io
+    pub blocked: bool,
+
+    /// what kind of blocking this is
+    pub block_kind: BlockKind,
+
+    /// error (if any) we've encountered while blocking for a file
+    pub blocked_err: Errno,
+
+    /// whether this task has just been unblocked and needs to have the read operation completed
+    pub just_unblocked: bool,
 }
 
 impl Task {
@@ -36,6 +76,12 @@ impl Task {
             state, id,
             children: Vec::new(),
             parent: None,
+            files: vec![],
+            files_bit_set: VecBitSet::new(),
+            blocked: false,
+            block_kind: BlockKind::None,
+            blocked_err: Errno::None,
+            just_unblocked: false,
         }
     }
 
@@ -46,7 +92,81 @@ impl Task {
             id: self.id,
             children: self.children.to_vec(),
             parent: self.parent,
+            files: self.files.to_vec(),
+            files_bit_set: self.files_bit_set.clone(),
+            blocked: self.blocked,
+            block_kind: self.block_kind,
+            blocked_err: self.blocked_err,
+            just_unblocked: self.just_unblocked,
         }
+    }
+
+    /// open a file, returning a numerical file descriptor
+    pub fn open(&mut self, path: &str, flags: OpenFlags) -> Result<FileDescriptor, Errno> {
+        let first_unused = self.files_bit_set.first_unset();
+
+        if first_unused > MAX_OPEN_FILES {
+            Err(Errno::TooManyFilesOpen)
+        } else {
+            self.files_bit_set.set(first_unused);
+
+            if first_unused >= self.files.len() {
+                for _i in self.files.len()..=first_unused {
+                    self.files.push(None);
+                }
+            }
+
+            *(self.files.get_mut(first_unused).ok_or(Errno::TooManyFilesOpen)?) = Some(open(path, flags)?);
+            
+            Ok(first_unused)
+        }
+    }
+
+    /// closes a file descriptor, freeing its slot for use by the next file to be opened
+    pub fn close(&mut self, desc: FileDescriptor) -> Result<(), Errno> {
+        if let Some(openfile) = self.files.get_mut(desc) {
+            *openfile = None;
+            self.files_bit_set.clear(desc);
+
+            Ok(())
+        } else {
+            Err(Errno::BadFile)
+        }
+    }
+
+    /// gets the openfile object associated with a file descriptor
+    pub fn get_open_file(&mut self, desc: FileDescriptor) -> Result<&mut OpenFile, Errno> {
+        self.files.get_mut(desc).ok_or(Errno::BadFile)?.as_mut().ok_or(Errno::BadFile)
+    }
+
+    /// checks if a task should become unblocked
+    pub fn check_blocked(&mut self) {
+        let mut check = || {
+            match self.block_kind {
+                BlockKind::None => Ok(false),
+                BlockKind::Read(desc) => Ok(self.get_open_file(desc)?.can_read(1)?),
+                BlockKind::Write(desc) => Ok(self.get_open_file(desc)?.can_write(1)?),
+            }
+        };
+
+        match check() {
+            Ok(should_unblock) => if should_unblock {
+                self.blocked = false;
+                self.blocked_err = Errno::None;
+                self.just_unblocked = true;
+            },
+            Err(err) => {
+                self.blocked = false;
+                self.blocked_err = err;
+                self.just_unblocked = true;
+            },
+        }
+    }
+
+    /// sets a task as blocked
+    pub fn block(&mut self, kind: BlockKind) {
+        self.blocked = true;
+        self.block_kind = kind;
     }
 }
 
@@ -176,22 +296,6 @@ pub fn garbage_collect() {
     }
 }
 
-/// get a reference to the next task to switch to
-pub fn get_next_task() -> Option<&'static Task> {
-    unsafe {
-        let next = (CURRENT_TASK + 1) % TASKS.len();
-        TASKS.get(next)
-    }
-}
-
-/// get a mutable reference to the next task to switch to
-pub fn get_next_task_mut() -> Option<&'static mut Task> {
-    unsafe {
-        let next = (CURRENT_TASK + 1) % TASKS.len();
-        TASKS.get_mut(next)
-    }
-}
-
 /// get a reference to the current task
 pub fn get_current_task() -> Option<&'static Task> {
     unsafe {
@@ -207,10 +311,35 @@ pub fn get_current_task_mut() -> Option<&'static mut Task> {
 }
 
 /// switch to the next task, making it the current task
-pub fn switch_tasks() {
+/// 
+/// returns true on a successful switch, false otherwise
+pub fn switch_tasks() -> bool {
     unsafe {
-        if !TASKS.is_empty() {
-            CURRENT_TASK = (CURRENT_TASK + 1) % TASKS.len();
+        if TASKS.is_empty() {
+            log!("no tasks?");
+            false
+        } else {
+            let old_task = CURRENT_TASK;
+
+            loop {
+                CURRENT_TASK = (CURRENT_TASK + 1) % TASKS.len();
+    
+                // make sure our next task isn't blocked
+                if let Some(task) = TASKS.get_mut(CURRENT_TASK) {
+                    if task.blocked {
+                        // see if task should be unblocked
+                        task.check_blocked();
+                    }
+
+                    if task.blocked && CURRENT_TASK == old_task {
+                        // we've iterated through all tasks and found none that aren't blocked, give up
+                        return false;
+                    } else if !task.blocked {
+                        //log!("found non blocked task {}", CURRENT_TASK);
+                        return true;
+                    }
+                }
+            }
         }
     }
 }
@@ -242,9 +371,9 @@ pub fn remove_task(pid: usize) {
 
                 task.state.free_pages();
 
-                garbage_collect();
-
                 TASKS.remove(id);
+
+                garbage_collect();
 
                 if id == CURRENT_TASK {
                     if !TASKS.is_empty() {

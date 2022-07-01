@@ -1,5 +1,5 @@
 use core::fmt;
-use crate::console::get_console;
+//use crate::console::get_console;
 
 /// A formatter object for debug output
 pub struct DebugWriter;
@@ -39,6 +39,7 @@ impl fmt::Write for DebugWriter {
     }
 }
 
+/*
 /// A formatter object for console output
 pub struct ConsoleWriter;
 
@@ -77,3 +78,4 @@ impl fmt::Write for ConsoleWriter {
         Ok(())
     }
 }
+*/

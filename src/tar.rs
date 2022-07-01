@@ -284,6 +284,8 @@ pub struct TarDirectory {
     links: Vec<Box<dyn SymLink>>,
     permissions: Permissions,
     name: String,
+    owner: usize,
+    group: usize,
 }
 
 impl Directory for TarDirectory {
@@ -292,6 +294,22 @@ impl Directory for TarDirectory {
     }
 
     fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn get_owner(&self) -> usize {
+        self.owner
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn get_group(&self) -> usize {
+        self.group
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
         Err(Errno::ReadOnlyFileSystem)
     }
 
@@ -319,6 +337,30 @@ impl Directory for TarDirectory {
         &mut self.links
     }
 
+    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
     fn get_name(&self) -> &str {
         &self.name
     }
@@ -332,6 +374,8 @@ pub struct TarFile {
     name: String,
     permissions: Permissions,
     contents: &'static [u8],
+    owner: usize,
+    group: usize,
 }
 
 impl File for TarFile {
@@ -340,6 +384,22 @@ impl File for TarFile {
     }
 
     fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn get_owner(&self) -> usize {
+        self.owner
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn get_group(&self) -> usize {
+        self.group
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
         Err(Errno::ReadOnlyFileSystem)
     }
 
@@ -382,6 +442,8 @@ pub struct TarLink {
     name: String,
     permissions: Permissions,
     target: String,
+    owner: usize,
+    group: usize,
 }
 
 impl SymLink for TarLink {
@@ -390,6 +452,22 @@ impl SymLink for TarLink {
     }
 
     fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn get_owner(&self) -> usize {
+        self.owner
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::ReadOnlyFileSystem)
+    }
+
+    fn get_group(&self) -> usize {
+        self.group
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
         Err(Errno::ReadOnlyFileSystem)
     }
 
@@ -411,10 +489,10 @@ impl SymLink for TarLink {
 }
 
 /// makes a directory in the vfs
-fn mkdir(root: &mut Box<dyn Directory>, path: &str, permissions: Permissions) {
+fn mkdir(root: &mut Box<dyn Directory>, path: &str, permissions: Permissions, owner: usize, group: usize) {
     let elements = path.split('/').collect::<Vec<_>>();
 
-    fn make_dir(root: &mut Box<dyn Directory>, elements: &Vec<&str>, extent: usize, permissions: Permissions) {
+    fn make_dir(root: &mut Box<dyn Directory>, elements: &Vec<&str>, extent: usize, permissions: Permissions, owner: usize, group: usize) {
         if extent > elements.len() {
             return;
         }
@@ -443,13 +521,14 @@ fn mkdir(root: &mut Box<dyn Directory>, path: &str, permissions: Permissions) {
                 links: Vec::new(),
                 permissions,
                 name: dirname,
+                owner, group,
             }));
         }
 
-        make_dir(root, elements, extent + 1, permissions);
+        make_dir(root, elements, extent + 1, permissions, owner, group);
     }
 
-    make_dir(root, &elements, 1, permissions);
+    make_dir(root, &elements, 1, permissions, owner, group);
 }
 
 /// consumes the provided iterator, turning it into a tree representation
@@ -460,6 +539,8 @@ pub fn make_tree(iter: TarIterator<'static>) -> Box<dyn Directory> {
         links: Vec::new(),
         permissions: Permissions::None,
         name: "".to_string(),
+        owner: 0,
+        group: 0,
     });
 
     let data = iter.data;
@@ -468,13 +549,13 @@ pub fn make_tree(iter: TarIterator<'static>) -> Box<dyn Directory> {
         let name = format!("{}{}", entry.header.filename_prefix(), entry.header.name());
         //log!("{:?}, {:?}", entry.header.kind(), name);
         match entry.header.kind() {
-            EntryKind::Directory => mkdir(&mut root, &name, entry.header.mode()),
+            EntryKind::Directory => mkdir(&mut root, &name, entry.header.mode(), entry.header.owner_uid(), entry.header.owner_gid()),
             EntryKind::NormalFile | EntryKind::BlockSpecial | EntryKind::CharSpecial |
             EntryKind::FIFO | EntryKind::ContiguousFile => {
                 let dirname = &dirname(&name);
 
                 // make sure parent dir exists
-                mkdir(&mut root, dirname, entry.header.mode());
+                mkdir(&mut root, dirname, entry.header.mode(), entry.header.owner_uid(), entry.header.owner_gid());
 
                 // get parent directory of file
                 let dir = get_directory_from_path(&mut root, dirname).unwrap();
@@ -484,6 +565,8 @@ pub fn make_tree(iter: TarIterator<'static>) -> Box<dyn Directory> {
                     name: basename(&name).unwrap().to_string(),
                     permissions: entry.header.mode(),
                     contents: entry.contents,
+                    owner: entry.header.owner_uid(),
+                    group: entry.header.owner_gid(),
                 }));
             },
             EntryKind::HardLink => {
@@ -500,6 +583,8 @@ pub fn make_tree(iter: TarIterator<'static>) -> Box<dyn Directory> {
                                 name: basename(&name).unwrap().to_string(),
                                 permissions: entry.header.mode(),
                                 contents: entry2.contents,
+                                owner: entry.header.owner_uid(),
+                                group: entry.header.owner_gid(),
                             }));
                             break;
                         }
@@ -515,7 +600,7 @@ pub fn make_tree(iter: TarIterator<'static>) -> Box<dyn Directory> {
                 let dirname = &dirname(&name);
 
                 // make sure parent dir exists
-                mkdir(&mut root, dirname, entry.header.mode());
+                mkdir(&mut root, dirname, entry.header.mode(), entry.header.owner_uid(), entry.header.owner_gid());
 
                 // get parent directory of link
                 let dir = get_directory_from_path(&mut root, dirname).unwrap();
@@ -525,6 +610,8 @@ pub fn make_tree(iter: TarIterator<'static>) -> Box<dyn Directory> {
                     name: basename(&name).unwrap().to_string(),
                     permissions: entry.header.mode(),
                     target: link_name.to_string(),
+                    owner: entry.header.owner_uid(),
+                    group: entry.header.owner_gid(),
                 }));
             },
             _ => (),

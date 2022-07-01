@@ -9,4 +9,10 @@ pub enum Syscall {
     Exit,
     GetPID,
     Exec,
+    Open,
+    Close,
+    Write,
+    Read,
+    Seek,
+    Truncate,
 }

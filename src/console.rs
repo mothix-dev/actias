@@ -704,6 +704,22 @@ impl File for ConsoleFile {
         self.permissions = permissions;
         Ok(())
     }
+
+    fn get_owner(&self) -> usize {
+        0
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn get_group(&self) -> usize {
+        0
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
     
     fn write_at(&mut self, bytes: &[u8], _offset: usize) -> Result<usize, Errno> {
         if let Ok(str) = String::from_utf8(bytes.to_vec()) {
@@ -764,7 +780,23 @@ impl<T: FromStr + ToString> File for SettingFile<T> {
         self.permissions = permissions;
         Ok(())
     }
-    
+
+    fn get_owner(&self) -> usize {
+        0
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn get_group(&self) -> usize {
+        0
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
     fn write_at(&mut self, bytes: &[u8], _offset: usize) -> Result<usize, Errno> {
         if let Ok(str) = String::from_utf8(bytes.to_vec()) {
             if let Ok(val) = str.parse::<T>() {
@@ -833,6 +865,22 @@ impl Directory for DriverDir {
         Err(Errno::NotSupported)
     }
 
+    fn get_owner(&self) -> usize {
+        0
+    }
+
+    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn get_group(&self) -> usize {
+        0
+    }
+
+    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
     fn get_files(&self) -> &Vec<Box<dyn File>> {
         &self.files
     }
@@ -855,6 +903,30 @@ impl Directory for DriverDir {
 
     fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>> {
         &mut self.links
+    }
+
+    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+    
+    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+
+    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
+    
+    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
     }
 
     fn get_name(&self) -> &str {

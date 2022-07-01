@@ -2,14 +2,12 @@
 
 use crate::{
     arch::{
-        LINKED_BASE,
         ints::{IDT, IDTEntry, IDTFlags, ExceptionStackFrame, SyscallRegisters},
-        paging::PAGE_DIR,
+        tasks::{context_switch, idle_until_switch},
     },
-    tasks::{IN_TASK, CURRENT_TERMINATED, get_current_task_mut, switch_tasks, num_tasks},
+    tasks::{IN_TASK, CURRENT_TERMINATED, num_tasks},
     console::get_console,
 };
-use core::arch::asm;
 use x86::io::{inb, outb};
 use super::keyboard::{KEYMAP, KEYMAP_SHIFT, KEYMAP_CTRL, KEYMAP_META, KEYMAP_META_SHIFT, KEYMAP_META_CTRL};
 
@@ -29,64 +27,30 @@ unsafe extern "x86-interrupt" fn stub_handler_2(_frame: ExceptionStackFrame) {
     outb(0x20, 0x20);
 }
 
+/// how many context switches we've missed while processing data in kernel mode
+pub static mut MISSED_SWITCHES: usize = 0;
+
 /// timer interrupt handler, currently just switches tasks
 #[no_mangle]
 pub unsafe extern "C" fn timer_handler(mut regs: SyscallRegisters) {
-    // TODO: task priority, task execution timers
-
-    //debug!("context switch!");
-
     // we don't want to preempt the kernel- all sorts of bad things could happen
     if !IN_TASK {
+        MISSED_SWITCHES += 1;
+
         outb(0x20, 0x20);
         return;
+    } else {
+        MISSED_SWITCHES = 0;
     }
 
-    if num_tasks() == 0 {
+    if num_tasks() == 0 || (num_tasks() > 1 || CURRENT_TERMINATED) && !context_switch(&mut regs) {
         outb(0x20, 0x20);
-        // just halt and wait for interrupts. maybe something will happen
-        loop {
-            asm!("sti; hlt");
-        }
-    } else if num_tasks() > 1 || CURRENT_TERMINATED { // only context switch if we need to
-        // has the current task been terminated?
-        if CURRENT_TERMINATED {
-            // it no longer exists, so all we need to do is clear the flag
-            CURRENT_TERMINATED = false;
-        } else {
-            // save state of current task
-            get_current_task_mut().expect("no tasks?").state.save(&regs);
-        }
 
-        // switch to next task
-        switch_tasks();
-
-        // load state of new current task
-        let current = get_current_task_mut().expect("no tasks?");
-
-        current.state.load(&mut regs);
-
-        // get reference to global page directory
-        let dir = PAGE_DIR.as_mut().expect("paging not initialized");
-
-        // has the kernel page directory been updated?
-        if current.state.page_updates != dir.page_updates {
-            // get page directory index of the start of the kernel's address space
-            let idx = LINKED_BASE >> 22;
-
-            // copy from the kernel's page directory to the task's
-            current.state.copy_pages_from(dir, idx, 1024);
-
-            // the task's page directory is now up to date (at least for our purposes)
-            current.state.page_updates = dir.page_updates;
-        }
-
-        // switch to task's page directory
-        get_current_task_mut().expect("no tasks?").state.pages.switch_to();
+        idle_until_switch();
+    } else {
+        // reset interrupt controller
+        outb(0x20, 0x20);
     }
-
-    // reset interrupt controller
-    outb(0x20, 0x20);
 }
 
 static mut EXTENDED: bool = false;

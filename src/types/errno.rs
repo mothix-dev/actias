@@ -1,12 +1,15 @@
 //! POSIX errno
 
 use core::fmt;
+use num_enum::FromPrimitive;
 
 /// error number and message
 #[repr(u32)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, FromPrimitive)]
 pub enum Errno {
-    TooBig = 0,             // E2BIG
+    #[num_enum(default)]
+    None = 0,               // No error (:
+    TooBig,                 // E2BIG
     PermissionDenied,       // EACCES
     AddressInUse,           // EADDRINUSE
     AFNotSupported,         // EAFNOSUPPORT
@@ -85,13 +88,14 @@ pub enum Errno {
     TextFileBusy,           // ETXTBSY
     OperationWouldBlock,    // EWOULDBLOCK
     CrossDeviceLink,        // EXDEV
-    Other(&'static str),    // other error
+    //Other(&'static str),    // other error
 }
 
 impl fmt::Display for Errno {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}",
             match self {   
+                Self::None =>                   "no error",
                 Self::TooBig =>                 "argument list too long",
                 Self::PermissionDenied =>       "permission denied",
                 Self::AddressInUse =>           "address in use",
@@ -171,7 +175,7 @@ impl fmt::Display for Errno {
                 Self::TextFileBusy =>           "text file busy",
                 Self::OperationWouldBlock =>    "operation would block",
                 Self::CrossDeviceLink =>        "cross-device link",
-                Self::Other(str) =>             str,
+                //Self::Other(str) =>             str,
             }
         )
     }
