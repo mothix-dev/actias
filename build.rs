@@ -5,7 +5,7 @@ fn main() {
 
     println!("cargo:rustc-cfg=target_arch=\"i586\""); // specify target arch
     println!("cargo:rustc-cfg=target_platform=\"ibmpc\""); // specify target platform
-    //println!("cargo:rustc-cfg=debug_messages"); // enable debug messages (useful if things break)
+                                                           //println!("cargo:rustc-cfg=debug_messages"); // enable debug messages (useful if things break)
 
     cc::Build::new().file("src/arch/i586/tasks.S").compile("tasks");
     cc::Build::new().file("src/platform/ibmpc/boot.S").compile("boot");

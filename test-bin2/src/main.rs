@@ -7,7 +7,9 @@ use core::{
     panic::PanicInfo,
 };
 use interface::{
-    syscalls, syscalls::OpenFlags,
+    syscalls,
+    FileDescriptor,
+    types::file::FileStatus,
     println, eprintln
 };
 
@@ -31,10 +33,6 @@ fn panic_handler(info: &PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, envp: *const *const u8) {
-    let stdin = syscalls::open(b"/dev/console/console\0", OpenFlags::Read).unwrap();
-    let stdout = syscalls::open(b"/dev/console/console\0", OpenFlags::Write).unwrap();
-    let stderr = syscalls::open(b"/dev/console/console\0", OpenFlags::Write).unwrap();
-
     syscalls::test_log(b"args:\0").unwrap();
     let mut i = 0;
     loop {
@@ -63,14 +61,20 @@ pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, envp: *const *
 
     println!("UwU OwO");
 
-    /*loop {
-        
-    }*/
+    println!("pid is {:?}", syscalls::get_pid());
+
+    let stdin = FileDescriptor(0);
 
     let mut buf: [u8; 128] = [0; 128];
     let bytes_read = syscalls::read(&stdin, &mut buf).unwrap().try_into().unwrap();
 
     println!("read {} bytes: {:?}", bytes_read, core::str::from_utf8(&buf[..bytes_read]));
+
+    let mut stat: FileStatus = Default::default();
+
+    syscalls::stat(&FileDescriptor(1), &mut stat);
+
+    println!("{:#?}", stat);
 
     panic!("test");
 

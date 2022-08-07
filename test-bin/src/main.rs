@@ -5,7 +5,11 @@ use core::{
     arch::asm,
     panic::PanicInfo,
 };
-use interface::syscalls;
+use interface::{
+    syscalls,
+    println,
+    types::file::OpenFlags,
+};
 
 #[panic_handler]
 fn panic_handler(_info: &PanicInfo) -> ! {
@@ -17,6 +21,10 @@ static mut TEST_STATIC: usize = 0;
 
 #[no_mangle]
 pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, _envp: *const *const u8) {
+    let stdin = syscalls::open(b"/dev/console/console\0", OpenFlags::Read).unwrap();
+    let stdout = syscalls::open(b"/dev/console/console\0", OpenFlags::Write).unwrap();
+    let stderr = syscalls::open(b"/dev/console/console\0", OpenFlags::Write).unwrap();
+
     if syscalls::is_computer_on().unwrap() {
         syscalls::test_log(b"computer is on\0").unwrap();
     } else {
@@ -32,10 +40,10 @@ pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, _envp: *const 
     }
 
     if syscalls::fork().unwrap() != 0 {
-        syscalls::test_log(b"parent\0").unwrap();
+        syscalls::test_log(b"child\0").unwrap();
 
         if unsafe { TEST_STATIC == 621 } {
-            syscalls::test_log(b"parent: preserved\0").unwrap();
+            syscalls::test_log(b"child: preserved\0").unwrap();
         }
 
         let file = b"/fs/initrd/test-bin2\0";
@@ -56,10 +64,10 @@ pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, _envp: *const 
 
         syscalls::exec(file, &args, &env).unwrap();
     } else {
-        syscalls::test_log(b"child\0").unwrap();
+        syscalls::test_log(b"parent\0").unwrap();
 
         if unsafe { TEST_STATIC == 621 } {
-            syscalls::test_log(b"child: preserved\0").unwrap();
+            syscalls::test_log(b"parent: preserved\0").unwrap();
         }
     }
 
@@ -98,6 +106,8 @@ pub extern "cdecl" fn _start(argc: usize, argv: *const *const u8, _envp: *const 
             }
         }
     }
+
+    println!("hi from test-bin");
 
     panic!("OwO");
 }
