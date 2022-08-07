@@ -8,9 +8,12 @@ use crate::{
             File, Directory, SymLink,
             get_file_from_path, get_directory_from_path,
         },
-        vfs::{Permissions, read_file},
+        vfs::read_file,
     },
-    types::Errno,
+    types::{
+        errno::Errno,
+        file::Permissions,
+    },
 };
 use alloc::{
     boxed::Box,
@@ -93,26 +96,6 @@ impl Directory for TestDirectory {
         Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::GroupWrite | Permissions::OtherRead
     }
 
-    fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
     fn get_files(&self) -> &Vec<Box<dyn File>> {
         &self.files
     }
@@ -135,30 +118,6 @@ impl Directory for TestDirectory {
 
     fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>> {
         &mut self.links
-    }
-
-    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 
     fn get_name(&self) -> &str {
@@ -190,35 +149,7 @@ impl File for TestFile {
         Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::GroupWrite | Permissions::OtherRead
     }
 
-    fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn write_at(&mut self, _bytes: &[u8], _offset: usize) -> Result<usize, Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn can_write_at(&self, _space: usize, _offset: usize) -> bool {
-        false
-    }
-
-    fn read_at(&self, bytes: &mut [u8], _offset: usize) -> Result<usize, Errno> {
+    fn read_at(&self, bytes: &mut [u8], _offset: u64) -> Result<usize, Errno> {
         let size = if bytes.len() > self.contents.len() { self.contents.len() } else { bytes.len() };
         for i in 0..size {
             bytes[i] = self.contents[i];
@@ -226,12 +157,8 @@ impl File for TestFile {
         Ok(size)
     }
 
-    fn can_read_at(&self, space: usize, offset: usize) -> bool {
-        (space - offset) >= self.contents.len()
-    }
-    
-    fn truncate(&mut self, _size: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
+    fn can_read_at(&self, space: usize, offset: u64) -> bool {
+        (space as u64 - offset) >= self.contents.len() as u64
     }
 
     fn get_name(&self) -> &str {
@@ -243,8 +170,8 @@ impl File for TestFile {
         Ok(())
     }
 
-    fn get_size(&self) -> usize {
-        self.contents.len()
+    fn get_size(&self) -> u64 {
+        self.contents.len() as u64
     }
 }
 
@@ -299,12 +226,12 @@ fn file_create_tree() {
 #[test_case]
 fn file_lookup() {
     unsafe {
-        assert!(get_directory_from_path(TEST_DIR.as_mut().unwrap(), "test1").map(|d| d.get_name()) == Some("test1"));
-        assert!(get_directory_from_path(TEST_DIR.as_mut().unwrap(), "test1/test3").map(|d| d.get_name()) == Some("test3"));
+        assert!(get_directory_from_path(TEST_DIR.as_mut().unwrap(), "test1").map(|d| d.get_name()) == Ok("test1"));
+        assert!(get_directory_from_path(TEST_DIR.as_mut().unwrap(), "test1/test3").map(|d| d.get_name()) == Ok("test3"));
 
-        assert!(get_file_from_path(TEST_DIR.as_mut().unwrap(), "testfile4").map(|d| d.get_name()) == Some("testfile4"));
-        assert!(get_file_from_path(TEST_DIR.as_mut().unwrap(), "test2/testfile3").map(|d| d.get_name()) == Some("testfile3"));
-        assert!(get_file_from_path(TEST_DIR.as_mut().unwrap(), "test1/test3/testfile6").map(|d| d.get_name()) == Some("testfile6"));
+        assert!(get_file_from_path(TEST_DIR.as_mut().unwrap(), "testfile4").map(|d| d.get_name()) == Ok("testfile4"));
+        assert!(get_file_from_path(TEST_DIR.as_mut().unwrap(), "test2/testfile3").map(|d| d.get_name()) == Ok("testfile3"));
+        assert!(get_file_from_path(TEST_DIR.as_mut().unwrap(), "test1/test3/testfile6").map(|d| d.get_name()) == Ok("testfile6"));
     }
 }
 
@@ -316,7 +243,7 @@ fn file_read() {
 
     let file = get_file_from_path(unsafe { TEST_DIR.as_mut().unwrap() }, path).unwrap();
 
-    let mut buf = vec![0; file.get_size()];
+    let mut buf = vec![0; file.get_size().try_into().unwrap()];
     log!("file.read_at returned {:?}", file.read_at(buf.as_mut_slice(), 0));
 
     let string = alloc::str::from_utf8(buf.as_slice()).unwrap();

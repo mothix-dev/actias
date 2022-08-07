@@ -10,7 +10,7 @@ use crate::{
     arch::{PAGE_SIZE, LINKED_BASE},
     fs::vfs::read_file,
     tasks::{Task, add_task},
-    types::Errno,
+    types::errno::Errno,
 };
 use goblin::elf::{
     Elf,
@@ -18,14 +18,13 @@ use goblin::elf::{
 };
 
 /// spawn a process from the given path
-pub fn exec(path: &str, args: &[String], env: &[String]) -> Result<(), Errno> {
-    let mut task = Task::new();
+pub fn exec(path: &str, args: &[String], env: &[String]) -> Result<usize, Errno> {
+    let mut task = Task::new(0, 0);
 
     match exec_as(&mut task, path, args, env) {
         Ok(_) => {
             debug!("adding task");
-            add_task(task);
-            Ok(())
+            Ok(add_task(task))
         },
         Err(err) => {
             task.state.free_pages();

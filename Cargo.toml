@@ -1,21 +1,13 @@
 [package]
 name = "ockernel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = [ "velleda" ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aligned = "0.4"
-x86 = "0.47"
-bitmask-enum = "1.1"
-num_enum = { version = "0.5", default-features = false }
-linked_list_allocator = "0.9"
-generic-array = "0.14"
-goblin = { version = "0.5", default-features = false, features = [ "elf32", "elf64", "mach32", "mach64" ]}
-lazy_static = { version = "1.4", default-features = false, features = [ "spin_no_std" ] }
-byteorder = { version = "1.4", default-features = false }
+
 
 [build-dependencies]
 cc = "1.0"
@@ -30,3 +22,6 @@ overflow-checks = true
 [profile.release]
 opt-level = "s"
 strip = true
+
+[workspace]
+members = [ "common", "loader", "kernel", "interface" ]

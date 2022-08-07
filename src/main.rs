@@ -42,7 +42,6 @@ pub mod console;
 pub mod exec;
 pub mod fs;
 pub mod mm;
-pub mod tar;
 pub mod tasks;
 pub mod types;
 pub mod util;

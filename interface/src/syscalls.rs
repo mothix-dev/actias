@@ -1,44 +1,10 @@
-use core::{
-    arch::asm,
-    fmt,
+use core::arch::asm;
+use crate::types::{
+    syscalls::Syscall,
+    errno::Errno,
+    file::{OpenFlags, SeekKind, FileStatus},
 };
-use bitmask_enum::bitmask;
-use crate::types::{Syscall, Errno};
-
-#[bitmask(u8)]
-pub enum OpenFlags {
-    #[num_enum(default)]
-    None        = Self(0),
-    Read        = Self(1 << 0),
-    Write       = Self(1 << 1),
-    Append      = Self(1 << 2),
-    Create      = Self(1 << 3),
-    Truncate    = Self(1 << 4),
-    NonBlocking = Self(1 << 5),
-}
-
-#[repr(u8)]
-pub enum SeekKind {
-    /// set file writing offset to provided offset
-    Set = 0,
-
-    /// add the provided offset to the current file offset
-    Current,
-
-    /// set the file offset to the end of the file plus the provided offset
-    End,
-}
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
-pub struct FileDescriptor(pub usize);
-
-impl fmt::Write for FileDescriptor {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        write(self, s.as_bytes()).map_err(|_| fmt::Error)?;
-        Ok(())
-    }
-}
+use super::FileDescriptor;
 
 #[inline(always)]
 pub fn is_computer_on() -> Result<bool, Errno> {
@@ -147,9 +113,10 @@ pub fn exec(string: &[u8], args: &[*const u8], env: &[*const u8]) -> Result<(), 
 pub fn open(path: &[u8], flags: OpenFlags) -> Result<FileDescriptor, Errno> {
     let result: u32;
     let errno: u32;
+    let flags: u8 = flags.into();
 
     unsafe {
-        asm!("int 0x80", in("eax") Syscall::Open as u32, in("ebx") &path[0] as *const _, in("ecx") flags.0 as usize, lateout("ebx") result, lateout("eax") errno);
+        asm!("int 0x80", in("eax") Syscall::Open as u32, in("ebx") &path[0] as *const _, in("ecx") flags as usize, lateout("ebx") result, lateout("eax") errno);
     }
 
     if errno != 0 {
@@ -207,17 +174,39 @@ pub fn read(desc: &FileDescriptor, slice: &mut [u8]) -> Result<u32, Errno> {
 }
 
 #[inline(always)]
-pub fn seek(desc: &FileDescriptor, offset: isize, kind: SeekKind) -> Result<u32, Errno> {
-    let result: u32;
+pub fn seek(desc: &FileDescriptor, offset: isize, kind: SeekKind) -> Result<u64, Errno> {
+    let result_low: u32;
+    let result_high: u32;
     let errno: u32;
 
     unsafe {
-        asm!("int 0x80", in("eax") Syscall::Seek as u32, in("ebx") desc.0, in("ecx") offset, in("edx") kind as usize, lateout("eax") errno, lateout("ebx") result);
+        asm!("int 0x80", in("eax") Syscall::Seek as u32, in("ebx") desc.0, in("ecx") offset, in("edx") kind as usize, lateout("eax") errno, lateout("ebx") result_low, lateout("ecx") result_high);
     }
 
     if errno != 0 {
         Err(Errno::from(errno))
     } else {
+        let result = result_low as u64 | ((result_high as u64) << 32);
+
+        Ok(result)
+    }
+}
+
+#[inline(always)]
+pub fn get_seek(desc: &FileDescriptor) -> Result<u64, Errno> {
+    let result_low: u32;
+    let result_high: u32;
+    let errno: u32;
+
+    unsafe {
+        asm!("int 0x80", in("eax") Syscall::GetSeek as u32, in("ebx") desc.0, lateout("eax") errno, out("ecx") result_low, out("edx") result_high);
+    }
+
+    if errno != 0 {
+        Err(Errno::from(errno))
+    } else {
+        let result = result_low as u64 | ((result_high as u64) << 32);
+
         Ok(result)
     }
 }
@@ -228,6 +217,21 @@ pub fn truncate(desc: &FileDescriptor, size: usize) -> Result<(), Errno> {
 
     unsafe {
         asm!("int 0x80", in("eax") Syscall::Truncate as u32, in("ebx") desc.0, in("ecx") size, lateout("eax") errno);
+    }
+
+    if errno != 0 {
+        Err(Errno::from(errno))
+    } else {
+        Ok(())
+    }
+}
+
+#[inline(always)]
+pub fn stat(desc: &FileDescriptor, stat_struct: &mut FileStatus) -> Result<(), Errno> {
+    let errno: u32;
+
+    unsafe {
+        asm!("int 0x80", in("eax") Syscall::Stat as u32, in("ebx") desc.0, in("ecx") stat_struct as *mut FileStatus, lateout("eax") errno);
     }
 
     if errno != 0 {

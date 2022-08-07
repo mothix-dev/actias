@@ -1,10 +1,12 @@
 //! virtual filesystems and filesystem interface
 
-use bitmask_enum::bitmask;
-use core::fmt;
 use crate::{
-    tar::TarIterator,
-    types::Errno,
+    fs::tar::TarIterator,
+    types::{
+        errno::Errno,
+        file::Permissions,
+        UserID, GroupID,
+    },
 };
 use alloc::{
     boxed::Box,
@@ -15,38 +17,6 @@ use super::tree::{
     File, Directory, SymLink,
     get_directory_from_path, get_file_from_path,
 };
-
-/// standard unix permissions bit field
-#[bitmask(u16)]
-pub enum Permissions {
-    SetUID          = Self(1 << 11),
-    SetGID          = Self(1 << 10),
-    Sticky          = Self(1 << 9),
-    OwnerRead       = Self(1 << 8),
-    OwnerWrite      = Self(1 << 7),
-    OwnerExecute    = Self(1 << 6),
-    GroupRead       = Self(1 << 5),
-    GroupWrite      = Self(1 << 4),
-    GroupExecute    = Self(1 << 3),
-    OtherRead       = Self(1 << 2),
-    OtherWrite      = Self(1 << 1),
-    OtherExecute    = Self(1 << 0),
-    None            = Self(0),
-}
-
-impl fmt::Display for Permissions {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", if *self & Self::OwnerRead != 0 { "r" } else { "-" })?;
-        write!(f, "{}", if *self & Self::OwnerWrite != 0 { "w" } else { "-" })?;
-        write!(f, "{}", if *self & Self::OwnerExecute != 0 && *self & Self::SetUID != 0 { "s" } else if *self & Self::SetUID != 0 { "S" } else if *self & Self::OwnerExecute != 0 { "x" } else { "-" })?;
-        write!(f, "{}", if *self & Self::GroupRead != 0 { "r" } else { "-" })?;
-        write!(f, "{}", if *self & Self::GroupWrite != 0 { "w" } else { "-" })?;
-        write!(f, "{}", if *self & Self::GroupExecute != 0 && *self & Self::SetGID != 0 { "s" } else if *self & Self::SetGID != 0 { "S" } else if *self & Self::GroupExecute != 0 { "x" } else { "-" })?;
-        write!(f, "{}", if *self & Self::OtherRead != 0 { "r" } else { "-" })?;
-        write!(f, "{}", if *self & Self::OtherWrite != 0 { "w" } else { "-" })?;
-        write!(f, "{}", if *self & Self::Sticky != 0 { "t" } else if *self & Self::OtherExecute != 0 { "x" } else { "-" })
-    }
-}
 
 pub struct DirEnt<'a> {
     serial: usize,
@@ -68,26 +38,6 @@ impl Directory for VfsRoot {
         Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::GroupWrite | Permissions::OtherRead
     }
 
-    fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
     fn get_files(&self) -> &Vec<Box<dyn File>> {
         &self.files
     }
@@ -108,40 +58,12 @@ impl Directory for VfsRoot {
         &self.links
     }
 
-    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-    
-    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-    
-    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
     fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>> {
         &mut self.links
     }
 
     fn get_name(&self) -> &str {
         ""
-    }
-
-    fn set_name(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 }
 
@@ -163,22 +85,6 @@ impl Directory for VfsDir {
         Ok(())
     }
 
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
     fn get_files(&self) -> &Vec<Box<dyn File>> {
         &self.files
     }
@@ -201,30 +107,6 @@ impl Directory for VfsDir {
 
     fn get_links_mut(&mut self) -> &mut Vec<Box<dyn SymLink>> {
         &mut self.links
-    }
-
-    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-    
-    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-    
-    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 
     fn get_name(&self) -> &str {
@@ -297,19 +179,19 @@ impl Directory for MountPoint {
         Ok(())
     }
 
-    fn get_owner(&self) -> usize {
+    fn get_owner(&self) -> UserID {
         self.dir.get_owner()
     }
 
-    fn set_owner(&mut self, owner: usize) -> Result<(), Errno> {
+    fn set_owner(&mut self, owner: UserID) -> Result<(), Errno> {
         self.dir.set_owner(owner)
     }
 
-    fn get_group(&self) -> usize {
+    fn get_group(&self) -> GroupID {
         self.dir.get_group()
     }
 
-    fn set_group(&mut self, group: usize) -> Result<(), Errno> {
+    fn set_group(&mut self, group: GroupID) -> Result<(), Errno> {
         self.dir.set_group(group)
     }
 
@@ -337,16 +219,16 @@ impl Directory for MountPoint {
         self.dir.get_links_mut()
     }
 
-    fn create_file(&mut self, name: &str) -> Result<(), Errno> {
-        self.dir.create_file(name)
+    fn create_file(&mut self, name: &str, permissions: Permissions) -> Result<(), Errno> {
+        self.dir.create_file(name, permissions)
     }
 
-    fn create_directory(&mut self, name: &str) -> Result<(), Errno> {
-        self.dir.create_directory(name)
+    fn create_directory(&mut self, name: &str, permissions: Permissions) -> Result<(), Errno> {
+        self.dir.create_directory(name, permissions)
     }
 
-    fn create_link(&mut self, name: &str, target: &str) -> Result<(), Errno> {
-        self.dir.create_link(name, target)
+    fn create_link(&mut self, name: &str, target: &str, permissions: Permissions) -> Result<(), Errno> {
+        self.dir.create_link(name, target, permissions)
     }
 
     fn delete_file(&mut self, name: &str) -> Result<(), Errno> {
@@ -420,9 +302,9 @@ pub fn remove_device(name: &str) {
 }
 
 pub fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
-    let file = get_file_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, path).ok_or(Errno::NoSuchFileOrDir)?;
+    let file = get_file_from_path(unsafe { ROOT_DIR.as_mut().unwrap() }, path)?;
 
-    let mut buf = vec![0; file.get_size()];
+    let mut buf = vec![0; file.get_size().try_into().unwrap_or(0)];
     file.read_at(buf.as_mut_slice(), 0)?;
 
     Ok(buf)
@@ -448,7 +330,7 @@ pub fn init() {
 
     // mount initrd
     if let Some(initrd) = crate::platform::get_initrd() {
-        add_mount_point("initrd", crate::tar::make_tree(TarIterator::new(initrd)));
+        add_mount_point("initrd", super::tar::make_tree(TarIterator::new(initrd)));
     }
 
     //super::tree::print_tree(unsafe { ROOT_DIR.as_ref().unwrap() });

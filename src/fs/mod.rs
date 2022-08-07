@@ -4,6 +4,7 @@
 pub mod vfs;
 pub mod tree;
 pub mod ops;
+pub mod tar;
 
 use alloc::{
     string::String,

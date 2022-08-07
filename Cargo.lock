@@ -67,6 +67,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "common"
+version = "0.1.0"
+dependencies = [
+ "aligned",
+ "bitmask-enum",
+ "byteorder",
+ "cc",
+ "generic-array",
+ "goblin",
+ "lazy_static",
+ "linked_list_allocator",
+ "log",
+ "num_enum",
+ "x86",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,6 +105,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "interface"
+version = "0.1.0"
+dependencies = [
+ "bitmask-enum",
+ "num_enum",
+]
+
+[[package]]
+name = "kernel"
+version = "0.1.0"
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -103,6 +132,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "549ce1740e46b291953c4340adcd74c59bcf4308f4cac050fd33ba91b7168f4a"
 dependencies = [
  "spinning_top",
+]
+
+[[package]]
+name = "loader"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "common",
+ "log",
 ]
 
 [[package]]
@@ -148,16 +186,7 @@ dependencies = [
 name = "ockernel"
 version = "0.1.0"
 dependencies = [
- "aligned",
- "bitmask-enum",
- "byteorder",
  "cc",
- "generic-array",
- "goblin",
- "lazy_static",
- "linked_list_allocator",
- "num_enum",
- "x86",
 ]
 
 [[package]]

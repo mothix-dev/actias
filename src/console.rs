@@ -13,11 +13,12 @@ use core::{
 };
 use crate::{
     platform::create_console,
-    fs::{
-        tree::{File, Directory, SymLink},
-        vfs::Permissions,
+    fs::tree::{File, Directory, SymLink},
+    types::{
+        errno::Errno,
+        keysym::KeySym,
+        file::{Permissions, FileKind, FileStatus},
     },
-    types::{Errno, KeySym},
 };
 use num_enum::FromPrimitive;
 use x86::io::{inb, outb};
@@ -174,20 +175,24 @@ impl SimpleConsole {
     pub fn new(raw: Box<dyn RawTextConsole + Sync>, width: u16, height: u16) -> Self {
         Self::enable_cursor();
 
-        Self {
+        let new = Self {
             raw, width, height,
             cursor_x: 0,
             cursor_y: 0,
             color: Default::default(),
-            lines: vec![],
-            line: vec![],
+            lines: Vec::with_capacity(MAX_KEYS_BUFFERED),
+            line: Vec::with_capacity(MAX_KEYS_BUFFERED),
             alt_state: false,
             ctrl_state: false,
             shift_state: false,
             raw_mode: false,
             control_mode: 0,
-            control_buf: vec![],
-        }
+            control_buf: Vec::with_capacity(MAX_KEYS_BUFFERED),
+        };
+
+        new.update_cursor();
+
+        new
     }
 
     fn reset(&mut self) {
@@ -200,6 +205,7 @@ impl SimpleConsole {
         self.control_mode = 0;
         self.control_buf.clear();
         self.clear();
+        self.update_cursor();
     }
 
     fn scroll_up(&mut self, num: u16) {
@@ -704,24 +710,8 @@ impl File for ConsoleFile {
         self.permissions = permissions;
         Ok(())
     }
-
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
     
-    fn write_at(&mut self, bytes: &[u8], _offset: usize) -> Result<usize, Errno> {
+    fn write_at(&mut self, bytes: &[u8], _offset: u64) -> Result<usize, Errno> {
         if let Ok(str) = String::from_utf8(bytes.to_vec()) {
             get_console().unwrap().puts(&str);
             Ok(bytes.len())
@@ -730,11 +720,11 @@ impl File for ConsoleFile {
         }
     }
 
-    fn can_write_at(&self, _space: usize, _offset: usize) -> bool {
+    fn can_write_at(&self, _space: usize, _offset: u64) -> bool {
         true
     }
 
-    fn read_at(&self, bytes: &mut [u8], _offset: usize) -> Result<usize, Errno> {
+    fn read_at(&self, bytes: &mut [u8], _offset: u64) -> Result<usize, Errno> {
         let read = get_console().unwrap().read_bytes(bytes.len());
 
         bytes[..read.len()].copy_from_slice(&read);
@@ -742,12 +732,20 @@ impl File for ConsoleFile {
         Ok(read.len())
     }
 
-    fn can_read_at(&self, space: usize, _offset: usize) -> bool {
+    fn can_read_at(&self, space: usize, _offset: u64) -> bool {
         get_console().unwrap().get_input_buffer().len() >= space
     }
 
-    fn truncate(&mut self, _size: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
+    fn stat(&self, status: &mut FileStatus) -> Result<(), Errno> {
+        *status = FileStatus {
+            user_id: self.get_owner(),
+            group_id: self.get_group(),
+            size: self.get_size(),
+            kind: FileKind::CharSpecial,
+            .. Default::default()
+        };
+
+        Ok(())
     }
 
     fn get_name(&self) -> &str {
@@ -759,7 +757,7 @@ impl File for ConsoleFile {
         Ok(())
     }
 
-    fn get_size(&self) -> usize {
+    fn get_size(&self) -> u64 {
         0
     }
 }
@@ -781,28 +779,12 @@ impl<T: FromStr + ToString> File for SettingFile<T> {
         Ok(())
     }
 
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn write_at(&mut self, bytes: &[u8], _offset: usize) -> Result<usize, Errno> {
+    fn write_at(&mut self, bytes: &[u8], _offset: u64) -> Result<usize, Errno> {
         if let Ok(str) = String::from_utf8(bytes.to_vec()) {
             if let Ok(val) = str.parse::<T>() {
                 (self.set_setting)(val);
 
-                Ok(bytes.len())
+                Ok(str.len())
             } else {
                 Err(Errno::IllegalSequence)
             }
@@ -811,11 +793,11 @@ impl<T: FromStr + ToString> File for SettingFile<T> {
         }
     }
 
-    fn can_write_at(&self, _space: usize, _offset: usize) -> bool {
+    fn can_write_at(&self, _space: usize, _offset: u64) -> bool {
         true
     }
 
-    fn read_at(&self, bytes: &mut [u8], _offset: usize) -> Result<usize, Errno> {
+    fn read_at(&self, bytes: &mut [u8], _offset: u64) -> Result<usize, Errno> {
         let string = (self.get_setting)().to_string();
         let string = string.as_bytes();
 
@@ -828,12 +810,8 @@ impl<T: FromStr + ToString> File for SettingFile<T> {
         }
     }
 
-    fn can_read_at(&self, space: usize, _offset: usize) -> bool {
+    fn can_read_at(&self, space: usize, _offset: u64) -> bool {
         space >= (self.get_setting)().to_string().len()
-    }
-
-    fn truncate(&mut self, _size: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 
     fn get_name(&self) -> &str {
@@ -845,7 +823,7 @@ impl<T: FromStr + ToString> File for SettingFile<T> {
         Ok(())
     }
 
-    fn get_size(&self) -> usize {
+    fn get_size(&self) -> u64 {
         0
     }
 }
@@ -859,26 +837,6 @@ pub struct DriverDir {
 impl Directory for DriverDir {
     fn get_permissions(&self) -> Permissions {
         Permissions::None
-    }
-
-    fn set_permissions(&mut self, _permissions: Permissions) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_owner(&self) -> usize {
-        0
-    }
-
-    fn set_owner(&mut self, _owner: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn get_group(&self) -> usize {
-        0
-    }
-
-    fn set_group(&mut self, _group: usize) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 
     fn get_files(&self) -> &Vec<Box<dyn File>> {
@@ -905,36 +863,8 @@ impl Directory for DriverDir {
         &mut self.links
     }
 
-    fn create_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn create_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-    
-    fn create_link(&mut self, _name: &str, _target: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_file(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
-    fn delete_directory(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-    
-    fn delete_link(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
-    }
-
     fn get_name(&self) -> &str {
         ""
-    }
-
-    fn set_name(&mut self, _name: &str) -> Result<(), Errno> {
-        Err(Errno::NotSupported)
     }
 }
 

@@ -4,31 +4,16 @@ use alloc::{
     boxed::Box,
     string::{String, ToString},
 };
-use bitmask_enum::bitmask;
-use crate::types::Errno;
-use num_enum::FromPrimitive;
+use core::fmt;
+use crate::types::{
+    errno::Errno,
+    file::{OpenFlags, SeekKind, Permissions, UnlinkFlags},
+};
 use super::{
-    tree::{File, get_file_from_path, get_directory_from_path},
-    vfs::{Permissions, ROOT_DIR},
+    tree::{File, Directory, get_file_from_path, get_directory_from_path, get_absolute_path},
+    vfs::ROOT_DIR,
     dirname, basename,
 };
-
-/// numerical file descriptor
-pub type FileDescriptor = usize;
-
-/// describes how a file will be opened
-#[bitmask(u8)]
-#[derive(PartialOrd, FromPrimitive)]
-pub enum OpenFlags {
-    #[num_enum(default)]
-    None        = Self(0),
-    Read        = Self(1 << 0),
-    Write       = Self(1 << 1),
-    Append      = Self(1 << 2),
-    Create      = Self(1 << 3),
-    Truncate    = Self(1 << 4),
-    NonBlocking = Self(1 << 5),
-}
 
 /// stores information about an open file
 pub struct OpenFile {
@@ -39,7 +24,7 @@ pub struct OpenFile {
     pub path: String,
 
     /// offset into the file
-    pub offset: usize,
+    pub offset: u64,
 
     /// can we read from this file?
     pub can_read: bool,
@@ -52,6 +37,19 @@ pub struct OpenFile {
 
     /// should we always append to this file when writing to it?
     pub should_append: bool,
+}
+
+impl fmt::Debug for OpenFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenFile")
+         .field("path", &self.path)
+         .field("offset", &self.offset)
+         .field("can_read", &self.can_read)
+         .field("can_write", &self.can_write)
+         .field("should_block", &self.should_block)
+         .field("should_append", &self.should_append)
+         .finish_non_exhaustive()
+    }
 }
 
 impl Clone for OpenFile {
@@ -71,21 +69,23 @@ impl Clone for OpenFile {
 }
 
 /// opens a file
-pub fn open(path: &str, flags: OpenFlags) -> Result<OpenFile, Errno> {
+pub fn open(path: &str, flags: OpenFlags, permissions: Permissions) -> Result<OpenFile, Errno> {
     let file =
-        if let Some(file) = get_file_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, path) {
-            file
-        } else if flags & OpenFlags::Create != OpenFlags::None {
-            let dirname = dirname(path);
-            let filename = basename(path).ok_or(Errno::NoSuchFileOrDir)?;
-
-            let dir = get_directory_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, &dirname).ok_or(Errno::NoSuchFileOrDir)?;
-
-            dir.create_file(filename)?;
-
-            get_file_from_path(dir, filename).ok_or(Errno::NoSuchFileOrDir)?
-        } else {
-            Err(Errno::NoSuchFileOrDir)?
+        match get_file_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, path) {
+            Ok(file) => file,
+            Err(Errno::NoSuchFileOrDir) => if flags & OpenFlags::Create != OpenFlags::None {
+                let dirname = dirname(path);
+                let filename = basename(path).ok_or(Errno::IsDirectory)?;
+    
+                let dir = get_directory_from_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, &dirname)?;
+    
+                dir.create_file(filename, permissions)?;
+    
+                get_file_from_path(dir, filename)?
+            } else {
+                Err(Errno::NoSuchFileOrDir)?
+            },
+            Err(err) => Err(err)?,
         };
     
     if flags & OpenFlags::Truncate != OpenFlags::None {
@@ -94,7 +94,7 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<OpenFile, Errno> {
 
     let mut opened = OpenFile {
         file,
-        path: path.to_string(),
+        path: get_absolute_path(unsafe { ROOT_DIR.as_mut().expect("file system not initialized") }, path)?,
         offset: 0,
         can_read: false,
         can_write: false,
@@ -115,22 +115,40 @@ pub fn open(path: &str, flags: OpenFlags) -> Result<OpenFile, Errno> {
         opened.seek(0, SeekKind::End)?;
     }
 
+    log!("opened file {:#?}", opened);
+
     Ok(opened)
 }
 
-/// controls how FileDescriptor::seek() seeks
-#[repr(u8)]
-#[derive(FromPrimitive)]
-pub enum SeekKind {
-    /// set file writing offset to provided offset
-    #[num_enum(default)]
-    Set = 0,
+pub fn unlink_at(dir: &mut Box<dyn Directory>, path: &str, flags: UnlinkFlags) -> Result<(), Errno> {
+    if flags & UnlinkFlags::RemoveDir != UnlinkFlags::None {
+        // rmdir
+        //let dir = get_directory_from_path(dir, path)?;
 
-    /// add the provided offset to the current file offset
-    Current,
 
-    /// set the file offset to the end of the file plus the provided offset
-    End,
+        Err(Errno::NotSupported)
+    } else {
+        if path.is_empty() { // sanity check
+            Err(Errno::NoSuchFileOrDir)
+        } else {
+            let dir_name = dirname(path);
+            let file_name = basename(path).ok_or(Errno::IsDirectory)?;
+
+            let dir = get_directory_from_path(dir, &dir_name)?;
+
+            // TODO: check permissions of dir for sticky bit
+
+            if let Some(link) = dir.get_links_mut().iter_mut().find(|f| f.get_name() == file_name) {
+                dir.delete_link(file_name)
+            } else if let Some(file) = dir.get_files_mut().iter_mut().find(|f| f.get_name() == file_name) {
+                dir.delete_file(file_name)
+            } else if let Some(file) = dir.get_directories_mut().iter_mut().find(|f| f.get_name() == file_name) {
+                dir.delete_directory(file_name)
+            } else {
+                Err(Errno::NoSuchFileOrDir)
+            }
+        }
+    }
 }
 
 impl OpenFile {
@@ -153,7 +171,7 @@ impl OpenFile {
             }
 
             let amt = self.file.write_at(bytes, self.offset)?;
-            self.offset += amt;
+            self.offset += amt as u64;
             Ok(amt)
         } else {
             Err(Errno::BadFile)
@@ -161,7 +179,7 @@ impl OpenFile {
     }
 
     /// write all bytes contained in slice to file at offset
-    pub fn write_at(&mut self, bytes: &[u8], offset: usize) -> Result<usize, Errno> {
+    pub fn write_at(&mut self, bytes: &[u8], offset: u64) -> Result<usize, Errno> {
         if self.can_write {
             self.file.write_at(bytes, offset)
         } else {
@@ -179,7 +197,7 @@ impl OpenFile {
     }
 
     /// checks if there's enough room to write the provided amount of bytes into the file at the provided offset
-    pub fn can_write_at(&mut self, space: usize, offset: usize) -> Result<bool, Errno> {
+    pub fn can_write_at(&mut self, space: usize, offset: u64) -> Result<bool, Errno> {
         if self.can_write {
             Ok(self.file.can_write_at(space, offset))
         } else {
@@ -192,7 +210,7 @@ impl OpenFile {
     pub fn read(&mut self, bytes: &mut [u8]) -> Result<usize, Errno> {
         if self.can_read {
             let amt = self.file.read_at(bytes, self.offset)?;
-            self.offset += amt;
+            self.offset += amt as u64;
             Ok(amt)
         } else {
             Err(Errno::BadFile)
@@ -200,7 +218,7 @@ impl OpenFile {
     }
 
     /// read from file at offset into provided slice
-    pub fn read_at(&mut self, bytes: &mut [u8], offset: usize) -> Result<usize, Errno> {
+    pub fn read_at(&mut self, bytes: &mut [u8], offset: u64) -> Result<usize, Errno> {
         if self.can_read {
             self.file.read_at(bytes, offset)
         } else {
@@ -218,7 +236,7 @@ impl OpenFile {
     }
 
     /// checks if there's enough room to read the provided amount of bytes from the file at the provided offset
-    pub fn can_read_at(&mut self, space: usize, offset: usize) -> Result<bool, Errno> {
+    pub fn can_read_at(&mut self, space: usize, offset: u64) -> Result<bool, Errno> {
         if self.can_read {
             Ok(self.file.can_read_at(space, offset))
         } else {
@@ -229,23 +247,23 @@ impl OpenFile {
 
     /// seek file
     /// seek behavior depends on the SeekKind provided
-    pub fn seek(&mut self, offset: isize, kind: SeekKind) -> Result<usize, Errno> {
+    pub fn seek(&mut self, offset: isize, kind: SeekKind) -> Result<u64, Errno> {
         let size = self.file.get_size();
 
         match kind {
-            SeekKind::Set => self.offset = offset as usize,
+            SeekKind::Set => self.offset = offset as u64,
             SeekKind::Current => {
                 if offset > 0 {
-                    self.offset = self.offset.wrapping_add(offset as usize); // we can wrap since if it goes below zero it'll be bigger than the file size, and thus fail
+                    self.offset = self.offset.wrapping_add(offset as u64); // we can wrap since if it goes below zero it'll be bigger than the file size, and thus fail
                 } else {
-                    self.offset = self.offset.wrapping_sub((-offset) as usize);
+                    self.offset = self.offset.wrapping_sub((-offset) as u64);
                 }
             },
             SeekKind::End => {
                 if offset > 0 {
                     return Err(Errno::InvalidSeek);
                 } else {
-                    self.offset = size.wrapping_sub((-offset) as usize);
+                    self.offset = size.wrapping_sub((-offset) as u64);
                 }
             },
         }
@@ -259,7 +277,7 @@ impl OpenFile {
 
 
     /// truncate file, setting its size to the provided size
-    pub fn truncate(&mut self, size: usize) -> Result<(), Errno> {
+    pub fn truncate(&mut self, size: u64) -> Result<(), Errno> {
         if self.can_write {
             self.file.truncate(size)
         } else {

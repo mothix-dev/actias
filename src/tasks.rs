@@ -5,9 +5,13 @@ use crate::{
         tasks::TaskState,
         paging::free_page_phys,
     },
-    fs::ops::{OpenFile, FileDescriptor, OpenFlags, open},
+    fs::ops::{OpenFile, open},
     util::array::VecBitSet,
-    types::Errno,
+    types::{
+        errno::Errno,
+        file::{FileDescriptor, OpenFlags, Permissions},
+        UserID, GroupID,
+    },
 };
 use alloc::{
     collections::BTreeMap,
@@ -18,7 +22,7 @@ use core::fmt;
 /// arbitrary limit for the maximum amount of files a task can have open at once
 const MAX_OPEN_FILES: usize = 2048;
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum BlockKind {
     None,
     Read(FileDescriptor),
@@ -54,26 +58,34 @@ pub struct Task {
     /// error (if any) we've encountered while blocking for a file
     pub blocked_err: Errno,
 
-    /// whether this task has just been unblocked and needs to have the read operation completed
+    /// whether this task has just been unblocked and needs to have an io operation completed
     pub just_unblocked: bool,
+
+    /// real user id of the task
+    pub real_uid: UserID,
+
+    /// real group of the task
+    pub real_gid: GroupID,
+
+    /// effective user id of the task. this is used for permission checks, etc
+    pub effective_uid: UserID,
+
+    /// effective group id of the task
+    pub effective_gid: GroupID,
+
+    /// saved user id of the task. allows unprivileged processes to switch between their real and effective uids
+    pub saved_uid: UserID,
+
+    /// saved group id of the task
+    pub saved_gid: GroupID,
 }
 
 impl Task {
     /// creates a new task
-    pub fn new() -> Self {
-        Self::from_state(Default::default())
-    }
-
-    /// creates a new task with the provided state
-    pub fn from_state(state: TaskState) -> Self {
-        unsafe { TOTAL_TASKS += 1; }
-
-        let id = unsafe { TOTAL_TASKS };
-
-        debug!("new task with pid {}", id);
-
+    pub fn new(uid: UserID, gid: GroupID) -> Self {
         Self {
-            state, id,
+            state: Default::default(),
+            id: 0,
             children: Vec::new(),
             parent: None,
             files: vec![],
@@ -82,6 +94,12 @@ impl Task {
             block_kind: BlockKind::None,
             blocked_err: Errno::None,
             just_unblocked: false,
+            real_uid: uid,
+            real_gid: gid,
+            effective_uid: uid,
+            effective_gid: gid,
+            saved_uid: uid,
+            saved_gid: gid,
         }
     }
 
@@ -98,11 +116,38 @@ impl Task {
             block_kind: self.block_kind,
             blocked_err: self.blocked_err,
             just_unblocked: self.just_unblocked,
+            real_uid: self.real_uid,
+            real_gid: self.real_gid,
+            effective_uid: self.effective_uid,
+            effective_gid: self.effective_gid,
+            saved_uid: self.saved_uid,
+            saved_gid: self.saved_gid,
+        }
+    }
+
+    pub fn clone(&self, state: TaskState) -> Self {
+        Self {
+            state,
+            id: 0,
+            children: Vec::new(),
+            parent: Some(self.id),
+            files: self.files.to_vec(),
+            files_bit_set: self.files_bit_set.clone(),
+            blocked: self.blocked,
+            block_kind: self.block_kind,
+            blocked_err: self.blocked_err,
+            just_unblocked: self.just_unblocked,
+            real_uid: self.real_uid,
+            real_gid: self.real_gid,
+            effective_uid: self.effective_uid,
+            effective_gid: self.effective_gid,
+            saved_uid: self.saved_uid,
+            saved_gid: self.saved_gid,
         }
     }
 
     /// open a file, returning a numerical file descriptor
-    pub fn open(&mut self, path: &str, flags: OpenFlags) -> Result<FileDescriptor, Errno> {
+    pub fn open(&mut self, path: &str, flags: OpenFlags, permissions: Permissions) -> Result<FileDescriptor, Errno> {
         let first_unused = self.files_bit_set.first_unset();
 
         if first_unused > MAX_OPEN_FILES {
@@ -116,7 +161,7 @@ impl Task {
                 }
             }
 
-            *(self.files.get_mut(first_unused).ok_or(Errno::TooManyFilesOpen)?) = Some(open(path, flags)?);
+            *(self.files.get_mut(first_unused).ok_or(Errno::TooManyFilesOpen)?) = Some(open(path, flags, permissions)?);
             
             Ok(first_unused)
         }
@@ -176,13 +221,18 @@ impl fmt::Debug for Task {
          .field("id", &self.id)
          .field("children", &self.children)
          .field("parent", &self.parent)
+         .field("files", &self.files)
+         .field("blocked", &self.blocked)
+         .field("block_kind", &self.block_kind)
+         .field("blocked_err", &self.blocked_err)
+         .field("just_unblocked", &self.just_unblocked)
          .finish_non_exhaustive()
     }
 }
 
 impl Default for Task {
     fn default() -> Self {
-        Self::new()
+        Self::new(0, 0)
     }
 }
 
@@ -345,12 +395,19 @@ pub fn switch_tasks() -> bool {
 }
 
 /// add new task
-pub fn add_task(task: Task) {
+pub fn add_task(mut task: Task) -> usize {
+    unsafe { TOTAL_TASKS += 1; }
+
+    let id = unsafe { TOTAL_TASKS };
+    task.id = id;
+
     debug!("added task {:?}", task);
 
     unsafe {
         TASKS.push(task);
     }
+
+    id
 }
 
 /// remove existing task
