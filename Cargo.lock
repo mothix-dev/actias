@@ -74,13 +74,24 @@ dependencies = [
  "bitmask-enum",
  "byteorder",
  "cc",
- "generic-array",
  "goblin",
  "lazy_static",
  "linked_list_allocator",
  "log",
  "num_enum",
  "x86",
+]
+
+[[package]]
+name = "compression"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a82b366ae14633c67a1cbb4aa3738210a23f77d2868a0fd50faa23a956f9ec4"
+dependencies = [
+ "cfg-if",
+ "lazy_static",
+ "log",
+ "num-traits",
 ]
 
 [[package]]
@@ -114,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "lazy_static"
@@ -140,6 +151,8 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "common",
+ "compression",
+ "generic-array",
  "log",
 ]
 
@@ -160,6 +173,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abb12e687cfb44aa40f41fc3978ef76448f9b6038cad6aef4259d3c095a2382e"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "num-traits"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "578ede34cf02f8924ab9447f50c28075b4d3e5b269972345e7e0372b38c6cdcd"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]
@@ -184,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "ockernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]

@@ -57,9 +57,9 @@ impl Log for Logger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             if let Some(path) = record.module_path() {
-                writeln!(&mut SerialWriter, "{} [{}] {}", record.level(), path, record.args());
+                writeln!(&mut SerialWriter, "{:width$} [{}] {}", record.level(), path, record.args(), width = 5);
             } else {
-                writeln!(&mut SerialWriter, "{} [unknown] {}", record.level(), record.args());
+                writeln!(&mut SerialWriter, "{:width$} [unknown] {}", record.level(), record.args(), width = 5);
             }
         }
     }

@@ -207,7 +207,7 @@ impl<T: PageDirectory> PageManager<T> {
                     copy_on_write: false,
                 };
 
-                trace!("allocating frame {:?}", frame);
+                trace!("allocating frame {:?} @ virt {:#x}", frame, addr);
 
                 self.frame_set.set(idx);
                 dir.set_page(addr, Some(frame))?;
@@ -247,7 +247,7 @@ impl<T: PageDirectory> PageManager<T> {
                 copy_on_write: false,
             };
 
-            trace!("allocating frame {:?}", frame);
+            trace!("allocating frame {:?} @ {:#x}", frame, addr);
 
             self.frame_set.set(idx as usize);
             dir.set_page(addr, Some(frame))?;

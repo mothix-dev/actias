@@ -252,15 +252,21 @@ impl<'a> AllocState<'a> {
                     }
                 }
 
-                debug!("heap is now {:#x} - {:#x}", self.heap.bottom(), self.heap.top());
+                trace!("heap is now {:#x} - {:#x}", self.heap.bottom(), self.heap.top());
 
                 // allocate new reserved memory
                 unsafe {
                     self.alloc_reserved();
                 }
 
+                trace!("trying allocation again");
+
                 // try allocating again
-                self.heap.allocate_first_fit(layout).map(|allocation| allocation.as_ptr())
+                let allocation = self.heap.allocate_first_fit(layout).map(|allocation| allocation.as_ptr());
+
+                trace!("allocation: {:?}", allocation);
+
+                allocation
             }
         }
     }

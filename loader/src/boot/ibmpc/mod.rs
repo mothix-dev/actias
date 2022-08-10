@@ -1,3 +1,5 @@
+pub mod bootloader;
+
 /// initialize paging, just cleanly map our kernel to 3gb
 #[no_mangle]
 pub extern "C" fn x86_prep_page_table(buf: &mut [u32; 1024]) {

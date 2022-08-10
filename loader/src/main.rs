@@ -2,6 +2,8 @@
 #![no_main]
 #![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
+#![feature(core_c_str)]
+#![feature(cstr_from_bytes_until_nul)]
 
 extern crate alloc;
 
@@ -10,7 +12,16 @@ extern crate alloc;
 #[path = "boot/ibmpc/mod.rs"]
 pub mod boot;
 
-use alloc::alloc::Layout;
+pub mod tar;
+
+use alloc::{
+    alloc::Layout,
+    boxed::Box,
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+    format,
+};
 use common::{
     arch::{
         paging::{PageDir, PageDirEntry, PageTable, TableRef},
@@ -20,10 +31,12 @@ use common::{
         heap::CustomAlloc,
         paging::{PageDirectory, PageError, PageManager},
     },
-    util::array::BitSet,
+    util::{array::BitSet, DebugArray},
 };
+use compression::prelude::*;
 use core::{arch::asm, mem::size_of};
 use log::{debug, error, info, trace, warn};
+use tar::{EntryKind, TarIterator};
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -137,11 +150,14 @@ pub fn kmain() {
 
     info!("{} v{}", NAME, VERSION);
 
-    // our memory size, just a total guess for now
-    let mem_size = 128 * 1024 * 1024;
-    let mem_size_pages = mem_size / PAGE_SIZE;
-
     let kernel_end_pos = unsafe { (&kernel_end as *const _) as usize };
+
+    // === multiboot pre-init ===
+
+    let mem_size = crate::boot::bootloader::init();
+    let mem_size_pages: usize = (mem_size / PAGE_SIZE as u64).try_into().unwrap();
+
+    // === paging init ===
 
     // initialize the bump allocator so we can allocate initial memory for paging
     unsafe {
@@ -154,6 +170,7 @@ pub fn kmain() {
         let ptr = unsafe { bump_alloc::<u32>(alloc_size, false).pointer };
         let mut bitset = BitSet::place_at(ptr, mem_size_pages);
         bitset.clear_all();
+        crate::boot::bootloader::reserve_pages(&mut bitset);
         bitset
     });
 
@@ -169,27 +186,34 @@ pub fn kmain() {
         PageDir::from_allocated(tables, unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap())
     };
 
-    // allocate a range of addresses. this can't be done outside this because rust gets confused with lifetimes
-    let mut map = |kind: &str, start: usize, end: usize| {
-        debug!("mapping {} ({:#x} - {:#x})", kind, start, end);
-
-        for addr in (start..end).step_by(PAGE_SIZE) {
-            if !loader_dir.has_page_table(addr.try_into().unwrap()) {
-                trace!("allocating new page table");
-                let alloc_size = size_of::<PageTable>();
-                let ptr = unsafe { bump_alloc::<PageTable>(alloc_size, true) };
-                loader_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap());
-            }
-
-            manager.alloc_frame(&mut loader_dir, addr, false, true).unwrap();
-        }
-    };
-
     let heap_reserved = PAGE_SIZE * 2;
 
     // allocate pages
-    map("loader", LINKED_BASE, kernel_end_pos);
-    map("heap", KHEAP_START, KHEAP_START + heap_reserved);
+    debug!("mapping loader ({:#x} - {:#x})", LINKED_BASE, kernel_end_pos);
+
+    for addr in (LINKED_BASE..kernel_end_pos).step_by(PAGE_SIZE) {
+        if !loader_dir.has_page_table(addr.try_into().unwrap()) {
+            trace!("allocating new page table");
+            let alloc_size = size_of::<PageTable>();
+            let ptr = unsafe { bump_alloc::<PageTable>(alloc_size, true) };
+            loader_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+        }
+
+        manager.alloc_frame_at(&mut loader_dir, addr, (addr - LINKED_BASE) as u64, false, true).unwrap();
+    }
+
+    debug!("mapping heap ({:#x} - {:#x})", KHEAP_START, KHEAP_START + heap_reserved);
+
+    for addr in (KHEAP_START..KHEAP_START + heap_reserved).step_by(PAGE_SIZE) {
+        if !loader_dir.has_page_table(addr.try_into().unwrap()) {
+            trace!("allocating new page table");
+            let alloc_size = size_of::<PageTable>();
+            let ptr = unsafe { bump_alloc::<PageTable>(alloc_size, true) };
+            loader_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+        }
+
+        manager.alloc_frame(&mut loader_dir, addr, false, true).unwrap();
+    }
 
     // switch to our new page directory so all the pages we've just mapped will be accessible
     unsafe {
@@ -200,6 +224,8 @@ pub fn kmain() {
 
         PAGE_MANAGER = Some(manager);
     }
+
+    // === heap init ===
 
     // set up allocator with minimum size
     ALLOCATOR.init(KHEAP_START, heap_reserved);
@@ -227,7 +253,7 @@ pub fn kmain() {
                     };
                     let phys = dir.virt_to_phys(virt as usize).ok_or(())?;
 
-                    dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *(virt as *mut PageTable) }, phys.try_into().unwrap());
+                    dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *(virt as *mut PageTable) }, phys.try_into().unwrap(), true);
                 }
 
                 unsafe {
@@ -250,17 +276,101 @@ pub fn kmain() {
         PAGE_MANAGER.as_mut().unwrap().print_free();
     }
 
-    {
-        use alloc::vec::Vec;
-        let mut vec: Vec<u32> = Vec::with_capacity(1);
-        vec.push(3);
-        vec.push(5);
-        vec.push(9);
-        vec.push(15);
+    // === multiboot init after heap init ===
 
-        debug!("{:?}", vec);
+    unsafe {
+        crate::boot::bootloader::init_after_heap(PAGE_MANAGER.as_mut().unwrap(), LOADER_DIR.as_mut().unwrap());
+    }
 
-        assert!(vec.len() == 4);
+    let info = crate::boot::bootloader::get_multiboot_info();
+
+    debug!("{:?}", info);
+
+    // === module discovery ===
+
+    if info.mods.is_none() || info.mods.as_ref().unwrap().len() == 0 {
+        panic!("no modules have been passed to loader, cannot continue booting");
+    }
+
+    let bootloader_modules = info.mods.as_ref().unwrap();
+
+    let mut modules: BTreeMap<String, &'static [u8]> = BTreeMap::new();
+
+    fn discover_module(modules: &mut BTreeMap<String, &'static [u8]>, name: String, data: &'static [u8]) {
+        debug!("found module {:?}: {:?}", name, DebugArray(data));
+
+        match name.split(".").last() {
+            Some("tar") => {
+                debug!("found tar file");
+                for entry in TarIterator::new(data) {
+                    if entry.header.kind() == EntryKind::NormalFile {
+                        discover_module(modules, entry.header.name().to_string(), entry.contents);
+                    }
+                }
+            }
+            Some("bz2") => {
+                debug!("found bzip2 compressed file");
+                match data.iter().cloned().decode(&mut BZip2Decoder::new()).collect::<Result<Vec<_>, _>>() {
+                    Ok(decompressed) => {
+                        let new_name = {
+                            let mut split: Vec<&str> = name.split(".").collect();
+                            split.pop();
+                            split.join(".")
+                        };
+                        // Box::leak() prevents the decompressed data from being dropped, giving it the 'static lifetime since it doesn't
+                        // contain any other references
+                        discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice()));
+                    }
+                    Err(err) => error!("error decompressing {}: {:?}", name, err),
+                }
+            }
+            Some("gz") => {
+                debug!("found gzip compressed file");
+                match data.iter().cloned().decode(&mut GZipDecoder::new()).collect::<Result<Vec<_>, _>>() {
+                    Ok(decompressed) => {
+                        let new_name = {
+                            let mut split: Vec<&str> = name.split(".").collect();
+                            split.pop();
+                            split.join(".")
+                        };
+                        discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice()));
+                    }
+                    Err(err) => error!("error decompressing {}: {:?}", name, err),
+                }
+            }
+            _ => {
+                // no special handling for this file, assume it's a module
+                modules.insert(name, data);
+            }
+        }
+    };
+
+    for module in bootloader_modules.iter() {
+        discover_module(&mut modules, module.string().to_string(), module.data());
+    }
+
+    // === print module info ===
+
+    let mut num_modules = 0;
+    let mut max_len = 0;
+    for (name, _) in modules.iter() {
+        num_modules += 1;
+        if name.len() > max_len {
+            max_len = name.len();
+        }
+    }
+
+    info!("{} modules:", num_modules);
+    for (name, data) in modules.iter() {
+        let size =
+            if data.len() > 1024 * 1024 * 10 {
+                format!("{} KB", data.len() / 1024 / 1024)
+            } else if data.len() > 1024 * 10 {
+                format!("{} KB", data.len() / 1024)
+            } else {
+                format!("{} B", data.len())
+            };
+        info!("\t{:width$}: {}", name, size, width = max_len);
     }
 
     unsafe {

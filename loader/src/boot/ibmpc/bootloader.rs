@@ -1,15 +1,14 @@
 //! bootloader specific code to be run during arch init
 
-use crate::{
-    arch::{
-        paging::{alloc_pages_at, free_pages, kmalloc},
-        LINKED_BASE, MEM_SIZE, PAGE_SIZE,
-    },
-    util::array::BitSet,
-};
+use crate::bump_alloc;
 use alloc::alloc::{alloc, Layout};
+use common::{
+    arch::{LINKED_BASE, MEM_SIZE, PAGE_SIZE},
+    mm::paging::{PageDirectory, PageManager},
+    util::{array::BitSet, DebugArray},
+};
 use core::{ffi::CStr, fmt, mem::size_of, slice};
-use log::{error, warn, info, debug, trace};
+use log::{debug, error, info, trace, warn};
 
 extern "C" {
     /// multiboot signature, provided by the bootloader and set in boot.S
@@ -21,7 +20,6 @@ extern "C" {
 
 pub static mut MULTIBOOT_INFO: Option<MultibootInfoCopy> = None;
 
-// TODO: move this into platform along with initial boot code? or maybe have a bootloader interface module
 /// multiboot info struct
 #[repr(C)]
 pub struct MultibootInfo {
@@ -132,39 +130,36 @@ impl MultibootModuleCopy {
         self.string
     }
 
-    pub fn map_data(&mut self) {
+    pub fn map_data<T: PageDirectory>(&mut self, manager: &mut PageManager<T>, dir: &mut T) {
         if self.data.is_none() {
             let buf_size = (self.data_end - self.data_start) as usize;
 
-            let num_pages = if buf_size % PAGE_SIZE != 0 {
-                (buf_size + PAGE_SIZE) / PAGE_SIZE
-            } else {
-                buf_size / PAGE_SIZE
-            };
+            let num_pages = if buf_size % PAGE_SIZE != 0 { (buf_size + PAGE_SIZE) / PAGE_SIZE } else { buf_size / PAGE_SIZE };
 
             let buf_size_aligned = num_pages * PAGE_SIZE;
 
             debug!("buf size {:#x}, aligned to {:#x}", buf_size, buf_size_aligned);
 
+            let data_start_aligned = self.data_start as usize / PAGE_SIZE * PAGE_SIZE;
+            let data_start_offset = data_start_aligned - self.data_start as usize;
+
+            debug!("data start @ {:#x}, aligned to {:#x}, offset {:#x}", self.data_start, data_start_aligned, data_start_offset);
+
             let layout = Layout::from_size_align(buf_size_aligned, PAGE_SIZE).unwrap();
             let ptr = unsafe { alloc(layout) };
 
-            assert!(ptr as usize % PAGE_SIZE == 0); // make absolutely sure pointer is page aligned
-
             // free memory we're going to remap
-            free_pages(ptr as usize, num_pages);
+            //free_pages(ptr as usize, num_pages);
 
             // remap memory
-            alloc_pages_at(
-                ptr as usize,
-                num_pages,
-                self.data_start as u64,
-                true,
-                true,
-                true,
-            );
+            //alloc_pages_at(ptr as usize, num_pages, self.data_start as u64, true, true, true);
 
-            self.data = Some(unsafe { slice::from_raw_parts(ptr, buf_size) });
+            for i in (0..num_pages * PAGE_SIZE).step_by(PAGE_SIZE) {
+                manager.free_frame(dir, ptr as usize + i);
+                manager.alloc_frame_at(dir, ptr as usize + i, data_start_aligned as u64 + i as u64, false, false);
+            }
+
+            self.data = Some(unsafe { slice::from_raw_parts(ptr.offset(data_start_offset.try_into().unwrap()), buf_size) });
         }
     }
 }
@@ -172,7 +167,7 @@ impl MultibootModuleCopy {
 impl fmt::Debug for MultibootModuleCopy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MultibootModuleCopy")
-            .field("data", &self.data())
+            .field("data", &DebugArray(&self.data()))
             .field("string", &self.string())
             .finish_non_exhaustive()
     }
@@ -188,7 +183,7 @@ impl MultibootInfo {
 
             let chars = s.as_bytes();
             let len = chars.len();
-            let new = unsafe { slice::from_raw_parts_mut(kmalloc::<u8>(len, false).pointer, len) };
+            let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<u8>(len, false).pointer, len) };
 
             new.copy_from_slice(chars);
 
@@ -199,9 +194,7 @@ impl MultibootInfo {
             let len = modules.len();
 
             if len > 0 {
-                let new = unsafe {
-                    slice::from_raw_parts_mut(kmalloc::<MultibootModuleCopy>(len * size_of::<MultibootModuleCopy>(), false).pointer, len)
-                };
+                let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<MultibootModuleCopy>(len * size_of::<MultibootModuleCopy>(), false).pointer, len) };
 
                 for i in 0..len {
                     let old_module = &modules[i];
@@ -210,11 +203,7 @@ impl MultibootInfo {
                     new_module.data = None;
                     new_module.data_start = old_module.start;
                     new_module.data_end = old_module.end;
-                    new_module.string = copy_str(unsafe {
-                        CStr::from_ptr((old_module.string as usize + LINKED_BASE) as *const _)
-                            .to_str()
-                            .unwrap_or("")
-                    });
+                    new_module.string = copy_str(unsafe { CStr::from_ptr((old_module.string as usize + LINKED_BASE) as *const _).to_str().unwrap_or("") });
                 }
 
                 Some(new)
@@ -267,11 +256,7 @@ impl MultibootInfo {
     /// gets command line arguments for kernel if available
     pub fn get_cmdline(&self) -> Option<&str> {
         if self.is_flag_set(2).unwrap() {
-            unsafe {
-                CStr::from_ptr((self.cmdline as usize + LINKED_BASE) as *const _)
-                    .to_str()
-                    .ok()
-            }
+            unsafe { CStr::from_ptr((self.cmdline as usize + LINKED_BASE) as *const _).to_str().ok() }
         } else {
             None
         }
@@ -280,12 +265,7 @@ impl MultibootInfo {
     /// gets modules passed by bootloader if available
     pub fn get_modules(&self) -> Option<&[MultibootModule]> {
         if self.is_flag_set(3).unwrap() {
-            Some(unsafe {
-                slice::from_raw_parts(
-                    (self.mods_addr as usize + LINKED_BASE) as *const MultibootModule,
-                    self.mods_count as usize,
-                )
-            })
+            Some(unsafe { slice::from_raw_parts((self.mods_addr as usize + LINKED_BASE) as *const MultibootModule, self.mods_count as usize) })
         } else {
             None
         }
@@ -303,11 +283,7 @@ impl MultibootInfo {
     /// gets name of bootloader if available
     pub fn get_bootloader_name(&self) -> Option<&str> {
         if self.is_flag_set(9).unwrap() {
-            unsafe {
-                CStr::from_ptr((self.bootloader_name as usize + LINKED_BASE) as *const _)
-                    .to_str()
-                    .ok()
-            }
+            unsafe { CStr::from_ptr((self.bootloader_name as usize + LINKED_BASE) as *const _).to_str().ok() }
         } else {
             None
         }
@@ -366,21 +342,12 @@ pub struct MultibootModule {
 impl MultibootModule {
     /// gets contents of this module as a slice
     pub fn get_contents(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(
-                self.start as usize as *const u8,
-                self.end as usize - self.start as usize,
-            )
-        }
+        unsafe { slice::from_raw_parts(self.start as usize as *const u8, self.end as usize - self.start as usize) }
     }
 
     /// gets string associated with this module
     pub fn get_string(&self) -> &str {
-        unsafe {
-            CStr::from_ptr(self.string as usize as *const _)
-                .to_str()
-                .unwrap_or("")
-        }
+        unsafe { CStr::from_ptr(self.string as usize as *const _).to_str().unwrap_or("") }
     }
 }
 
@@ -446,10 +413,7 @@ pub struct MemMapList {
 
 impl fmt::Debug for MemMapList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MemMapList")
-            .field("length", &self.length)
-            .field("addr", &(self.addr as *const u8))
-            .finish()
+        f.debug_struct("MemMapList").field("length", &self.length).field("addr", &(self.addr as *const u8)).finish()
     }
 }
 
@@ -533,8 +497,7 @@ impl<'a> Iterator for MemMapIter<'a> {
         if self.finished {
             (0, Some(0)) // no more
         } else {
-            let remaining =
-                self.list.length as usize - self.index - if self.first_entry { 0 } else { 1 }; // how many elements we have remaining
+            let remaining = self.list.length as usize - self.index - if self.first_entry { 0 } else { 1 }; // how many elements we have remaining
 
             (0, Some(remaining))
         }
@@ -672,8 +635,46 @@ const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 pub fn reserve_pages(set: &mut BitSet) {
     let info: &MultibootInfo = get_orig_multiboot_info(); // we can just do this again for now
 
-    // set or clear a region of memory in the bitset
-    fn set_region(set: &mut BitSet, start: u64, end: u64, state: bool) {
+    // set a region of memory in the bitset
+    fn set_region_used(set: &mut BitSet, start: u64, end: u64) {
+        // when setting a region as used, we ensure that all memory in that region is used to avoid accidentally trampling on reserved memory
+
+        // convert base address of region into page number we can use to index into the bitset
+        let start_page = start / PAGE_SIZE_U64;
+
+        let end_page = if end % PAGE_SIZE_U64 != 0 {
+            // if our end address doesn't align to a page boundary, round up to the nearest page boundary
+            end / PAGE_SIZE_U64 + 1
+        } else {
+            end / PAGE_SIZE_U64
+        };
+
+        debug!(
+            "setting used {:#x} - {:#x}, {:#x} - {:#x} ({:#x} - {:#x})",
+            start,
+            end,
+            start_page,
+            end_page,
+            start_page * PAGE_SIZE_U64,
+            end_page * PAGE_SIZE_U64
+        );
+
+        assert!(start_page < end_page);
+        assert!(start_page * PAGE_SIZE_U64 >= start);
+        assert!((end_page * PAGE_SIZE_U64) <= end + PAGE_SIZE_U64);
+
+        // free up memory covered by this region, allowing it to be used
+        for i in start_page..end_page {
+            if i < set.size as u64 {
+                set.set(i as usize);
+            }
+        }
+    }
+
+    // clear a region of memory in the bitset
+    fn set_region_free(set: &mut BitSet, start: u64, end: u64) {
+        // when setting a region as free, we ensure that as much memory inside the region as we can is set as free without setting anything outside it as free
+
         // convert base address of region into page number we can use to index into the bitset
         let start_page = if start % PAGE_SIZE_U64 != 0 {
             // if our base address doesn't align to a page boundary, round up to the nearest page boundary
@@ -682,9 +683,17 @@ pub fn reserve_pages(set: &mut BitSet) {
             start / PAGE_SIZE_U64
         };
 
-        let end_page = (end) / PAGE_SIZE_U64;
+        let end_page = end / PAGE_SIZE_U64;
 
-        debug!("start page: {:#x}, end page {:#x}, state {}", start_page, end_page, state);
+        debug!(
+            "setting free {:#x} - {:#x}, {:#x} - {:#x} ({:#x} - {:#x})",
+            start,
+            end,
+            start_page,
+            end_page,
+            start_page * PAGE_SIZE_U64,
+            end_page * PAGE_SIZE_U64
+        );
 
         assert!(start_page < end_page);
         assert!(start_page * PAGE_SIZE_U64 >= start);
@@ -693,11 +702,7 @@ pub fn reserve_pages(set: &mut BitSet) {
         // free up memory covered by this region, allowing it to be used
         for i in start_page..end_page {
             if i < set.size as u64 {
-                if state {
-                    set.set(i as usize);
-                } else {
-                    set.clear(i as usize);
-                }
+                set.clear(i as usize);
             }
         }
     }
@@ -717,19 +722,14 @@ pub fn reserve_pages(set: &mut BitSet) {
             if region.kind == MappingKind::Available {
                 debug!("{:?}", region);
 
-                set_region(
-                    set,
-                    region.base_addr,
-                    region.base_addr + region.length,
-                    false,
-                );
+                set_region_free(set, region.base_addr, region.base_addr + region.length);
             }
         }
     } else {
-        error!("!!! cannot get memory map from bootloader! things may break !!!");
+        error!("cannot get memory map from bootloader, assuming 640k-1mb only reserved");
 
         // set the 640k-1mb area as reserved
-        set_region(set, 0xa0000, 0x100000, true);
+        set_region_used(set, 0xa0000, 0x100000);
     }
 
     // mark modules provided by bootloader as reserved, so we don't trample on them later
@@ -739,21 +739,24 @@ pub fn reserve_pages(set: &mut BitSet) {
         for module in modules.iter() {
             debug!("{:?}", module);
 
-            set_region(set, module.start as u64, module.end as u64, true);
+            //let slice = unsafe { slice::from_raw_parts((module.start + LINKED_BASE as u32) as *const u8, (module.end - module.start) as usize) };
+            //debug!("{:?}: {:?}", slice, core::str::from_utf8(slice));
+
+            set_region_used(set, module.start as u64, module.end as u64);
         }
     }
 
     // copy multiboot info since bump allocator is initialized here and we still have access to the old struct
-    info!("copying multiboot info");
+    debug!("copying multiboot info");
 
     unsafe {
         MULTIBOOT_INFO = Some(info.copy());
     }
 }
 
-/// initializes various kernel variables from bootloader info
-pub unsafe fn init() {
-    debug!("mboot info ptr @ {:#x}", mboot_ptr as usize);
+pub fn init() -> u64 {
+    // basic multiboot setup
+    debug!("mboot info ptr @ {:#x}", unsafe { mboot_ptr as usize });
 
     // get reference to multiboot info struct
     let info: &MultibootInfo = get_orig_multiboot_info();
@@ -765,35 +768,15 @@ pub unsafe fn init() {
     // get amount of available upper memory in kb
     let (_, upper_mem) = info.get_mem().expect("couldn't get memory amount");
 
-    MEM_SIZE = (upper_mem as u64 + 1024) * 1024; // upper memory + 1 mb
-
-    /*#[cfg(debug_messages)]
-    {
-        let modules = info.get_modules();
-
-        if let Some(modules) = modules {
-            for (index, module) in modules.iter().enumerate() {
-                let contents = core::str::from_utf8(module.get_contents()).unwrap_or("Invalid");
-
-                debug!("module {}: {:?}: \"{}\"", index, module, contents);
-            }
-        }
-
-        let mut mmap_iter = info.get_mmap();
-
-        if let Some(mmap_iter) = (&mut mmap_iter).as_mut() {
-            for region in mmap_iter {
-                debug!("{:?}", region);
-            }
-        }
-    }*/
+    (upper_mem as u64 + 1024) * 1024 // upper memory + 1 mb
 }
 
-/// initialization to be run after the heap is initialized
-pub fn init_after_heap() {
+pub fn init_after_heap<T: PageDirectory>(manager: &mut PageManager<T>, dir: &mut T) {
+    debug!("mapping modules");
+
     if let Some(mods) = get_multiboot_info_mut().mods.as_mut() {
         for module in mods.iter_mut() {
-            module.map_data();
+            module.map_data(manager, dir);
         }
     }
 }

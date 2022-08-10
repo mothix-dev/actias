@@ -7,6 +7,7 @@ use bitmask_enum::bitmask;
 use core::{arch::asm, fmt, mem::size_of};
 use log::{error, trace};
 use x86::bits32::eflags::EFlags;
+use x86::tlb::flush;
 
 /// entry in a page table
 #[repr(transparent)]
@@ -458,7 +459,7 @@ impl<'a> PageDir<'a> {
     }
 
     /// adds an existing top level page table to the page directory
-    pub fn add_page_table(&mut self, addr: u32, table: &'a mut PageTable, physical_addr: u32) {
+    pub fn add_page_table(&mut self, addr: u32, table: &'a mut PageTable, physical_addr: u32, can_free: bool) {
         //assert!(addr & ((1 << 22) - 1) == 0, "address is not page table aligned (22 bits)");
 
         let idx = (addr >> 22) as usize;
@@ -473,7 +474,7 @@ impl<'a> PageDir<'a> {
 
         trace!("physical entry is {:#x} ({:?})", self.tables_physical[idx].0, self.tables_physical[idx]);
 
-        self.tables[idx] = Some(TableRef { table, can_free: false });
+        self.tables[idx] = Some(TableRef { table, can_free });
     }
 
     /// removes a top level page table from the page directory
@@ -579,6 +580,16 @@ impl<'a> PageDirectory for PageDir<'a> {
         } else {
             PageTableEntry::new_unused()
         };
+
+        // invalidate this page in the tlb if we're modifying the current page directory
+        if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
+            if self as *const _ as usize != current as *const _ as usize {
+                trace!("flushing {:#x} in tlb", addr * PAGE_SIZE);
+                unsafe {
+                    flush(addr * PAGE_SIZE);
+                }
+            }
+        }
 
         Ok(())
     }
