@@ -397,7 +397,7 @@ pub struct PageDir<'a> {
     tables_physical: &'a mut [PageDirEntry; 1024],
 
     /// physical address of tables_physical
-    tables_physical_addr: u32,
+    pub tables_physical_addr: u32,
 
     /// whether tables and tables_physical were allocated on the heap and thus can be freed
     can_free: bool,
@@ -424,7 +424,7 @@ impl<'a> PageDir<'a> {
                 allocated
             };
 
-            let tables_physical = alloc_zeroed(Layout::new::<[PageDirEntry; 1024]>());
+            let tables_physical = alloc_zeroed(Layout::from_size_align(size_of::<[PageDirEntry; 1024]>(), PAGE_SIZE).unwrap());
 
             let tables_physical_addr = CURRENT_PAGE_DIR
                 .as_mut()
@@ -575,15 +575,19 @@ impl<'a> PageDirectory for PageDir<'a> {
             };
         }
 
-        self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] = if let Some(page) = page {
-            page.try_into().unwrap() // FIXME: maybe come up with some way to handle this error so we can't crash here?
-        } else {
-            PageTableEntry::new_unused()
-        };
+        self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] =
+            if let Some(page) = page {
+                page.try_into().map_err(|_| PageError::BadFrame)?
+            } else {
+                PageTableEntry::new_unused()
+            };
+        
+        //trace!("table is now {:?}", self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize]);
 
         // invalidate this page in the tlb if we're modifying the current page directory
         if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
-            if self as *const _ as usize != current as *const _ as usize {
+            // prolly not the best way to compare two different page directories, but it works
+            if self.tables_physical_addr == current.tables_physical_addr {
                 trace!("flushing {:#x} in tlb", addr * PAGE_SIZE);
                 unsafe {
                     flush(addr * PAGE_SIZE);
@@ -600,7 +604,7 @@ impl<'a> PageDirectory for PageDir<'a> {
 
         trace!("switching to page table @ {:#x}", self.tables_physical_addr);
 
-        // FIXME: add global state for if interrupts are enabled to avoid parsing eflags (which is slow)
+        // FIXME: add global state for whether interrupts are enabled to avoid parsing eflags (which is slow)
         let enable_interrupts = get_eflags().contains(EFlags::FLAGS_IF);
 
         asm!(

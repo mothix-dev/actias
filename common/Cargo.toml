@@ -7,12 +7,10 @@ edition = "2021"
 
 [dependencies]
 log = "0.4"
-aligned = "0.4"
 x86 = "0.47"
 bitmask-enum = "1.1"
 num_enum = { version = "0.5", default-features = false }
 linked_list_allocator = "0.9"
-goblin = { version = "0.5", default-features = false, features = [ "elf32", "elf64", "mach32", "mach64" ]}
 lazy_static = { version = "1.4", default-features = false, features = [ "spin_no_std" ] }
 byteorder = { version = "1.4", default-features = false }
 

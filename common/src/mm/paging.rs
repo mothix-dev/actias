@@ -1,8 +1,15 @@
 //! paging abstraction layer
 
-use crate::util::{array::BitSet, FormatHex};
+use crate::{
+    types::errno::Errno,
+    util::{array::BitSet, FormatHex},
+};
+use alloc::{
+    alloc::{alloc, dealloc, Layout},
+    vec::Vec,
+};
 use core::{fmt, marker::PhantomData};
-use log::{debug, trace};
+use log::{debug, error, trace};
 
 /// an error that can be returned from paging operations
 pub enum PageError {
@@ -10,6 +17,7 @@ pub enum PageError {
     FrameUnused,
     FrameInUse,
     AllocError,
+    BadFrame,
 }
 
 impl fmt::Display for PageError {
@@ -19,6 +27,7 @@ impl fmt::Display for PageError {
             Self::FrameUnused => "frame is unused",
             Self::FrameInUse => "frame already in use",
             Self::AllocError => "error allocating memory for table",
+            Self::BadFrame => "bad frame",
         })
     }
 }
@@ -154,6 +163,153 @@ pub trait PageDirectory {
         let offset = virt & page_size;
 
         self.get_page(page_addr).map(|page| page.addr | offset as u64)
+    }
+
+    /// when run on the current page directory, this function maps the range `addr..addr + len` from the page table given in `from`
+    /// to a region on the heap, then calls `op` with a reference to a slice of the mapped region. the region on the heap is then deallocated.
+    /// this function does not allocate new pages in the given page directory, and attempting to run it on a region which is not fully allocated
+    /// will return an error
+    ///
+    /// # Safety
+    ///
+    /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
+    /// page directory, and things can and will break if it's called on any other page directory
+    unsafe fn map_memory<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, Errno>
+    where O: FnOnce(&mut [u8]) -> R {
+        let page_size = self.page_size();
+
+        // get starting and ending addresses
+        let mut start = addr;
+        let mut end = addr + len;
+
+        assert!(end > start);
+
+        debug!("mapping partial page directory in");
+        debug!("start @ {:#x}, end @ {:#x}", start, end);
+
+        // offset into memory we've paged in
+        let mut offset = 0;
+
+        // align start and end addresses to page boundaries
+        if start % page_size != 0 {
+            start &= !(page_size - 1);
+            offset = addr - start;
+        }
+
+        if end % page_size != 0 {
+            end = (end & !(page_size - 1)) + (page_size - 1);
+        }
+
+        let buf_len = end - start;
+
+        debug!("start now @ {:#x}, end now @ {:#x}", start, end);
+
+        debug!("buf size {:#x}, aligned to {:#x}, offset {:#x}", len, buf_len, offset);
+
+        let layout = Layout::from_size_align(buf_len, page_size).unwrap();
+        let ptr = alloc(layout);
+
+        if ptr.is_null() {
+            error!("error allocating buffer in map_memory()");
+            Err(Errno::OutOfMemory)?
+        }
+
+        assert!(ptr as usize % page_size == 0); // make absolutely sure pointer is page aligned
+
+        debug!("mapping {} pages from {:#x} (task mem) to {:#x} (kernel mem)", (end - start) / page_size, start, ptr as usize);
+
+        // get addresses of pages we're gonna remap so we can map them back later
+        let mut existing_phys: Vec<u64> = Vec::new();
+
+        // attempt to safely reserve memory for our 
+        if let Err(err) = existing_phys.try_reserve_exact((end - start) / page_size) {
+            error!("error reserving memory in map_memory(): {:?}", err);
+            dealloc(ptr, layout);
+
+            Err(Errno::OutOfMemory)?
+        }
+
+        for i in (ptr as usize..ptr as usize + buf_len).step_by(page_size) {
+            // virt to phys calculation from current page directory
+            let addr = match self.virt_to_phys(i) {
+                Some(a) => a,
+                None => {
+                    // something bad happened, revert back to original state and return an error
+                    debug!("aborting map (before remap), dealloc()ing");
+                    dealloc(ptr, layout);
+
+                    Err(Errno::BadAddress)?
+                },
+            };
+            debug!("existing: {:#x} -> {:#x}", i, addr);
+            existing_phys.push(addr);
+        }
+
+        debug!("existing_phys: {:x?}", existing_phys);
+
+        // loop over pages, get physical address of each page and map it in or create new page and alloc mem
+        for i in (start..=end).step_by(page_size) {
+            // get the physical address of the page at the given address, or allocate a new one if there isn't one mapped
+            let phys_addr = match from.virt_to_phys(i) {
+                Some(a) => a,
+                None => {
+                    // something bad happened, revert back to original state and return an error
+                    debug!("aborting map (during remap), dealloc()ing and fixing mapping");
+                    for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
+                        debug!("virt @ {:x}, phys @ {:x}", addr, existing_phys[idx]);
+                        self.set_page(addr, Some(PageFrame {
+                            addr: existing_phys[idx],
+                            present: true,
+                            user_mode: false,
+                            writable: true,
+                            copy_on_write: false,
+                        })).expect("couldn't remap page");
+                    }
+                    dealloc(ptr, layout);
+
+                    Err(Errno::BadAddress)?
+                },
+            };
+
+            debug!("{:x} @ phys addr: {:x}", i, phys_addr);
+
+            // todo: maybe change this to debug_assert at some point? its prolly hella slow
+            assert!(!existing_phys.contains(&phys_addr), "trampling on other page directory's memory");
+
+            let virt = ptr as usize + (i - start) as usize;
+
+            // remap memory
+            self.set_page(virt, Some(PageFrame {
+                addr: phys_addr,
+                present: true,
+                user_mode: false,
+                writable: true,
+                copy_on_write: false,
+            })).expect("couldn't remap page");
+        }
+
+        debug!("slice @ {:#x} + {:#x}: {:#x}, len {:#x}", ptr as usize, offset as usize, ptr as usize + offset as usize, len);
+
+        // call function
+        let res = op(core::slice::from_raw_parts_mut((ptr as usize + offset as usize) as *mut u8, len));
+
+        // map pages back to their original addresses
+        debug!("cleaning up mapping");
+        for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
+            debug!("virt @ {:x}, phys @ {:x}", addr, existing_phys[idx]);
+            self.set_page(addr, Some(PageFrame {
+                addr: existing_phys[idx],
+                present: true,
+                user_mode: false,
+                writable: true,
+                copy_on_write: false,
+            })).expect("couldn't remap page");
+        }
+
+        // deallocate the buffer
+        dealloc(ptr, layout);
+
+        Ok(res)
     }
 }
 

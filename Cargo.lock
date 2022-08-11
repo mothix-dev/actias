@@ -70,11 +70,9 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 name = "common"
 version = "0.1.0"
 dependencies = [
- "aligned",
  "bitmask-enum",
  "byteorder",
  "cc",
- "goblin",
  "lazy_static",
  "linked_list_allocator",
  "log",
@@ -126,6 +124,10 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.2.0"
+dependencies = [
+ "common",
+ "log",
+]
 
 [[package]]
 name = "lazy_static"
@@ -149,11 +151,15 @@ dependencies = [
 name = "loader"
 version = "0.1.0"
 dependencies = [
+ "aligned",
+ "bitmask-enum",
  "cc",
  "common",
  "compression",
  "generic-array",
+ "goblin",
  "log",
+ "x86",
 ]
 
 [[package]]

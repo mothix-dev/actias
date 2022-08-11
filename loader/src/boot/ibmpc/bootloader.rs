@@ -3,12 +3,12 @@
 use crate::bump_alloc;
 use alloc::alloc::{alloc, Layout};
 use common::{
-    arch::{LINKED_BASE, MEM_SIZE, PAGE_SIZE},
+    arch::{LINKED_BASE, PAGE_SIZE},
     mm::paging::{PageDirectory, PageManager},
     util::{array::BitSet, DebugArray},
 };
 use core::{ffi::CStr, fmt, mem::size_of, slice};
-use log::{debug, error, info, trace, warn};
+use log::{debug, trace, warn};
 
 extern "C" {
     /// multiboot signature, provided by the bootloader and set in boot.S
@@ -148,15 +148,10 @@ impl MultibootModuleCopy {
             let layout = Layout::from_size_align(buf_size_aligned, PAGE_SIZE).unwrap();
             let ptr = unsafe { alloc(layout) };
 
-            // free memory we're going to remap
-            //free_pages(ptr as usize, num_pages);
-
             // remap memory
-            //alloc_pages_at(ptr as usize, num_pages, self.data_start as u64, true, true, true);
-
             for i in (0..num_pages * PAGE_SIZE).step_by(PAGE_SIZE) {
-                manager.free_frame(dir, ptr as usize + i);
-                manager.alloc_frame_at(dir, ptr as usize + i, data_start_aligned as u64 + i as u64, false, false);
+                manager.free_frame(dir, ptr as usize + i).unwrap();
+                manager.alloc_frame_at(dir, ptr as usize + i, data_start_aligned as u64 + i as u64, false, false).unwrap();
             }
 
             self.data = Some(unsafe { slice::from_raw_parts(ptr.offset(data_start_offset.try_into().unwrap()), buf_size) });
@@ -167,7 +162,7 @@ impl MultibootModuleCopy {
 impl fmt::Debug for MultibootModuleCopy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MultibootModuleCopy")
-            .field("data", &DebugArray(&self.data()))
+            .field("data", &DebugArray(self.data()))
             .field("string", &self.string())
             .finish_non_exhaustive()
     }
@@ -363,7 +358,7 @@ impl fmt::Debug for MultibootModule {
 
 /// different types of memory mapping
 #[repr(u32)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum MappingKind {
     /// unknown memory map
     Unknown = 0,
@@ -571,7 +566,7 @@ impl fmt::Debug for FramebufferInfo {
 }
 
 #[repr(u8)]
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum FramebufferKind {
     Indexed = 0,
     RGB,
@@ -726,7 +721,7 @@ pub fn reserve_pages(set: &mut BitSet) {
             }
         }
     } else {
-        error!("cannot get memory map from bootloader, assuming 640k-1mb only reserved");
+        warn!("cannot get memory map from bootloader, assuming 640k-1mb only reserved");
 
         // set the 640k-1mb area as reserved
         set_region_used(set, 0xa0000, 0x100000);

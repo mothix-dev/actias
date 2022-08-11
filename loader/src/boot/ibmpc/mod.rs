@@ -1,4 +1,5 @@
 pub mod bootloader;
+pub mod ints;
 
 /// initialize paging, just cleanly map our kernel to 3gb
 #[no_mangle]

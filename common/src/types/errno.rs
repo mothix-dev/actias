@@ -56,7 +56,7 @@ pub enum Errno {
     ExecutableFormatErr,   // ENOEXEC
     NoLocksAvailable,      // ENOLCK
     LinkSevered,           // ENOLINK
-    NotEnoughSpace,        // ENOMEM
+    OutOfMemory,           // ENOMEM
     NoMessage,             // ENOMSG
     ProtocolNotAvailable,  // ENOPROTOOPT
     NoSpaceLeft,           // ENOSPC
@@ -88,7 +88,6 @@ pub enum Errno {
     TextFileBusy,          // ETXTBSY
     OperationWouldBlock,   // EWOULDBLOCK
     CrossDeviceLink,       // EXDEV
-                           //Other(&'static str),    // other error
 }
 
 impl fmt::Display for Errno {
@@ -142,7 +141,7 @@ impl fmt::Display for Errno {
             Self::ExecutableFormatErr => "executable file format error",
             Self::NoLocksAvailable => "no locks available",
             Self::LinkSevered => "link has been severed",
-            Self::NotEnoughSpace => "not enough space",
+            Self::OutOfMemory => "out of memory",
             Self::NoMessage => "no message of the desired type",
             Self::ProtocolNotAvailable => "protocol not available",
             Self::NoSpaceLeft => "no space left on device",
@@ -174,7 +173,6 @@ impl fmt::Display for Errno {
             Self::TextFileBusy => "text file busy",
             Self::OperationWouldBlock => "operation would block",
             Self::CrossDeviceLink => "cross-device link",
-            //Self::Other(str) =>             str,
         })
     }
 }

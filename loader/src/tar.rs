@@ -1,18 +1,11 @@
 //! simple ustar parser
 
-use alloc::{
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    vec::Vec,
-};
-use common::types::{errno::Errno, file::Permissions, GroupID, UserID};
+use common::types::{file::Permissions, GroupID, UserID};
 use core::{ffi::CStr, fmt, mem::size_of, str};
 use generic_array::{
     typenum::{U12, U8},
     ArrayLength, GenericArray,
 };
-use log::trace;
 
 const BLOCK_SIZE: usize = 512;
 
@@ -170,7 +163,7 @@ impl<N: ArrayLength<u8>> fmt::Debug for TarNumber<N> {
 
 /// type of file that can be stored in a tar archive
 #[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EntryKind {
     NormalFile = 48,
     HardLink = 49,
