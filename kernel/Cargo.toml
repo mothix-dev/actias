@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 common = { path = "../common/" }
 log = "0.4"
+x86 = "0.47"

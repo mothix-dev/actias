@@ -3,11 +3,10 @@
 .section .text
 .globl _start
 _start:
-    push %ebp
-    mov %esp, %ebp
-    mov 8(%ebp), %eax /* page directory physical addr */
-    mov 12(%ebp), %ebx /* stack pointer value */
-    mov 16(%ebp), %ecx /* entry point */
+    /* we don't need to bother with using esp, ebp, etc properly since we're not touching the stack and we're not returning */
+    mov 4(%esp), %eax /* page directory physical addr */
+    mov 8(%esp), %ebx /* stack pointer value */
+    mov 12(%esp), %ecx /* entry point */
 
     /* switch page directories */
     mov %eax, %cr3

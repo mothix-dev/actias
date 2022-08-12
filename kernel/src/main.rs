@@ -7,8 +7,9 @@
 
 extern crate alloc;
 
+pub mod logging;
+
 use alloc::alloc::Layout;
-use core::arch::asm;
 use common::mm::heap::CustomAlloc;
 use log::{debug, error, info, trace, warn};
 
@@ -38,24 +39,24 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
         error!("PANIC: file='{}', line={} :: ?", file, line);
     }
 
-    loop {
-        unsafe {
-            asm!("cli; hlt");
-        }
+    unsafe {
+        common::arch::halt();
     }
 }
 
 #[no_mangle]
 pub extern "cdecl" fn _start() -> ! {
-    // initialize our logger
-    common::logger::init().unwrap();
+    unsafe {
+        x86::io::outb(0xe9, 'e' as u8);
+    }
 
-    //info!("{} v{}", NAME, VERSION);
+    // initialize our logger
+    logging::init().unwrap();
+
+    info!("{} v{}", NAME, VERSION);
     info!("Hellorld!");
 
-    loop {
-        unsafe {
-            asm!("hlt");
-        }
+    unsafe {
+        common::arch::halt();
     }
 }

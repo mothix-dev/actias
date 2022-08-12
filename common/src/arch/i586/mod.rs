@@ -42,3 +42,18 @@ pub fn set_eflags(flags: EFlags) {
         );
     }
 }
+
+/// completely halts the cpu
+pub unsafe fn halt() -> ! {
+    // exit qemu
+    x86::io::outb(0x501, 0x31);
+
+    // exit bochs
+    x86::io::outw(0x8a00, 0x8a00);
+    x86::io::outw(0x8a00, 0x8ae0);
+
+    // halt cpu
+    loop {
+        asm!("cli; hlt");
+    }
+}

@@ -127,6 +127,7 @@ version = "0.2.0"
 dependencies = [
  "common",
  "log",
+ "x86",
 ]
 
 [[package]]

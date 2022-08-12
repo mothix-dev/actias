@@ -170,11 +170,18 @@ pub trait PageDirectory {
     /// this function does not allocate new pages in the given page directory, and attempting to run it on a region which is not fully allocated
     /// will return an error
     ///
+    /// # Arguments
+    ///
+    /// * `from`: the page directory to map memory from. must be the same type as the one that this function is being called on
+    /// * `addr`: the starting address to map memory from
+    /// * `len`: how much memory to map, in bytes
+    /// * `op`: function to be called while memory is mapped
+    ///
     /// # Safety
     ///
     /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
     /// page directory, and things can and will break if it's called on any other page directory
-    unsafe fn map_memory<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, Errno>
+    unsafe fn map_memory_from<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, Errno>
     where O: FnOnce(&mut [u8]) -> R {
         let page_size = self.page_size();
 

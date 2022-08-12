@@ -36,7 +36,7 @@ use common::{
     util::{array::BitSet, DebugArray},
 };
 use compression::prelude::*;
-use core::{arch::asm, mem::size_of};
+use core::mem::size_of;
 use goblin::elf::{program_header::PT_LOAD, Elf};
 use log::{debug, error, info, trace};
 use tar::{EntryKind, TarIterator};
@@ -59,10 +59,8 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
         error!("PANIC: file='{}', line={} :: ?", file, line);
     }
 
-    loop {
-        unsafe {
-            asm!("cli; hlt");
-        }
+    unsafe {
+        common::arch::halt();
     }
 }
 
@@ -149,8 +147,12 @@ static mut LOADER_DIR: Option<PageDir> = None;
 #[no_mangle]
 pub fn kmain() {
     // initialize our logger
-    common::logger::init().unwrap();
+    boot::logger::init().unwrap();
+    unsafe {
+        boot::logger::init_vga(core::slice::from_raw_parts_mut((LINKED_BASE + 0xb8000) as *mut u16, 80 * 25), 80, 25);
+    }
 
+    // initialize interrupts so we can catch exceptions
     unsafe {
         boot::ints::init();
     }
@@ -307,7 +309,8 @@ pub fn kmain() {
 
         match name.split('.').last() {
             Some("tar") => {
-                debug!("found tar file");
+                info!("discovering all files in {:?} as modules", name);
+
                 for entry in TarIterator::new(data) {
                     if entry.header.kind() == EntryKind::NormalFile {
                         discover_module(modules, entry.header.name().to_string(), entry.contents);
@@ -315,38 +318,38 @@ pub fn kmain() {
                 }
             }
             Some("bz2") => {
-                debug!("found bzip2 compressed file");
+                // remove the extension from the name of the compressed file
+                let new_name = {
+                    let mut split: Vec<&str> = name.split('.').collect();
+                    split.pop();
+                    split.join(".")
+                };
+
+                info!("decompressing {:?} as {:?}", name, new_name);
+
                 match data.iter().cloned().decode(&mut BZip2Decoder::new()).collect::<Result<Vec<_>, _>>() {
-                    Ok(decompressed) => {
-                        // remove the extension from the name of the compressed file
-                        let new_name = {
-                            let mut split: Vec<&str> = name.split('.').collect();
-                            split.pop();
-                            split.join(".")
-                        };
-                        // Box::leak() prevents the decompressed data from being dropped, giving it the 'static lifetime since it doesn't
-                        // contain any other references
-                        discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice()));
-                    }
+                    // Box::leak() prevents the decompressed data from being dropped, giving it the 'static lifetime since it doesn't
+                    // contain any references to anything else
+                    Ok(decompressed) => discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice())),
                     Err(err) => error!("error decompressing {}: {:?}", name, err),
                 }
             }
             Some("gz") => {
-                debug!("found gzip compressed file");
+                let new_name = {
+                    let mut split: Vec<&str> = name.split('.').collect();
+                    split.pop();
+                    split.join(".")
+                };
+
+                info!("decompressing {:?} as {:?}", name, new_name);
+
                 match data.iter().cloned().decode(&mut GZipDecoder::new()).collect::<Result<Vec<_>, _>>() {
-                    Ok(decompressed) => {
-                        let new_name = {
-                            let mut split: Vec<&str> = name.split('.').collect();
-                            split.pop();
-                            split.join(".")
-                        };
-                        discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice()));
-                    }
+                    Ok(decompressed) => discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice())),
                     Err(err) => error!("error decompressing {}: {:?}", name, err),
                 }
             }
+            // no special handling for this file, assume it's a module
             _ => {
-                // no special handling for this file, assume it's a module
                 modules.insert(name, data);
             }
         }
@@ -367,7 +370,12 @@ pub fn kmain() {
         }
     }
 
-    info!("{} modules:", num_modules);
+    if num_modules == 1 {
+        info!("1 module:");
+    } else {
+        info!("{} modules:", num_modules);
+    }
+
     for (name, data) in modules.iter() {
         let size = if data.len() > 1024 * 1024 * 10 {
             format!("{} KB", data.len() / 1024 / 1024)
@@ -387,6 +395,8 @@ pub fn kmain() {
 
     // TODO: accept kernel name from arguments, default to "kernel"
     let kernel_name = "kernel";
+
+    info!("loading module {:?} as kernel", kernel_name);
 
     let kernel_data = modules.get(kernel_name).unwrap_or_else(|| panic!("couldn't find module with name {}", kernel_name));
 
@@ -459,7 +469,7 @@ pub fn kmain() {
                         LOADER_DIR
                             .as_mut()
                             .unwrap()
-                            .map_memory(&mut kernel_dir, vaddr, memsz, |s| s.clone_from_slice(&data))
+                            .map_memory_from(&mut kernel_dir, vaddr, memsz, |s| s.clone_from_slice(&data))
                             .expect("failed to populate kernel's memory");
                     }
                 }
@@ -469,7 +479,6 @@ pub fn kmain() {
 
         // small assembly shim to switch page directories and call the kernel
         let exec_kernel = include_bytes!("../../target/exec_kernel.bin");
-        //let exec_kernel = include_bytes!("../../test.bin");
 
         // round up to page size
         let size = (exec_kernel.len() / PAGE_SIZE + 1) * PAGE_SIZE;
@@ -502,7 +511,7 @@ pub fn kmain() {
             LOADER_DIR
                 .as_mut()
                 .unwrap()
-                .map_memory(&mut kernel_dir, exec_kernel_addr, exec_kernel.len(), |s| s.clone_from_slice(exec_kernel))
+                .map_memory_from(&mut kernel_dir, exec_kernel_addr, exec_kernel.len(), |s| s.clone_from_slice(exec_kernel))
                 .expect("failed to populate kernel's memory");
         }
 
@@ -573,7 +582,7 @@ pub fn kmain() {
             LOADER_DIR
                 .as_mut()
                 .unwrap()
-                .map_memory(&mut kernel_dir, exec_kernel_addr, exec_kernel.len(), |s| assert!(s == exec_kernel))
+                .map_memory_from(&mut kernel_dir, exec_kernel_addr, exec_kernel.len(), |s| assert!(s == exec_kernel))
                 .unwrap();
         }*/
 

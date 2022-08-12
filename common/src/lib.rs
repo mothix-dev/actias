@@ -10,11 +10,6 @@ extern crate alloc;
 #[path = "arch/i586/mod.rs"]
 pub mod arch;
 
-// platform specific loggers
-#[cfg(target_platform = "ibmpc")]
-#[path = "logger/ibmpc.rs"]
-pub mod logger;
-
 pub mod mm;
 pub mod types;
 pub mod util;
