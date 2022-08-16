@@ -172,10 +172,10 @@ pub trait PageDirectory {
     ///
     /// # Arguments
     ///
-    /// * `from`: the page directory to map memory from. must be the same type as the one that this function is being called on
-    /// * `addr`: the starting address to map memory from
-    /// * `len`: how much memory to map, in bytes
-    /// * `op`: function to be called while memory is mapped
+    /// * `from` - the page directory to map memory from. must be the same type as the one that this function is being called on
+    /// * `addr` - the starting address to map memory from
+    /// * `len` - how much memory to map, in bytes
+    /// * `op` - function to be called while memory is mapped
     ///
     /// # Safety
     ///
@@ -228,7 +228,7 @@ pub trait PageDirectory {
         // get addresses of pages we're gonna remap so we can map them back later
         let mut existing_phys: Vec<u64> = Vec::new();
 
-        // attempt to safely reserve memory for our 
+        // attempt to safely reserve memory for our mapping
         if let Err(err) = existing_phys.try_reserve_exact((end - start) / page_size) {
             error!("error reserving memory in map_memory(): {:?}", err);
             dealloc(ptr, layout);
@@ -246,7 +246,7 @@ pub trait PageDirectory {
                     dealloc(ptr, layout);
 
                     Err(Errno::BadAddress)?
-                },
+                }
             };
             debug!("existing: {:#x} -> {:#x}", i, addr);
             existing_phys.push(addr);
@@ -255,27 +255,33 @@ pub trait PageDirectory {
         debug!("existing_phys: {:x?}", existing_phys);
 
         // loop over pages, get physical address of each page and map it in or create new page and alloc mem
-        for i in (start..=end).step_by(page_size) {
+        for i in (start..end).step_by(page_size) {
             // get the physical address of the page at the given address, or allocate a new one if there isn't one mapped
             let phys_addr = match from.virt_to_phys(i) {
                 Some(a) => a,
                 None => {
+                    debug!("couldn't get phys addr for virt {:#x}", i);
+
                     // something bad happened, revert back to original state and return an error
                     debug!("aborting map (during remap), dealloc()ing and fixing mapping");
                     for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
                         debug!("virt @ {:x}, phys @ {:x}", addr, existing_phys[idx]);
-                        self.set_page(addr, Some(PageFrame {
-                            addr: existing_phys[idx],
-                            present: true,
-                            user_mode: false,
-                            writable: true,
-                            copy_on_write: false,
-                        })).expect("couldn't remap page");
+                        self.set_page(
+                            addr,
+                            Some(PageFrame {
+                                addr: existing_phys[idx],
+                                present: true,
+                                user_mode: false,
+                                writable: true,
+                                copy_on_write: false,
+                            }),
+                        )
+                        .expect("couldn't remap page");
                     }
                     dealloc(ptr, layout);
 
                     Err(Errno::BadAddress)?
-                },
+                }
             };
 
             debug!("{:x} @ phys addr: {:x}", i, phys_addr);
@@ -286,13 +292,17 @@ pub trait PageDirectory {
             let virt = ptr as usize + (i - start) as usize;
 
             // remap memory
-            self.set_page(virt, Some(PageFrame {
-                addr: phys_addr,
-                present: true,
-                user_mode: false,
-                writable: true,
-                copy_on_write: false,
-            })).expect("couldn't remap page");
+            self.set_page(
+                virt,
+                Some(PageFrame {
+                    addr: phys_addr,
+                    present: true,
+                    user_mode: false,
+                    writable: true,
+                    copy_on_write: false,
+                }),
+            )
+            .expect("couldn't remap page");
         }
 
         debug!("slice @ {:#x} + {:#x}: {:#x}, len {:#x}", ptr as usize, offset as usize, ptr as usize + offset as usize, len);
@@ -304,13 +314,17 @@ pub trait PageDirectory {
         debug!("cleaning up mapping");
         for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
             debug!("virt @ {:x}, phys @ {:x}", addr, existing_phys[idx]);
-            self.set_page(addr, Some(PageFrame {
-                addr: existing_phys[idx],
-                present: true,
-                user_mode: false,
-                writable: true,
-                copy_on_write: false,
-            })).expect("couldn't remap page");
+            self.set_page(
+                addr,
+                Some(PageFrame {
+                    addr: existing_phys[idx],
+                    present: true,
+                    user_mode: false,
+                    writable: true,
+                    copy_on_write: false,
+                }),
+            )
+            .expect("couldn't remap page");
         }
 
         // deallocate the buffer
@@ -318,9 +332,46 @@ pub trait PageDirectory {
 
         Ok(res)
     }
+
+    /// finds available area in this page directory's memory of given size. this area is guaranteed to be unused, unallocated, and aligned to a page boundary
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - the lowest address this hole can be located at. useful to keep null pointers null. must be page aligned
+    /// * `end` - the highest address this hole can be located at. must be page aligned
+    /// * `size` - the size of the hole (automatically rounded up to the nearest multiple of the page size of this page directory)
+    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
+        let page_size = self.page_size();
+
+        assert!(start % page_size == 0, "start address is not page aligned");
+        assert!(end % page_size == 0, "end address is not page aligned");
+
+        let size = (size / page_size) * page_size + page_size;
+
+        let mut hole_start: Option<usize> = None;
+
+        for addr in (start..end).step_by(page_size) {
+            if self.is_unused(addr) {
+                if let Some(start) = hole_start {
+                    if addr - start >= size {
+                        return hole_start;
+                    }
+                /*} else if size <= page_size && addr >= start {
+                return Some(addr);*/
+                } else if hole_start.is_none() && addr >= start {
+                    hole_start = Some(addr);
+                }
+            } else {
+                hole_start = None;
+            }
+        }
+
+        None
+    }
 }
 
 /// struct to make allocating physical memory for page directories easier
+#[repr(C)]
 pub struct PageManager<T: PageDirectory> {
     /// bitset to speed up allocation of page frames
     ///

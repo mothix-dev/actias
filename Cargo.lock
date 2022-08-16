@@ -71,7 +71,6 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "bitmask-enum",
- "byteorder",
  "cc",
  "lazy_static",
  "linked_list_allocator",
@@ -154,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "aligned",
  "bitmask-enum",
+ "byteorder",
  "cc",
  "common",
  "compression",

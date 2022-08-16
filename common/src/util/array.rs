@@ -15,6 +15,7 @@ use alloc::{
 
 /// raw pointer as array of unknown size
 #[derive(Debug)]
+#[repr(C)]
 pub struct RawPtrArray<T> {
     /// raw pointer to memory
     array: *mut T,
@@ -106,6 +107,7 @@ impl<T> Drop for RawPtrArray<T> {
 }
 
 /// simple bitset, acts sorta like an array but you access single bits
+#[repr(C)]
 pub struct BitSet {
     /// array of bytes that the bitset uses
     pub array: RawPtrArray<u32>,

@@ -10,7 +10,13 @@ extern crate alloc;
 pub mod logging;
 
 use alloc::alloc::Layout;
-use common::mm::heap::CustomAlloc;
+use common::{
+    arch::paging::PageDir,
+    mm::{
+        heap::CustomAlloc,
+        paging::PageDirectory,
+    },
+};
 use log::{debug, error, info, trace, warn};
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
@@ -45,16 +51,12 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[no_mangle]
-pub extern "cdecl" fn _start() -> ! {
-    unsafe {
-        x86::io::outb(0xe9, 'e' as u8);
-    }
-
+pub extern "cdecl" fn _start(dir: PageDir) -> ! {
     // initialize our logger
     logging::init().unwrap();
 
     info!("{} v{}", NAME, VERSION);
-    info!("Hellorld!");
+    //info!("Hellorld!");
 
     unsafe {
         common::arch::halt();

@@ -2,10 +2,10 @@
 
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
-use core::{arch::asm, fmt};
-use x86::dtables::{lidt, DescriptorTablePointer};
-use log::{error, info, debug};
 use common::util::FormatHex;
+use core::{arch::asm, fmt};
+use log::{debug, error, info};
+use x86::dtables::{lidt, DescriptorTablePointer};
 
 /// IDT flags
 #[bitmask(u8)]
@@ -20,8 +20,8 @@ pub enum IDTFlags {
     Ring3 = Self(0x60),
     Present = Self(0x80),
 
-    Exception = Self(Self::X32Interrupt.0 | Self::Present.0), // exception
-    External = Self(Self::X32Interrupt.0 | Self::Present.0),  // external interrupt
+    Exception = Self(Self::X32Interrupt.0 | Self::Present.0),            // exception
+    External = Self(Self::X32Interrupt.0 | Self::Present.0),             // external interrupt
     Call = Self(Self::X32Interrupt.0 | Self::Present.0 | Self::Ring3.0), // system call
 }
 
@@ -53,7 +53,7 @@ impl IDTEntry {
             isr_low: ((isr as u32) & 0xffff) as u16, // gets address of function pointer, then chops off the top 2 bytes
             // not sure if casting to u16 will only return lower 2 bytes?
             isr_high: ((isr as u32) >> 16) as u16, // upper 2 bytes
-            kernel_cs: 0x08, // offset of kernel code selector in GDT (see boot.S)
+            kernel_cs: 0x08,                       // offset of kernel code selector in GDT (see boot.S)
             attributes: flags.0,
             reserved: 0,
         }
@@ -76,8 +76,7 @@ impl IDTEntry {
 pub const IDT_ENTRIES: usize = 256;
 
 /// the IDT itself (aligned to 16 bits for performance)
-pub static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> =
-    Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
+pub static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
 
 /// stores state of cpu prior to running exception handler
 /// this should be the proper stack frame format? it isn't provided by the x86 crate to my knowledge

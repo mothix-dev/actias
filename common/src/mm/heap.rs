@@ -16,11 +16,11 @@ use log::{debug, error, trace};
 ///
 /// # Arguments
 ///
-/// * `old_top`: the top address of the heap before expansion
-/// * `new_top`: minimum bound for the top of the heap after expansion. the heap can be expanded as much as we want as long as the top address is higher than this
-/// * `alloc`: function pointer to an implementation of alloc (same as allocating memory manually). this is very unsafe and should be handled with care
+/// * `old_top` - the top address of the heap before expansion
+/// * `new_top` - minimum bound for the top of the heap after expansion. the heap can be expanded as much as we want as long as the top address is higher than this
+/// * `alloc` - function pointer to an implementation of alloc (same as allocating memory manually). this is very unsafe and should be handled with care
 /// since it bypasses all locks in place over the global AllocState, since this occurs in the middle of an allocation
-/// * `dealloc`: function pointer to an implementation of dealloc. same deal with this
+/// * `dealloc` - function pointer to an implementation of dealloc. same deal with this
 ///
 /// # Returns
 ///

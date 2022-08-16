@@ -24,6 +24,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use byteorder::{ByteOrder, NativeEndian};
 use common::{
     arch::{
         paging::{PageDir, PageDirEntry, PageTable, TableRef},
@@ -31,14 +32,14 @@ use common::{
     },
     mm::{
         heap::CustomAlloc,
-        paging::{PageDirectory, PageError, PageManager},
+        paging::{PageDirectory, PageError, PageFrame, PageManager},
     },
     util::{array::BitSet, DebugArray},
 };
 use compression::prelude::*;
 use core::mem::size_of;
 use goblin::elf::{program_header::PT_LOAD, Elf};
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use tar::{EntryKind, TarIterator};
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
@@ -359,6 +360,26 @@ pub fn kmain() {
         discover_module(&mut modules, module.string().to_string(), module.data());
     }
 
+    // === add special modules ===
+
+    // add cmdline module and parse cmdline at the same time
+    let cmdline = boot::bootloader::get_multiboot_info().cmdline.filter(|s| !s.is_empty()).map(|cmdline| {
+        modules.insert("*cmdline".to_string(), cmdline.as_bytes());
+
+        let mut map = BTreeMap::new();
+
+        for arg in cmdline.split(' ') {
+            if !arg.is_empty() {
+                let arg = arg.split('=').collect::<Vec<_>>();
+                map.insert(arg[0], arg.get(1).copied().unwrap_or(""));
+            }
+        }
+
+        map
+    });
+
+    debug!("{:?}", cmdline);
+
     // === print module info ===
 
     let mut num_modules = 0;
@@ -378,13 +399,13 @@ pub fn kmain() {
 
     for (name, data) in modules.iter() {
         let size = if data.len() > 1024 * 1024 * 10 {
-            format!("{} KB", data.len() / 1024 / 1024)
+            format!("{} MB", data.len() / 1024 / 1024)
         } else if data.len() > 1024 * 10 {
             format!("{} KB", data.len() / 1024)
         } else {
             format!("{} B", data.len())
         };
-        info!("\t{:width$}: {}", name, size, width = max_len);
+        info!("\t{:width$} : {}", name, size, width = max_len);
     }
 
     unsafe {
@@ -393,12 +414,18 @@ pub fn kmain() {
 
     // === load kernel from elf ===
 
-    // TODO: accept kernel name from arguments, default to "kernel"
-    let kernel_name = "kernel";
+    let default_kernel_name = "kernel";
+
+    // find an argument matching "kernel=..." and use that if available, else default to the default kernel name
+    let kernel_name = cmdline.and_then(|map| map.get("kernel").copied()).unwrap_or("kernel");
 
     info!("loading module {:?} as kernel", kernel_name);
 
-    let kernel_data = modules.get(kernel_name).unwrap_or_else(|| panic!("couldn't find module with name {}", kernel_name));
+    // try the given kernel name, if that doesn't work try the default kernel name
+    let kernel_data = modules.get(kernel_name).unwrap_or_else(|| {
+        warn!("couldn't find module {:?}, trying {:?}", kernel_name, default_kernel_name);
+        modules.get(default_kernel_name).unwrap_or_else(|| panic!("couldn't find module with name {}", kernel_name))
+    });
 
     let elf = Elf::parse(kernel_data).expect("failed to parse kernel header");
 
@@ -410,6 +437,8 @@ pub fn kmain() {
         panic!("cannot load interpreted binary as kernel");
     } else {
         let mut kernel_dir = PageDir::new();
+
+        let mut lowest_addr = usize::MAX;
 
         // assemble program in memory
         for ph in elf.program_headers {
@@ -424,6 +453,10 @@ pub fn kmain() {
                     let memsz: usize = ph.p_memsz.try_into().unwrap();
 
                     let vaddr: usize = ph.p_vaddr.try_into().unwrap();
+
+                    if vaddr < lowest_addr {
+                        lowest_addr = vaddr;
+                    }
 
                     let data: Vec<u8> = if filesz > 0 {
                         let mut data = vec![0; filesz];
@@ -447,7 +480,7 @@ pub fn kmain() {
                     unsafe {
                         let vaddr_align = vaddr / PAGE_SIZE * PAGE_SIZE;
 
-                        for addr in (vaddr_align..vaddr_align + memsz).step_by(PAGE_SIZE) {
+                        for addr in (vaddr_align..=vaddr_align + (memsz / PAGE_SIZE) * PAGE_SIZE + PAGE_SIZE).step_by(PAGE_SIZE) {
                             match PAGE_MANAGER.as_mut().unwrap().alloc_frame(&mut kernel_dir, addr, false, ph.is_write()) {
                                 Ok(_) => (),
                                 Err(PageError::FrameInUse) => {
@@ -477,31 +510,36 @@ pub fn kmain() {
             }
         }
 
+        // === load assembly shim to jump to and start kernel ===
+
         // small assembly shim to switch page directories and call the kernel
         let exec_kernel = include_bytes!("../../target/exec_kernel.bin");
 
         // round up to page size
-        let size = (exec_kernel.len() / PAGE_SIZE + 1) * PAGE_SIZE;
+        let exec_kernel_size = (exec_kernel.len() / PAGE_SIZE + 1) * PAGE_SIZE;
 
         // address we're loading the shim at
-        let exec_kernel_addr = usize::MAX - size + 1;
+        let exec_kernel_addr = usize::MAX - exec_kernel_size + 1;
 
         // function pointer to the shim
-        let exec_kernel_ptr: unsafe extern "cdecl" fn(u32, u32, u32) = unsafe { core::mem::transmute(exec_kernel_addr) };
+        let exec_kernel_ptr: unsafe extern "cdecl" fn(u32, u32, u32) -> ! = unsafe { core::mem::transmute(exec_kernel_addr) };
 
-        debug!("exec_kernel @ {:#x}, size {:#x}", exec_kernel_addr, size);
+        debug!("exec_kernel @ {:#x}, size {:#x}", exec_kernel_addr, exec_kernel_size);
 
         // allocate memory for shim
         debug!("allocating memory for exec_kernel");
         for addr in (exec_kernel_addr..exec_kernel_addr + exec_kernel.len()).step_by(PAGE_SIZE) {
             unsafe {
-                PAGE_MANAGER.as_mut().unwrap().alloc_frame(LOADER_DIR.as_mut().unwrap(), addr, false, true).unwrap();
-
-                match PAGE_MANAGER.as_mut().unwrap().alloc_frame(&mut kernel_dir, addr, false, false) {
-                    Ok(_) => (),
-                    Err(PageError::FrameInUse) => (),
-                    Err(err) => panic!("failed to allocate memory for exec_kernel: {:?}", err),
-                }
+                PAGE_MANAGER
+                    .as_mut()
+                    .unwrap()
+                    .alloc_frame(LOADER_DIR.as_mut().unwrap(), addr, false, true)
+                    .expect("failed to allocate memory for exec_kernel");
+                PAGE_MANAGER
+                    .as_mut()
+                    .unwrap()
+                    .alloc_frame(&mut kernel_dir, addr, false, false)
+                    .expect("failed to allocate memory for exec_kernel");
             }
         }
 
@@ -521,7 +559,7 @@ pub fn kmain() {
             core::slice::from_raw_parts_mut(exec_kernel_addr as *mut u8, exec_kernel.len()).clone_from_slice(exec_kernel);
         }
 
-        // allocate stack
+        // === allocate kernel's stack ===
         debug!("allocating stack");
 
         // the top address of the stack
@@ -532,67 +570,156 @@ pub fn kmain() {
         // allocate memory for kernel stack
         for addr in (stack_bottom..stack_top).step_by(PAGE_SIZE) {
             unsafe {
-                match PAGE_MANAGER.as_mut().unwrap().alloc_frame(&mut kernel_dir, addr, false, true) {
-                    Ok(_) => (),
-                    Err(PageError::FrameInUse) => (),
-                    Err(err) => panic!("failed to allocate memory for kernel stack: {:?}", err),
-                }
-                match PAGE_MANAGER.as_mut().unwrap().alloc_frame(LOADER_DIR.as_mut().unwrap(), addr, false, true) {
-                    Ok(_) => (),
-                    Err(PageError::FrameInUse) => (),
-                    Err(err) => panic!("failed to allocate memory for kernel stack: {:?}", err),
-                }
+                PAGE_MANAGER
+                    .as_mut()
+                    .unwrap()
+                    .alloc_frame(&mut kernel_dir, addr, false, true)
+                    .expect("failed to allocate memory for kernel stack");
             }
         }
 
-        /*debug!("preparing stack");
+        // === map the kernel's page directory into itself ===
 
-        // this seems to work for setting up a valid cdecl call frame? honestly idk
-        #[cfg(target_pointer_width = "64")]
-        let mut stack: Vec<u64> = Vec::new();
+        // we can create a new tables array by mapping its tables_physical entries into its address space, then populate the tables array
+        // with the new virtual addresses
 
-        #[cfg(target_pointer_width = "32")]
-        let mut stack: Vec<u32> = Vec::new();
+        debug!("mapping page directory");
 
-        stack.push(0);
+        // map page table list
+        let tables_new_ptr = unsafe { alloc::alloc::alloc(Layout::new::<[Option<TableRef<'static>>; 1024]>()) };
+        let tables_new: &mut [Option<TableRef<'static>>; 1024] = unsafe { &mut *(tables_new_ptr as *mut [Option<TableRef<'static>>; 1024]) };
+        for table in tables_new.iter_mut() {
+            *table = None;
+        }
 
-        stack.push(args.len().try_into().map_err(|_| Errno::ValueOverflow)?); // argc
-        stack.push(args_ptr.try_into().map_err(|_| Errno::ValueOverflow)?); // argv
-        stack.push(env_ptr.try_into().map_err(|_| Errno::ValueOverflow)?); // envp
+        let tables_size = size_of::<[Option<TableRef<'static>>; 1024]>();
+        let tables_hole = kernel_dir.find_hole(lowest_addr, stack_bottom, tables_size).expect("couldn't find space in kernel's page directory");
 
-        stack.push(0);
-        stack.push(0);
+        debug!("mapping {:#x} - {:#x}", tables_hole, tables_hole + tables_size);
 
-        let num_args = 5;
+        kernel_dir
+            .set_page(
+                tables_hole,
+                Some(PageFrame {
+                    addr: unsafe { LOADER_DIR.as_ref().unwrap().virt_to_phys(tables_new_ptr as usize).unwrap() },
+                    present: true,
+                    user_mode: false,
+                    writable: true,
+                    copy_on_write: false,
+                }),
+            )
+            .expect("couldn't write to kernel's page directory");
+
+        // map physical page table list
+        let tables_physical_size = size_of::<[PageDirEntry; 1024]>();
+        let tables_physical_hole = kernel_dir.find_hole(lowest_addr, stack_bottom, tables_physical_size).expect("couldn't find space in kernel's page directory");
+
+        kernel_dir
+            .set_page(
+                tables_physical_hole,
+                Some(PageFrame {
+                    addr: kernel_dir.tables_physical_addr as u64,
+                    present: true,
+                    user_mode: false,
+                    writable: true,
+                    copy_on_write: false,
+                }),
+            )
+            .expect("couldn't write to kernel's page directory");
+
+        // recreate and map page tables
+
+        // funy reference duplication
+        let tables_physical: &mut [PageDirEntry; 1024] = unsafe { &mut *(kernel_dir.tables_physical as *mut _) };
+
+        loop {
+            // count number of used page tables
+            let num_old = tables_physical.iter().filter(|e| !e.is_unused()).count();
+
+            for (idx, entry) in tables_physical.iter().enumerate() {
+                if !entry.is_unused() && tables_new[idx].is_none() {
+                    let hole = kernel_dir
+                        .find_hole(lowest_addr, stack_bottom, size_of::<PageTable>())
+                        .expect("couldn't find space in kernel's page directory");
+                    debug!("mapping page table @ {:#x} into kernel @ {:#x}", entry.get_address(), hole);
+                    kernel_dir
+                        .set_page(
+                            hole,
+                            Some(PageFrame {
+                                addr: entry.get_address() as u64,
+                                present: true,
+                                user_mode: false,
+                                writable: true,
+                                copy_on_write: false,
+                            }),
+                        )
+                        .expect("couldn't write to kernel's page directory");
+                    // dereferencing this pointer is fine because we won't be using it, it'll just be passed along to the kernel where it will be valid
+                    tables_new[idx] = Some(TableRef {
+                        table: unsafe { &mut *(hole as *mut PageTable) },
+                        can_free: false,
+                    });
+                }
+            }
+
+            // repeat if the number of used page tables has changed, so any newly allocated page tables from this process will be mapped
+            let num_new = tables_physical.iter().filter(|e| !e.is_unused()).count();
+
+            if num_old == num_new {
+                break;
+            }
+        }
+
+        // create new pagedir
+        let kernel_dir_internal = unsafe { PageDir::from_allocated(
+            &mut *(tables_hole as *mut [Option<TableRef<'static>>; 1024]),
+            &mut *(tables_physical_hole as *mut [PageDirEntry; 1024]),
+            kernel_dir.tables_physical_addr,
+        ) };
+
+        // === prepare kernel stack ===
+
+        // i have no idea what the hell is going on or why this works
+        debug!("preparing stack");
+
+        let mut stack: Vec<u32> = vec![
+            // whatever you put here seems to not matter at all
+            0,
+            
+            // arguments go here in the order they show up in the function declaration
+        ];
+
+        unsafe {
+            stack.append(&mut core::slice::from_raw_parts(&kernel_dir_internal as *const _ as *const u32, size_of::<PageDir>() / size_of::<u32>()).to_vec());
+        }
 
         let mut data_bytes: Vec<u8> = vec![0; stack.len() * size_of::<usize>()];
 
-        #[cfg(target_pointer_width = "64")]
-        NativeEndian::write_u64_into(&stack, &mut data_bytes);
-
-        #[cfg(target_pointer_width = "32")]
         NativeEndian::write_u32_into(&stack, &mut data_bytes);
 
-        let stack_addr = (LINKED_BASE - size_of::<usize>() - stack.len() * size_of::<usize>()) & !(16 - 1); // align to 16 byte boundary
+        let stack_addr = (stack_top - data_bytes.len()) & !(16 - 1); // align to 16 byte boundary
 
-        task.state.write_mem(stack_addr as u64, &data_bytes, true)?;*/
+        debug!("writing stack mem @ {:#x} - {:#x}", stack_addr, stack_addr + data_bytes.len());
 
-        /*unsafe {
-            assert!(core::slice::from_raw_parts(exec_kernel_addr as *mut u8, exec_kernel.len()) == exec_kernel);
+        unsafe {
             LOADER_DIR
                 .as_mut()
                 .unwrap()
-                .map_memory_from(&mut kernel_dir, exec_kernel_addr, exec_kernel.len(), |s| assert!(s == exec_kernel))
-                .unwrap();
-        }*/
+                .map_memory_from(&mut kernel_dir, stack_addr, data_bytes.len(), |s| s.clone_from_slice(&data_bytes))
+                .expect("failed to populate kernel's stack");
+        }
 
+        debug!("calling shim");
+
+        // === jump to kernel ===
+
+        // call the shim, which will then switch to the kernel's page table, switch to its stack pointer, and jump to its entry point
         unsafe {
             debug!("tables_physical_addr is {:#x}", kernel_dir.tables_physical_addr);
-            //debug!("tables_physical_addr is {:#x}", LOADER_DIR.as_ref().unwrap().tables_physical_addr);
             debug!("stack top is {:#x}", stack_top);
+            debug!("stack pointer is {:#x}", stack_addr);
             debug!("elf entry is {:#x}", elf.entry);
-            (exec_kernel_ptr)(kernel_dir.tables_physical_addr, stack_top.try_into().unwrap(), elf.entry.try_into().unwrap());
-            //(exec_kernel_ptr)(LOADER_DIR.as_ref().unwrap().tables_physical_addr, stack_top.try_into().unwrap(), elf.entry.try_into().unwrap());
+            (exec_kernel_ptr)(kernel_dir.tables_physical_addr, stack_addr.try_into().unwrap(), elf.entry.try_into().unwrap());
         }
     }
 }

@@ -111,7 +111,7 @@ impl VGATextWriter {
         unsafe {
             outb(0x3d4, 0x0a);
             outb(0x3d5, (inb(0x3d5) & 0xc0) | 0xd);
-        
+
             outb(0x3d4, 0x0b);
             outb(0x3d5, (inb(0x3d5) & 0xe0) | 0xe);
         }
@@ -120,13 +120,13 @@ impl VGATextWriter {
     fn newline(&mut self) {
         self.cursor_x = 0;
         self.cursor_y += 1;
-        if self.cursor_y >= self.height { // scroll screen
+        if self.cursor_y >= self.height {
+            // scroll screen
             for y in 1..self.height {
                 //self.buffer.chars[(y - diff) as usize] = self.buffer.chars[y as usize];
 
                 for i in 0..self.width {
-                    self.buffer[((y - 1) * self.width + i) as usize] =
-                        self.buffer[(y * self.width + i) as usize];
+                    self.buffer[((y - 1) * self.width + i) as usize] = self.buffer[(y * self.width + i) as usize];
                 }
             }
 
@@ -147,32 +147,31 @@ impl Write for VGATextWriter {
             match c {
                 '\n' => {
                     self.newline();
-                },
+                }
                 '\r' => {
                     self.cursor_x = 0;
-                },
-                '\x08' => { // rust doesn't have \b lmao
+                }
+                '\x08' => {
+                    // rust doesn't have \b lmao
                     if self.cursor_x > 0 {
                         self.cursor_x -= 1;
                     }
-                },
+                }
                 '\t' => {
                     self.cursor_x = ((self.cursor_x / 8) * 8) + 8;
                     if self.cursor_x >= self.width {
                         self.newline();
                     }
-                },
+                }
                 _ => {
-                    self.buffer[(self.cursor_y * self.width + self.cursor_x) as usize] = 
-                          (((self.color.background as u16) & 0xf) << 12)
-                        | (((self.color.foreground as u16) & 0xf) << 8)
-                        | (if c as u32 > 0x100 { b'?' } else { c as u8 } as u16);
+                    self.buffer[(self.cursor_y * self.width + self.cursor_x) as usize] =
+                        (((self.color.background as u16) & 0xf) << 12) | (((self.color.foreground as u16) & 0xf) << 8) | (if c as u32 > 0x100 { b'?' } else { c as u8 } as u16);
 
                     self.cursor_x += 1;
                     if self.cursor_x >= self.width {
                         self.newline();
                     }
-                },
+                }
             }
         }
 
@@ -228,7 +227,7 @@ impl Log for Logger {
 }
 
 /// our logger that we will log things with
-static LOGGER: Logger = Logger { max_level: LevelFilter::Info };
+static LOGGER: Logger = Logger { max_level: LevelFilter::Trace };
 
 /// initialize the logger, setting the max level in the process
 pub fn init() -> Result<(), SetLoggerError> {
@@ -241,7 +240,9 @@ pub fn init_vga(buffer: &'static mut [u16], width: u16, height: u16) {
         VGA_WRITER = Some(VGATextWriter {
             cursor_x: 0,
             cursor_y: 0,
-            width, height, buffer,
+            width,
+            height,
+            buffer,
             color: Default::default(),
         });
     }

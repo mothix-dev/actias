@@ -380,27 +380,42 @@ impl Default for PageTable {
 /// wrapper for a reference to a page table to help us manage allocations
 ///
 /// allows us to store whether this reference was automatically allocated so it can be freed when its page directory is dropped
+#[repr(C)]
 pub struct TableRef<'a> {
     /// reference to the page table
-    table: &'a mut PageTable,
+    pub table: &'a mut PageTable,
 
     /// whether we allocated this page table and thus can free it
-    can_free: bool,
+    pub can_free: bool,
 }
 
 /// x86 non-PAE PageDirectory implementation
+#[repr(C)]
 pub struct PageDir<'a> {
     /// pointers to page tables
-    tables: &'a mut [Option<TableRef<'a>>; 1024],
+    pub tables: &'a mut [Option<TableRef<'a>>; 1024],
 
     /// physical addresses of page tables
-    tables_physical: &'a mut [PageDirEntry; 1024],
+    pub tables_physical: &'a mut [PageDirEntry; 1024],
 
     /// physical address of tables_physical
     pub tables_physical_addr: u32,
 
     /// whether tables and tables_physical were allocated on the heap and thus can be freed
-    can_free: bool,
+    pub can_free: bool,
+}
+
+impl fmt::Debug for PageDir<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PageDir {{ tables: {:#x}, tables_physical: {:#x}, tables_physical_addr: {:#x}, can_free: {} }}",
+            &self.tables[0] as *const _ as usize,
+            &self.tables_physical[0] as *const _ as usize,
+            self.tables_physical_addr,
+            self.can_free,
+        )
+    }
 }
 
 /// contains a reference to the current page table if one has been set, used for virtual to physical address translations when allocating memory for new page tables
@@ -575,13 +590,12 @@ impl<'a> PageDirectory for PageDir<'a> {
             };
         }
 
-        self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] =
-            if let Some(page) = page {
-                page.try_into().map_err(|_| PageError::BadFrame)?
-            } else {
-                PageTableEntry::new_unused()
-            };
-        
+        self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] = if let Some(page) = page {
+            page.try_into().map_err(|_| PageError::BadFrame)?
+        } else {
+            PageTableEntry::new_unused()
+        };
+
         //trace!("table is now {:?}", self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize]);
 
         // invalidate this page in the tlb if we're modifying the current page directory
