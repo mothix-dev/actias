@@ -207,7 +207,7 @@ pub trait PageDirectory {
             end = (end & !(page_size - 1)) + (page_size - 1);
         }
 
-        let buf_len = end - start;
+        let buf_len = end - start + 1;
 
         debug!("start now @ {:#x}, end now @ {:#x}", start, end);
 
@@ -255,7 +255,7 @@ pub trait PageDirectory {
         debug!("existing_phys: {:x?}", existing_phys);
 
         // loop over pages, get physical address of each page and map it in or create new page and alloc mem
-        for i in (start..end).step_by(page_size) {
+        for i in (start..=end).step_by(page_size) {
             // get the physical address of the page at the given address, or allocate a new one if there isn't one mapped
             let phys_addr = match from.virt_to_phys(i) {
                 Some(a) => a,

@@ -35,6 +35,7 @@ use common::{
         paging::{PageDirectory, PageError, PageFrame, PageManager},
     },
     util::{array::BitSet, DebugArray},
+    BootModule,
 };
 use compression::prelude::*;
 use core::mem::size_of;
@@ -417,15 +418,22 @@ pub fn kmain() {
     let default_kernel_name = "kernel";
 
     // find an argument matching "kernel=..." and use that if available, else default to the default kernel name
-    let kernel_name = cmdline.and_then(|map| map.get("kernel").copied()).unwrap_or("kernel");
+    let kernel_name = {
+        let kernel_name = cmdline.and_then(|map| map.get("kernel").copied()).unwrap_or(default_kernel_name);
+
+        // check if we have a module with this name
+        if modules.contains_key(kernel_name) {
+            kernel_name
+        } else {
+            warn!("couldn't find module {:?}, trying {:?}", kernel_name, default_kernel_name);
+
+            default_kernel_name
+        }
+    };
 
     info!("loading module {:?} as kernel", kernel_name);
 
-    // try the given kernel name, if that doesn't work try the default kernel name
-    let kernel_data = modules.get(kernel_name).unwrap_or_else(|| {
-        warn!("couldn't find module {:?}, trying {:?}", kernel_name, default_kernel_name);
-        modules.get(default_kernel_name).unwrap_or_else(|| panic!("couldn't find module with name {}", kernel_name))
-    });
+    let kernel_data = modules.get(kernel_name).unwrap_or_else(|| panic!("couldn't find module with name {}", kernel_name));
 
     let elf = Elf::parse(kernel_data).expect("failed to parse kernel header");
 
@@ -560,6 +568,7 @@ pub fn kmain() {
         }
 
         // === allocate kernel's stack ===
+
         debug!("allocating stack");
 
         // the top address of the stack
@@ -577,6 +586,107 @@ pub fn kmain() {
                     .expect("failed to allocate memory for kernel stack");
             }
         }
+
+        // === prepare modules for passing to the kernel ===
+
+        debug!("preparing modules for kernel");
+
+        let (modules_addr, num_modules) = if modules.len() > 1 {
+            // list of start indices and lengths into our big table of strings
+            let mut indices: Vec<(usize, usize)> = Vec::new();
+
+            // the name of every module in order
+            let string_bank: Vec<&str> = modules.iter().filter(|(name, _data)| name != &kernel_name).map(|(name, _data)| name.as_ref()).collect();
+
+            // populate indices with the positions of the strings in our big string list
+            let mut index = 0;
+            for string in &string_bank {
+                indices.push((index, string.len()));
+                index += string.len();
+            }
+
+            let module_names = string_bank.join("");
+
+            debug!("{:?}, {:?}", module_names, indices);
+
+            // copy module names into kernel's memory
+            let module_names_len = module_names.as_bytes().len();
+            let module_names_hole = kernel_dir
+                .find_hole(lowest_addr, stack_bottom, module_names_len)
+                .expect("couldn't find space in kernel's page directory");
+
+            for addr in (module_names_hole..module_names_hole + module_names_len).step_by(PAGE_SIZE) {
+                unsafe {
+                    PAGE_MANAGER
+                        .as_mut()
+                        .unwrap()
+                        .alloc_frame(&mut kernel_dir, addr, false, true)
+                        .expect("failed to allocate memory for module names");
+                }
+            }
+
+            unsafe {
+                LOADER_DIR
+                    .as_mut()
+                    .unwrap()
+                    .map_memory_from(&mut kernel_dir, module_names_hole, module_names_len, |s| s.clone_from_slice(module_names.as_bytes()))
+                    .expect("failed to populate kernel's memory");
+            }
+
+            let new_modules = modules
+                .iter()
+                .filter(|(name, _data)| name != &kernel_name)
+                .enumerate()
+                .map(|(i, (_name, data))| {
+                    let start = &data[0] as *const u8 as usize;
+                    let end = &data[data.len() - 1] as *const u8 as usize;
+
+                    let start_phys = unsafe { LOADER_DIR.as_ref().unwrap().virt_to_phys(start).expect("couldn't get physical address for module") };
+                    let end_phys = unsafe { LOADER_DIR.as_ref().unwrap().virt_to_phys(end).expect("couldn't get physical address for module") };
+
+                    let (name_start, name_len) = indices[i];
+
+                    BootModule {
+                        start: start_phys,
+                        end: end_phys,
+                        string: unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts((module_names_hole + name_start) as *const u8, name_len)) },
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            //debug!("new_modules: {:?}", new_modules);
+
+            let new_modules_len = new_modules.len() * size_of::<BootModule>();
+            let new_modules_hole = kernel_dir
+                .find_hole(lowest_addr, stack_bottom, new_modules_len)
+                .expect("couldn't find space in kernel's page directory");
+
+            debug!("new_modules @ {:#x}", new_modules_hole);
+
+            for addr in (new_modules_hole..new_modules_hole + new_modules_len).step_by(PAGE_SIZE) {
+                unsafe {
+                    PAGE_MANAGER
+                        .as_mut()
+                        .unwrap()
+                        .alloc_frame(&mut kernel_dir, addr, false, true)
+                        .expect("failed to allocate memory for module names");
+                }
+            }
+
+            unsafe {
+                LOADER_DIR
+                    .as_mut()
+                    .unwrap()
+                    .map_memory_from(&mut kernel_dir, new_modules_hole, new_modules_len, |s| {
+                        s.clone_from_slice(&mut core::slice::from_raw_parts(new_modules.as_slice() as *const _ as *const u8, new_modules_len))
+                    })
+                    .expect("failed to populate kernel's memory");
+            }
+
+            (new_modules_hole, new_modules.len())
+        } else {
+            (0, 0)
+        };
 
         // === map the kernel's page directory into itself ===
 
@@ -612,7 +722,9 @@ pub fn kmain() {
 
         // map physical page table list
         let tables_physical_size = size_of::<[PageDirEntry; 1024]>();
-        let tables_physical_hole = kernel_dir.find_hole(lowest_addr, stack_bottom, tables_physical_size).expect("couldn't find space in kernel's page directory");
+        let tables_physical_hole = kernel_dir
+            .find_hole(lowest_addr, stack_bottom, tables_physical_size)
+            .expect("couldn't find space in kernel's page directory");
 
         kernel_dir
             .set_page(
@@ -671,11 +783,13 @@ pub fn kmain() {
         }
 
         // create new pagedir
-        let kernel_dir_internal = unsafe { PageDir::from_allocated(
-            &mut *(tables_hole as *mut [Option<TableRef<'static>>; 1024]),
-            &mut *(tables_physical_hole as *mut [PageDirEntry; 1024]),
-            kernel_dir.tables_physical_addr,
-        ) };
+        let kernel_dir_internal = unsafe {
+            PageDir::from_allocated(
+                &mut *(tables_hole as *mut [Option<TableRef<'static>>; 1024]),
+                &mut *(tables_physical_hole as *mut [PageDirEntry; 1024]),
+                kernel_dir.tables_physical_addr,
+            )
+        };
 
         // === prepare kernel stack ===
 
@@ -685,13 +799,15 @@ pub fn kmain() {
         let mut stack: Vec<u32> = vec![
             // whatever you put here seems to not matter at all
             0,
-            
             // arguments go here in the order they show up in the function declaration
         ];
 
         unsafe {
             stack.append(&mut core::slice::from_raw_parts(&kernel_dir_internal as *const _ as *const u32, size_of::<PageDir>() / size_of::<u32>()).to_vec());
         }
+
+        stack.push(modules_addr.try_into().unwrap());
+        stack.push(num_modules.try_into().unwrap());
 
         let mut data_bytes: Vec<u8> = vec![0; stack.len() * size_of::<usize>()];
 
