@@ -13,7 +13,7 @@ use alloc::alloc::Layout;
 use common::{
     arch::paging::PageDir,
     mm::{heap::CustomAlloc, paging::PageDirectory},
-    BootModule,
+    BootModule, MemoryRegion,
 };
 use log::{debug, error, info, trace, warn};
 
@@ -49,7 +49,7 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
 }
 
 #[no_mangle]
-pub extern "cdecl" fn _start(dir: PageDir, modules_ptr: *const BootModule, num_modules: u32) -> ! {
+pub extern "cdecl" fn _start(dir: PageDir, modules_ptr: *const BootModule, num_modules: u32, regions_ptr: *const MemoryRegion, num_regions: u32) -> ! {
     // initialize our logger
     logging::init().unwrap();
 
@@ -61,6 +61,12 @@ pub extern "cdecl" fn _start(dir: PageDir, modules_ptr: *const BootModule, num_m
     let modules = unsafe { core::slice::from_raw_parts(modules_ptr, num_modules as usize) };
 
     info!("{:?}", modules);
+
+    debug!("regions_ptr: {:?}, num_regions: {:?}", regions_ptr, num_regions);
+
+    let regions = unsafe { core::slice::from_raw_parts(regions_ptr, num_regions as usize) };
+
+    info!("{:?}", regions);
 
     unsafe {
         common::arch::halt();

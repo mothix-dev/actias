@@ -6,8 +6,9 @@ use common::{
     arch::{LINKED_BASE, PAGE_SIZE},
     mm::paging::{PageDirectory, PageManager},
     util::{array::BitSet, DebugArray},
+    MemoryKind, MemoryRegion,
 };
-use core::{ffi::CStr, fmt, mem::size_of, slice};
+use core::{ffi::CStr, fmt, slice};
 use log::{debug, trace, warn};
 
 extern "C" {
@@ -95,6 +96,9 @@ pub struct MultibootInfoCopy {
     /// modules provided by bootloader
     pub mods: Option<&'static mut [MultibootModuleCopy]>,
 
+    /// memory map of system
+    pub memory_map: Option<&'static mut [MemMapEntry]>,
+
     /// name of bootloader
     pub bootloader_name: Option<&'static str>,
 
@@ -178,18 +182,21 @@ impl MultibootInfo {
 
             let chars = s.as_bytes();
             let len = chars.len();
-            let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<u8>(len, false).pointer, len) };
+            let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<u8>(Layout::from_size_align(len, 1).unwrap()).pointer, len) };
 
             new.copy_from_slice(chars);
 
             core::str::from_utf8(new).unwrap()
         };
 
-        let modules_copy = if let Some(modules) = self.get_modules() {
+        let modules_copy = self.get_modules().and_then(|modules| {
             let len = modules.len();
 
             if len > 0 {
-                let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<MultibootModuleCopy>(len * size_of::<MultibootModuleCopy>(), false).pointer, len) };
+                let new = unsafe {
+                    let layout = Layout::new::<MultibootModuleCopy>();
+                    slice::from_raw_parts_mut(bump_alloc::<MultibootModuleCopy>(Layout::from_size_align(layout.size() * len, layout.align()).unwrap()).pointer, len)
+                };
 
                 for i in 0..len {
                     let old_module = &modules[i];
@@ -205,9 +212,27 @@ impl MultibootInfo {
             } else {
                 None
             }
-        } else {
-            None
-        };
+        });
+
+        let memory_map = self.get_mmap().and_then(|iter| {
+            // filter out bogus entries
+            let len = iter.clone().filter(|r| r.length > 0).count();
+
+            if len > 0 {
+                let new = unsafe {
+                    let layout = Layout::new::<MemMapEntry>();
+                    slice::from_raw_parts_mut(bump_alloc::<MemMapEntry>(Layout::from_size_align(layout.size() * len, layout.align()).unwrap()).pointer, len)
+                };
+
+                for (i, region) in iter.filter(|r| r.length > 0).enumerate() {
+                    new[i] = *region;
+                }
+
+                Some(new)
+            } else {
+                None
+            }
+        });
 
         MultibootInfoCopy {
             flags: self.flags,
@@ -215,6 +240,7 @@ impl MultibootInfo {
             boot_device: self.get_boot_device(),
             cmdline: self.get_cmdline().map(copy_str),
             mods: modules_copy,
+            memory_map,
             bootloader_name: self.get_bootloader_name().map(copy_str),
             vbe: self.get_vbe().copied(),
             framebuffer: self.get_framebuffer().copied(),
@@ -358,7 +384,7 @@ impl fmt::Debug for MultibootModule {
 
 /// different types of memory mapping
 #[repr(u32)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum MappingKind {
     /// unknown memory map
     Unknown = 0,
@@ -369,19 +395,30 @@ pub enum MappingKind {
     /// reserved, not available
     Reserved,
 
-    /// not sure, maybe either used by ACPI but reclaimable by the OS? maybe the other way around
+    /// used to initialize ACPI but is reclaimable afterwards
     AcpiReclaimable,
 
-    /// non volatile storage?
-    NVS,
+    /// non volatile memory for ACPI settings
+    AcpiNVS,
 
     /// bad memory
     BadRAM,
 }
 
+impl From<MappingKind> for MemoryKind {
+    fn from(kind: MappingKind) -> Self {
+        match kind {
+            MappingKind::Unknown | MappingKind::BadRAM => MemoryKind::Bad,
+            MappingKind::Reserved | MappingKind::AcpiNVS => MemoryKind::Reserved,
+            MappingKind::AcpiReclaimable => MemoryKind::ReservedReclaimable,
+            MappingKind::Available => MemoryKind::Available,
+        }
+    }
+}
+
 /// struct that describes a region of memory and what it's used for
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct MemMapEntry {
     /// size of struct, can be greater than the default 20 bytes
     pub size: u32,
@@ -394,6 +431,16 @@ pub struct MemMapEntry {
 
     /// what kind of mapping is this
     pub kind: MappingKind,
+}
+
+impl From<MemMapEntry> for MemoryRegion {
+    fn from(entry: MemMapEntry) -> Self {
+        Self {
+            start: entry.base_addr,
+            end: entry.base_addr + entry.length,
+            kind: entry.kind.into(),
+        }
+    }
 }
 
 /// wrapper struct for list of memory mappings
@@ -434,6 +481,7 @@ pub struct MemMapIter<'a> {
 impl<'a> MemMapIter<'a> {
     /// creates a new iterator over a memory map list
     pub fn new(list: &'a MemMapList) -> Self {
+        debug!("new iter from list {:?}", list);
         // maybe make unsafe since we can't guarantee that the memory map entries will be there?
         Self {
             list,
@@ -442,6 +490,12 @@ impl<'a> MemMapIter<'a> {
             first_entry: true,
             finished: false,
         }
+    }
+}
+
+impl<'a> Clone for MemMapIter<'a> {
+    fn clone(&self) -> Self {
+        Self::new(self.list)
     }
 }
 
@@ -703,9 +757,9 @@ pub fn reserve_pages(set: &mut BitSet) {
     }
 
     // get memory map from bootloader info
-    let mut iter = info.get_mmap();
+    let mut mmap = info.get_mmap();
 
-    if let Some(iter) = (&mut iter).as_mut() {
+    if let Some(iter) = mmap.as_mut() {
         // set entire bit set, faster to do it this way than to just call set.set()
         for num in set.array.to_slice_mut().iter_mut() {
             *num = 0xffffffff;

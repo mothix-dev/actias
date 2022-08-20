@@ -227,7 +227,7 @@ impl Log for Logger {
 }
 
 /// our logger that we will log things with
-static LOGGER: Logger = Logger { max_level: LevelFilter::Trace };
+static LOGGER: Logger = Logger { max_level: LevelFilter::Info };
 
 /// initialize the logger, setting the max level in the process
 pub fn init() -> Result<(), SetLoggerError> {
