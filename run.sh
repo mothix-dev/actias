@@ -2,18 +2,18 @@
 
 set -e
 
+cargo build --release
+
 mkdir -p test-initrd
 
 cd test-initrd
-cp ../target/i586-unknown-none/release/kernel .
-#cp ../test-bin/target/i586-unknown-none/debug/test-bin .
-#cp ../test-bin2/target/i586-unknown-none/release/test-bin2 .
-
-strip *
+echo "this is a test uwu" > test.txt
 
 tar czvf ../initrd.tar.gz *
 cd ..
 
+strip target/i586-unknown-none/release/kernel
+
 echo "(ctrl+c to exit)"
 
-qemu-system-i386 -cpu pentium -machine type=pc-i440fx-3.1 -device isa-debug-exit -kernel target/i586-unknown-none/release/loader -initrd initrd.tar.gz -display none -serial stdio
+qemu-system-i386 -cpu pentium -machine type=pc-i440fx-3.1 -device isa-debug-exit -kernel target/i586-unknown-none/release/kernel -initrd initrd.tar.gz -display none -serial stdio $@
