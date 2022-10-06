@@ -29,7 +29,13 @@ use log::{debug, error, trace};
 /// if the heap is unable to be expanded all the way (but is expanded at least a little bit), the function should return Ok with
 /// the highest top address that it's managed to allocate. the heap will then be expanded (to allow more page tables to be allocated, for example)
 /// and this function will be called again as many times as it needs to finish the allocation
-pub type AllocExpandCallback = dyn Fn(usize, usize, &dyn Fn(Layout) -> Result<*mut u8, ()>, &dyn Fn(*mut u8, Layout)) -> Result<usize, ()>;
+pub type AllocExpandCallback = dyn Fn(usize, usize, &ExpandAllocCallback, &ExpandFreeCallback) -> Result<usize, ()>;
+
+/// callback used in [AllocExpandCallback] to allocate memory while expanding the heap. should not be used elsewhere
+pub type ExpandAllocCallback = dyn Fn(Layout) -> Result<*mut u8, ()>;
+
+/// callback used in [AllocExpandCallback] to free memory while expanding the heap. should not be used elsewhere
+pub type ExpandFreeCallback = dyn Fn(*mut u8, Layout);
 
 /// contains the global state of our custom allocator
 struct AllocState<'a> {
@@ -56,7 +62,7 @@ impl<'a> AllocState<'a> {
     /// creates a new AllocState, waiting for initialization
     pub const fn new() -> Self {
         // our initial expand callback, just returns Err
-        fn initial_expand_callback(_old_top: usize, _new_top: usize, _alloc: &dyn Fn(Layout) -> Result<*mut u8, ()>, _dealloc: &dyn Fn(*mut u8, Layout)) -> Result<usize, ()> {
+        fn initial_expand_callback(_old_top: usize, _new_top: usize, _alloc: &ExpandAllocCallback, _dealloc: &ExpandFreeCallback) -> Result<usize, ()> {
             Err(())
         }
 
@@ -361,4 +367,14 @@ unsafe impl GlobalAlloc for CustomAlloc {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         ALLOC_STATE.dealloc(ptr, layout);
     }
+}
+
+/// our global allocator
+#[global_allocator]
+pub static ALLOCATOR: CustomAlloc = CustomAlloc;
+
+/// run if the allocator encounters an error. not much we can do other than panic
+#[alloc_error_handler]
+fn alloc_error_handler(layout: Layout) -> ! {
+    panic!("allocation error with layout {:?}", layout);
 }

@@ -1,20 +1,21 @@
 //! i586 low level interrupt/exception handling
 
-use super::{
-    halt,
-    paging::{PageTableFlags, PAGE_DIR},
-};
-use crate::{
+use super::halt;
+/*use crate::{
     arch::{tasks::exit_current_task, PAGE_SIZE},
     platform::debug::exit_failure,
 };
-use crate::tasks::{get_current_task, get_current_task_mut, remove_page_reference, IN_TASK};
-
+use crate::tasks::{get_current_task, get_current_task_mut, remove_page_reference, IN_TASK};*/
+use crate::util::debug::FormatHex;
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
 use core::{arch::asm, fmt};
-use x86::dtables::{lidt, DescriptorTablePointer};
-use log::{error, warn, info, debug, trace};
+use log::{debug, error, info};
+use x86::{
+    dtables::{lidt, DescriptorTablePointer},
+    io::outb,
+};
+use interrupt_macro::*;
 
 /// IDT flags
 #[bitmask(u8)]
@@ -29,8 +30,8 @@ pub enum IDTFlags {
     Ring3 = Self(0x60),
     Present = Self(0x80),
 
-    Exception = Self(Self::X32Interrupt.0 | Self::Present.0), // exception
-    External = Self(Self::X32Interrupt.0 | Self::Present.0),  // external interrupt
+    Exception = Self(Self::X32Interrupt.0 | Self::Present.0),            // exception
+    External = Self(Self::X32Interrupt.0 | Self::Present.0),             // external interrupt
     Call = Self(Self::X32Interrupt.0 | Self::Present.0 | Self::Ring3.0), // system call
 }
 
@@ -59,10 +60,10 @@ impl IDTEntry {
     /// creates a new IDT entry
     pub fn new(isr: *const (), flags: IDTFlags) -> Self {
         Self {
-            isr_low: ((isr as u32) & 0xffff) as u16, // gets address of function pointer, then chops off the top 2 bytes
             // not sure if casting to u16 will only return lower 2 bytes?
+            isr_low: ((isr as u32) & 0xffff) as u16, // gets address of function pointer, then chops off the top 2 bytes
             isr_high: ((isr as u32) >> 16) as u16, // upper 2 bytes
-            kernel_cs: 0x08, // offset of kernel code selector in GDT (see boot.S)
+            kernel_cs: 0x08,                       // offset of kernel code selector in GDT (see boot.S)
             attributes: flags.0,
             reserved: 0,
         }
@@ -79,25 +80,10 @@ impl IDTEntry {
             isr_high: 0,
         }
     }
-}
 
-/// how many entries do we want in our IDT
-pub const IDT_ENTRIES: usize = 256;
-
-/// the IDT itself (aligned to 16 bits for performance)
-pub static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> =
-    Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
-
-/// stores state of cpu prior to running exception handler
-/// this should be the proper stack frame format? it isn't provided by the x86 crate to my knowledge
-#[repr(C)]
-#[derive(Debug)]
-pub struct ExceptionStackFrame {
-    pub instruction_pointer: u32,
-    pub code_segment: u32,
-    pub cpu_flags: u32,
-    pub stack_pointer: u32,
-    pub stack_segment: u32,
+    pub fn is_empty(&self) -> bool {
+        self.isr_low == 0 && self.isr_high == 0
+    }
 }
 
 /// list of exceptions
@@ -225,129 +211,134 @@ impl fmt::Display for PageFaultErrorCode {
     }
 }
 
-unsafe fn generic_exception(name: &str, frame: ExceptionStackFrame) {
-    let was_in_task = IN_TASK;
-    IN_TASK = false;
+/// registers passed to interrupt handlers
+#[repr(C, packed(32))]
+#[derive(Default, Copy, Clone)]
+pub struct InterruptRegisters {
+    pub ds: u32,
+    pub edi: u32,
+    pub esi: u32,
+    pub ebp: u32,
+    pub esp: u32,
+    pub ebx: u32,
+    pub edx: u32,
+    pub ecx: u32,
+    pub eax: u32,
+    pub error_code: u32,
+    pub eip: u32,
+    pub cs: u32,
+    pub eflags: u32,
+    pub useresp: u32,
+    pub ss: u32,
+}
 
-    if was_in_task {
-        let id = get_current_task().unwrap().id;
-
-        error!("{} in process {} @ {:#x}", name, id, frame.instruction_pointer);
-        info!("{:#?}", frame);
-
-        exit_current_task();
-    } else {
-        error!("PANIC: {} @ {:#x}", name, frame.instruction_pointer);
-        info!("{:#?}", frame);
-
-        if cfg!(test) {
-            exit_failure();
-        } else {
-            halt();
-        }
+impl fmt::Debug for InterruptRegisters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InterruptRegisters")
+            .field("ds", &FormatHex(self.ds))
+            .field("edi", &FormatHex(self.edi))
+            .field("esi", &FormatHex(self.esi))
+            .field("ebp", &FormatHex(self.ebp))
+            .field("esp", &FormatHex(self.esp))
+            .field("ebx", &FormatHex(self.ebx))
+            .field("edx", &FormatHex(self.edx))
+            .field("ecx", &FormatHex(self.ecx))
+            .field("eax", &FormatHex(self.eax))
+            .field("error_code", &FormatHex(self.error_code))
+            .field("eip", &FormatHex(self.eip))
+            .field("cs", &FormatHex(self.cs))
+            .field("eflags", &FormatHex(self.eflags))
+            .field("useresp", &FormatHex(self.useresp))
+            .field("ss", &FormatHex(self.ss))
+            .finish()
     }
 }
 
-unsafe fn generic_exception_error_code(name: &str, frame: ExceptionStackFrame, error_code: u32) {
-    let was_in_task = IN_TASK;
-    IN_TASK = false;
-
-    if was_in_task {
-        let id = get_current_task().unwrap().id;
-
-        error!("{} in process {} @ {:#x}, error code {:#x}", name, id, frame.instruction_pointer, error_code);
-        info!("{:#?}", frame);
-
-        exit_current_task();
+unsafe fn generic_exception(name: &str, regs: &InterruptRegisters) {
+    if regs.error_code == 0 {
+        error!("PANIC: {} @ {:#x}, no error code", name, regs.eip);
     } else {
-        error!("PANIC: {} @ {:#x}, error code {:#x}", name, frame.instruction_pointer, error_code);
-        info!("{:#?}", frame);
-
-        if cfg!(test) {
-            exit_failure();
-        } else {
-            halt();
-        }
+        error!("PANIC: {} @ {:#x}, error code {:#x}", name, regs.eip, regs.error_code);
     }
+
+    info!("{:#?}", regs);
+
+    halt();
 }
 
 /// exception handler for divide by zero
-unsafe extern "x86-interrupt" fn divide_by_zero_handler(frame: ExceptionStackFrame) {
-    generic_exception("divide by zero", frame);
+#[interrupt(x86)]
+unsafe fn divide_by_zero_handler(regs: &InterruptRegisters) {
+    generic_exception("divide by zero", regs);
 }
 
 /// exception handler for breakpoint
-unsafe extern "x86-interrupt" fn breakpoint_handler(frame: ExceptionStackFrame) {
-    info!("breakpoint @ {:#x}", frame.instruction_pointer);
+#[interrupt(x86)]
+unsafe fn breakpoint_handler(regs: &InterruptRegisters) {
+    info!("breakpoint @ {:#x}", regs.eip);
 }
 
 /// exception handler for overflow
-unsafe extern "x86-interrupt" fn overflow_handler(frame: ExceptionStackFrame) {
-    info!("overflow @ {:#x}", frame.instruction_pointer);
+#[interrupt(x86)]
+unsafe fn overflow_handler(regs: &InterruptRegisters) {
+    info!("overflow @ {:#x}", regs.eip);
 }
 
 /// exception handler for bound range exceeded
-unsafe extern "x86-interrupt" fn bound_range_handler(frame: ExceptionStackFrame) {
-    generic_exception("bound range exceeded", frame);
+#[interrupt(x86)]
+unsafe fn bound_range_handler(regs: &InterruptRegisters) {
+    generic_exception("bound range exceeded", regs);
 }
 
 /// exception handler for invalid opcode
-unsafe extern "x86-interrupt" fn invalid_opcode_handler(frame: ExceptionStackFrame) {
-    generic_exception("invalid opcode", frame);
+#[interrupt(x86)]
+unsafe fn invalid_opcode_handler(regs: &InterruptRegisters) {
+    generic_exception("invalid opcode", regs);
 }
 
 /// exception handler for device not available
-unsafe extern "x86-interrupt" fn device_not_available_handler(frame: ExceptionStackFrame) {
-    generic_exception("device not available", frame);
+#[interrupt(x86)]
+unsafe fn device_not_available_handler(regs: &InterruptRegisters) {
+    generic_exception("device not available", regs);
 }
 
 /// exception handler for double fault
-unsafe extern "x86-interrupt" fn double_fault_handler(frame: ExceptionStackFrame, _error_code: u32) {
-    IN_TASK = false;
-
-    // switch to kernel's page directory if initialized
-    if let Some(dir) = PAGE_DIR.as_mut() {
-        dir.switch_to();
-    }
-
-    error!("PANIC: double fault @ {:#x}", frame.instruction_pointer);
-    debug!("{:#?}", frame);
-
-    if cfg!(test) {
-        exit_failure();
-    } else {
-        halt();
-    }
+#[interrupt(x86_error_code)]
+unsafe fn double_fault_handler(regs: &InterruptRegisters) {
+    generic_exception("double fault", regs);
 }
 
 /// exception handler for invalid tss
-unsafe extern "x86-interrupt" fn invalid_tss_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("invalid TSS", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn invalid_tss_handler(regs: &InterruptRegisters) {
+    generic_exception("invalid TSS", regs);
 }
 
 /// exception handler for segment not present
-unsafe extern "x86-interrupt" fn segment_not_present_handler(frame: ExceptionStackFrame, error_code: u32) {
-    // TODO: swap/page file
-
-    generic_exception_error_code("segment not present", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn segment_not_present_handler(regs: &InterruptRegisters) {
+    generic_exception("segment not present", regs);
 }
 
 /// exception handler for stack-segment fault
-unsafe extern "x86-interrupt" fn stack_segment_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("stack-segment fault", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn stack_segment_handler(regs: &InterruptRegisters) {
+    generic_exception("stack-segment fault", regs);
 }
 
 /// exception handler for general protection fault
-unsafe extern "x86-interrupt" fn general_protection_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("general protection fault", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn general_protection_fault_handler(regs: &InterruptRegisters) {
+    generic_exception("general protection fault", regs);
 }
 
 /// exception handler for page fault
-unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, error_code: u32) {
-    let mut address: u32;
-    asm!("mov {0}, cr2", out(reg) address);
+#[interrupt(x86_error_code)]
+unsafe extern "x86-interrupt" fn page_fault_handler(regs: &InterruptRegisters) {
+    /*let mut address: u32;
+    asm!("mov {0}, cr2", out(reg) address);*/
 
-    // no longer in task, indicate as such
+    /*// no longer in task, indicate as such
     let was_in_task = IN_TASK;
     IN_TASK = false;
 
@@ -407,85 +398,252 @@ unsafe extern "x86-interrupt" fn page_fault_handler(frame: ExceptionStackFrame, 
         } else {
             true // panic
         }
-    {
-        error!("page fault, accessed @ {:#x}", address);
-        IN_TASK = was_in_task; // make sure generic handler knows whether we were in a task or not
-        generic_exception_error_code("page fault", frame, error_code);
-    }
+    {*/
+    //IN_TASK = was_in_task; // make sure generic handler knows whether we were in a task or not
+    let mut address: u32;
+    asm!("mov {0}, cr2", out(reg) address);
 
-    IN_TASK = was_in_task;
+    error!("PANIC: page fault @ {:#x} (accessed {:#x}), error code {:#x}", regs.eip, address, regs.error_code);
+    info!("{:#?}", regs);
+    halt();
+    /*}
+
+    IN_TASK = was_in_task;*/
 }
 
 /// exception handler for x87 floating point exception
-unsafe extern "x86-interrupt" fn x87_fpu_exception_handler(frame: ExceptionStackFrame) {
-    generic_exception("x87 FPU exception", frame);
+#[interrupt(x86)]
+unsafe fn x87_fpu_exception_handler(regs: &InterruptRegisters) {
+    generic_exception("x87 FPU exception", regs);
 }
 
 /// exception handler for alignment check
-unsafe extern "x86-interrupt" fn alignment_check_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("alignment check", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn alignment_check_handler(regs: &InterruptRegisters) {
+    generic_exception("alignment check", regs);
 }
 
 /// exception handler for SIMD floating point exception
-unsafe extern "x86-interrupt" fn simd_fpu_exception_handler(frame: ExceptionStackFrame) {
-    generic_exception("SIMD FPU exception", frame);
+#[interrupt(x86)]
+unsafe fn simd_fpu_exception_handler(regs: &InterruptRegisters) {
+    generic_exception("SIMD FPU exception", regs);
 }
 
 /// exception handler for virtualization exception
-unsafe extern "x86-interrupt" fn virtualization_exception_handler(frame: ExceptionStackFrame) {
-    generic_exception("virtualization exception", frame);
+#[interrupt(x86)]
+unsafe fn virtualization_exception_handler(regs: &InterruptRegisters) {
+    generic_exception("virtualization exception", regs);
 }
 
 /// exception handler for control protection exception
-unsafe extern "x86-interrupt" fn control_protection_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("control protection exception", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn control_protection_handler(regs: &InterruptRegisters) {
+    generic_exception("control protection exception", regs);
 }
 
 /// exception handler for hypervisor injection exception
-unsafe extern "x86-interrupt" fn hypervisor_injection_handler(frame: ExceptionStackFrame) {
-    generic_exception("hypervisor injection exception", frame);
+#[interrupt(x86)]
+unsafe fn hypervisor_injection_handler(regs: &InterruptRegisters) {
+    generic_exception("hypervisor injection exception", regs);
 }
 
 /// exception handler for VMM communication exception
-unsafe extern "x86-interrupt" fn vmm_exception_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("VMM commuication exception", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn vmm_exception_handler(regs: &InterruptRegisters) {
+    generic_exception("VMM commuication exception", regs);
 }
 
 /// exception handler for security exception
-unsafe extern "x86-interrupt" fn security_exception_handler(frame: ExceptionStackFrame, error_code: u32) {
-    generic_exception_error_code("security exception", frame, error_code);
+#[interrupt(x86_error_code)]
+unsafe fn security_exception_handler(regs: &InterruptRegisters) {
+    generic_exception("security exception", regs);
 }
 
-/// structure of registers saved in the syscall handler
-#[repr(C, packed(32))]
-#[derive(Default, Debug, Copy, Clone)]
-pub struct SyscallRegisters {
-    pub ds: u32,
-    pub edi: u32,
-    pub esi: u32,
-    pub ebp: u32,
-    pub esp: u32,
-    pub ebx: u32,
-    pub edx: u32,
-    pub ecx: u32,
-    pub eax: u32,
-    pub eip: u32,
-    pub cs: u32,
-    pub eflags: u32,
-    pub useresp: u32,
-    pub ss: u32,
+pub type InterruptHandler = fn(&mut InterruptRegisters);
+
+const IRQ_HANDLER_INIT: Option<InterruptHandler> = None;
+static mut IRQ_HANDLERS: [Option<InterruptHandler>; 16] = [IRQ_HANDLER_INIT; 16];
+static mut PIT_TIMER_NUM: usize = 0;
+
+// this is a terrible and inefficient way of doing things but i don't really care
+#[interrupt(x86)]
+unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
+    /*if let Some(h) = IRQ_HANDLERS[0].as_ref() {
+        (h)(regs);
+    }*/
+    // irq0 is always timer
+    if let Some(timer) = crate::timer::get_timer(PIT_TIMER_NUM) {
+        timer.tick(regs);
+    }
+
+    outb(0x20, 0x20); // reset primary interrupt controller
 }
 
-extern "C" {
-    /// wrapper around syscall_handler to save and restore state
-    fn syscall_handler_wrapper() -> !;
+#[interrupt(x86)]
+unsafe fn irq1_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[1].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
 }
 
-/// set up idt(r) and enable interrupts
+/*#[interrupt(x86)]
+unsafe fn irq2_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[2].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
+}*/
+
+#[interrupt(x86)]
+unsafe fn irq3_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[3].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq4_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[4].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq5_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[5].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq6_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[6].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq7_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[7].as_ref() {
+        (h)(regs);
+    }
+
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq8_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[8].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20); // reset secondary interrupt controller
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq9_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[9].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq10_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[10].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq11_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[11].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq12_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[12].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq13_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[13].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq14_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[14].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+#[interrupt(x86)]
+unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
+    if let Some(h) = IRQ_HANDLERS[15].as_ref() {
+        (h)(regs);
+    }
+    
+    outb(0xa0, 0x20);
+    outb(0x20, 0x20);
+}
+
+/// how many entries do we want in our IDT
+pub const IDT_ENTRIES: usize = 256;
+
+/// the IDT itself (aligned to 16 bits for performance)
+pub static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([IDTEntry::new_empty(); IDT_ENTRIES]);
+
+/// set up and load IDT
 pub unsafe fn init() {
+    // set up PIT, basically just some magic incantation
+    outb(0x20, 0x11);
+    outb(0xa0, 0x11);
+    outb(0x21, 0x20);
+    outb(0xa1, 0x28);
+    outb(0x21, 0x04);
+    outb(0xa1, 0x02);
+    outb(0x21, 0x01);
+    outb(0xa1, 0x01);
+    outb(0x21, 0x0);
+    outb(0xa1, 0x0);
+
     debug!("idt @ {:#x}", &IDT as *const _ as usize);
 
-    info!("setting up exception vectors");
     // set up exception handlers
     IDT[Exceptions::DivideByZero as usize] = IDTEntry::new(divide_by_zero_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
@@ -508,13 +666,67 @@ pub unsafe fn init() {
     IDT[Exceptions::VMMCommunication as usize] = IDTEntry::new(vmm_exception_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Security as usize] = IDTEntry::new(security_exception_handler as *const (), IDTFlags::Exception);
 
-    info!("setting up syscall vector");
-    IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
+    // PIT IRQs
+    IDT[0x20] = IDTEntry::new(irq0_handler as *const (), IDTFlags::External);
+    IDT[0x21] = IDTEntry::new(irq1_handler as *const (), IDTFlags::External);
+    //IDT[0x22] = IDTEntry::new(irq2_handler as *const (), IDTFlags::External);
+    IDT[0x23] = IDTEntry::new(irq3_handler as *const (), IDTFlags::External);
+    IDT[0x24] = IDTEntry::new(irq4_handler as *const (), IDTFlags::External);
+    IDT[0x25] = IDTEntry::new(irq5_handler as *const (), IDTFlags::External);
+    IDT[0x26] = IDTEntry::new(irq6_handler as *const (), IDTFlags::External);
+    IDT[0x27] = IDTEntry::new(irq7_handler as *const (), IDTFlags::External);
+    IDT[0x28] = IDTEntry::new(irq8_handler as *const (), IDTFlags::External);
+    IDT[0x29] = IDTEntry::new(irq9_handler as *const (), IDTFlags::External);
+    IDT[0x2a] = IDTEntry::new(irq10_handler as *const (), IDTFlags::External);
+    IDT[0x2b] = IDTEntry::new(irq11_handler as *const (), IDTFlags::External);
+    IDT[0x2c] = IDTEntry::new(irq12_handler as *const (), IDTFlags::External);
+    IDT[0x2d] = IDTEntry::new(irq13_handler as *const (), IDTFlags::External);
+    IDT[0x2e] = IDTEntry::new(irq14_handler as *const (), IDTFlags::External);
+    IDT[0x2f] = IDTEntry::new(irq15_handler as *const (), IDTFlags::External);
 
-    // init irq handlers
-    crate::platform::irq::init();
+    //IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
 
     // load interrupt handler table
-    let idt_desc = DescriptorTablePointer::new(&IDT);
-    lidt(&idt_desc);
+    lidt(&DescriptorTablePointer::new(&IDT));
+
+    asm!("sti");
+}
+
+pub fn init_pit(hz: usize) {
+    // init PIT
+    let divisor = 1193180 / hz;
+
+    let l = (divisor & 0xff) as u8;
+    let h = ((divisor >> 8) & 0xff) as u8;
+
+    unsafe {
+        outb(0x43, 0x36);
+        outb(0x40, l);
+        outb(0x40, h);
+    }
+
+    // register timer
+    unsafe {
+        PIT_TIMER_NUM = crate::timer::register_timer(hz as u64).expect("couldn't register PIT timer");
+    }
+}
+
+/// set up IRQ handler list, separate from init() since this requires the heap to be initialized
+pub unsafe fn init_irqs() {
+    init_pit(1000);
+}
+
+#[derive(Debug)]
+pub struct InterruptRegisterError;
+
+pub fn register_irq(num: usize, handler: InterruptHandler) -> Result<(), InterruptRegisterError> {
+    unsafe {
+        // irq 0 is always the timer, which is handled separately
+        if num != 0 && IRQ_HANDLERS[num].is_none() {
+            IRQ_HANDLERS[num] = Some(handler);
+            Ok(())
+        } else {
+            Err(InterruptRegisterError)
+        }
+    }
 }

@@ -1,90 +1,368 @@
 pub mod bootloader;
-pub mod debug;
-pub mod irq;
-pub mod keyboard;
-pub mod vga;
+pub mod logger;
 
 use crate::{
     arch::{
-        paging::{alloc_pages_at, free_pages},
+        paging::{PageDir, PageDirEntry, PageTable, TableRef},
         PAGE_SIZE,
     },
-    console::{SimpleConsole, TextConsole},
+    mm::{
+        bump_alloc::{bump_alloc, init_bump_alloc},
+        heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
+        paging::{PageDirectory, PageManager, get_page_manager, set_page_manager},
+    },
+    util::{
+        array::BitSet,
+        debug::DebugArray,
+        tar::{EntryKind, TarIterator},
+    },
 };
 use alloc::{
-    alloc::{alloc, Layout},
+    alloc::Layout,
     boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::{String, ToString},
+    vec::Vec,
 };
-use bootloader::{get_multiboot_info, FramebufferKind};
-use log::{error, warn, info, debug, trace};
+use compression::prelude::*;
+use core::mem::size_of;
+use log::{debug, error, info, trace};
 
-/// creates a system console
-pub fn create_console() -> SimpleConsole {
-    let mut phys_addr = 0xb8000;
-    let mut width = 80;
-    let mut height = 25;
+pub const LINKED_BASE: usize = 0xe0000000;
+pub const KHEAP_START: usize = LINKED_BASE + 0x01000000;
+pub const KHEAP_INITIAL_SIZE: usize = 0x100000;
+pub const KHEAP_MAX_SIZE: usize = 0xffff000;
+pub const HEAP_MIN_SIZE: usize = 0x70000;
 
-    let info = get_multiboot_info();
+//static mut PAGE_MANAGER: Option<PageManager<PageDir>> = None;
+static mut PAGE_DIR: Option<PageDir> = None;
 
-    if let Some(buf) = info.framebuffer.as_ref() {
-        if buf.kind == FramebufferKind::EGAText {
-            phys_addr = buf.addr;
-            width = buf.width as usize;
-            height = buf.height as usize;
-            info!("got ega text console from bootloader @ {:#x}, {}x{}", phys_addr, width, height);
-        } else {
-            warn!("unsupported framebuffer, using defaults");
-        }
-    } else {
-        info!("no framebuffer info supplied, using defaults");
-    }
+extern "C" {
+    /// located at end of loader, used for more efficient memory mappings
+    static kernel_end: u8;
 
-    info!("mapping video memory");
+    /// base of the stack, used to map out the page below to catch stack overflow
+    static stack_base: u8;
 
-    // how big is screen memory?
-    let buf_size = width * height * core::mem::size_of::<u16>();
+    /// top of the stack
+    static stack_end: u8;
 
-    // align the buffer size to a page boundary
-    let num_pages = if buf_size % PAGE_SIZE != 0 {
-        (buf_size + PAGE_SIZE) / PAGE_SIZE
-    } else {
-        buf_size / PAGE_SIZE
-    };
+    /// base of the interrupt handler stack
+    static int_stack_base: u8;
 
-    let buf_size_aligned = num_pages * PAGE_SIZE;
-
-    debug!("buf size {:#x}, aligned to {:#x}",buf_size, buf_size_aligned);
-
-    // allocate heap memory that we can then remap to screen memory. we need it to be aligned to a page boundary so we can swap out the pages and replace them with our own
-    let layout = Layout::from_size_align(buf_size_aligned, PAGE_SIZE).unwrap();
-    let ptr = unsafe { alloc(layout) };
-
-    assert!(ptr as usize % PAGE_SIZE == 0); // make absolutely sure pointer is page aligned
-
-    // free pages we're going to remap
-    free_pages(ptr as usize, num_pages);
-
-    // remap memory
-    alloc_pages_at(ptr as usize, num_pages, phys_addr, true, true, true);
-
-    // create console
-    let raw = Box::new(vga::VGAConsole {
-        buffer: unsafe { core::slice::from_raw_parts_mut(ptr as *mut u16, width * height) },
-        width,
-        height,
-    });
-
-    let mut console =
-        SimpleConsole::new(raw, width.try_into().unwrap(), height.try_into().unwrap());
-
-    console.clear();
-
-    console
+    /// top of the interrupt handler stack
+    static int_stack_end: u8;
 }
 
-/// gets a reference to initrd data if one exists
-pub fn get_initrd() -> Option<&'static [u8]> {
-    let info = crate::platform::bootloader::get_multiboot_info();
+/// initialize paging, just cleanly map our kernel to 3.5gb
+#[no_mangle]
+pub extern "C" fn x86_prep_page_table(buf: &mut [u32; 1024]) {
+    for i in 0u32..1024 {
+        buf[i as usize] = i * PAGE_SIZE as u32 + 3;
+    }
 
-    info.mods.as_ref().map(|m| m[0].data())
+    buf[((unsafe { (&int_stack_base as *const _) as usize } - LINKED_BASE) / PAGE_SIZE) - 1] = 0;
+    buf[((unsafe { (&stack_base as *const _) as usize } - LINKED_BASE) / PAGE_SIZE) - 1] = 0;
+}
+
+#[no_mangle]
+pub fn kmain() {
+    logger::init().unwrap();
+
+    unsafe {
+        crate::arch::ints::init();
+        crate::arch::gdt::init((&int_stack_end as *const _) as u32);
+    }
+
+    let kernel_end_pos = unsafe { (&kernel_end as *const _) as usize };
+    let stack_base_pos = unsafe { (&stack_base as *const _) as usize };
+    let stack_end_pos = unsafe { (&stack_end as *const _) as usize };
+    let int_stack_base_pos = unsafe { (&int_stack_base as *const _) as usize };
+    let int_stack_end_pos = unsafe { (&int_stack_end as *const _) as usize };
+
+    // === multiboot pre-init ===
+
+    let mem_size = bootloader::init();
+    let mem_size_pages: usize = (mem_size / PAGE_SIZE as u64).try_into().unwrap();
+
+    // === paging init ===
+
+    // initialize the bump allocator so we can allocate initial memory for paging
+    unsafe {
+        init_bump_alloc(LINKED_BASE);
+    }
+
+    // initialize the pagemanager to manage our page allocations
+    set_page_manager(PageManager::new({
+        let layout = Layout::new::<u32>();
+        let ptr = unsafe { bump_alloc::<u32>(Layout::from_size_align(mem_size_pages / 32 * layout.size(), layout.align()).unwrap()).pointer };
+        let mut bitset = BitSet::place_at(ptr, mem_size_pages);
+        bitset.clear_all();
+        bootloader::reserve_pages(&mut bitset);
+        bitset
+    }));
+
+    // grab a reference to the page manager so we don't have to continuously lock and unlock it while we're doing initial memory allocations
+    let mut manager = get_page_manager();
+
+    // page directory for kernel
+    let mut page_dir = {
+        let layout = Layout::from_size_align(size_of::<[Option<TableRef<'static>>; 1024]>(), PAGE_SIZE).unwrap();
+        let tables = unsafe { &mut *bump_alloc::<[Option<TableRef<'static>>; 1024]>(layout).pointer };
+        for table_ref in tables.iter_mut() {
+            *table_ref = None;
+        }
+
+        let ptr = unsafe { bump_alloc::<[PageDirEntry; 1024]>(Layout::from_size_align(size_of::<[PageDirEntry; 1024]>(), PAGE_SIZE).unwrap()) };
+
+        PageDir::from_allocated(tables, unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap())
+    };
+
+    let heap_reserved = PAGE_SIZE * 2;
+
+    // allocate pages
+    debug!("mapping kernel ({LINKED_BASE:#x} - {kernel_end_pos:#x})");
+
+    for addr in (LINKED_BASE..kernel_end_pos).step_by(PAGE_SIZE) {
+        if !page_dir.has_page_table(addr.try_into().unwrap()) {
+            debug!("allocating new page table");
+            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) };
+            page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+        }
+
+        manager.alloc_frame_at(&mut page_dir, addr, (addr - LINKED_BASE) as u64, false, true).unwrap();
+    }
+
+    // free the page below the stack, to catch stack overflow
+    debug!("stack @ {stack_base_pos:#x} - {stack_end_pos:#x}");
+    manager.free_frame(&mut page_dir, stack_base_pos - PAGE_SIZE).unwrap();
+
+    debug!("interrupt stack @ {int_stack_base_pos:#x} - {int_stack_end_pos:#x}");
+    manager.free_frame(&mut page_dir, int_stack_base_pos - PAGE_SIZE).unwrap();
+
+    let heap_init_end = KHEAP_START + HEAP_MIN_SIZE;
+    debug!("mapping heap ({KHEAP_START:#x} - {heap_init_end:#x})");
+
+    for addr in (KHEAP_START..heap_init_end).step_by(PAGE_SIZE) {
+        if !page_dir.has_page_table(addr.try_into().unwrap()) {
+            debug!("allocating new page table");
+            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) };
+            page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+        }
+
+        manager.alloc_frame(&mut page_dir, addr, false, true).unwrap();
+    }
+
+    // let go of our lock on the global page manager, since it would likely cause problems with the allocator
+    drop(manager);
+
+    // switch to our new page directory so all the pages we've just mapped will be accessible
+    unsafe {
+        // if we don't set this as global state something breaks, haven't bothered figuring out what yet
+        PAGE_DIR = Some(page_dir);
+
+        PAGE_DIR.as_ref().unwrap().switch_to();
+    }
+
+    // === heap init ===
+
+    // set up allocator with minimum size
+    ALLOCATOR.init(KHEAP_START, HEAP_MIN_SIZE);
+
+    ALLOCATOR.reserve_memory(Some(Layout::from_size_align(heap_reserved, PAGE_SIZE).unwrap()));
+
+    fn expand(old_top: usize, new_top: usize, alloc: &ExpandAllocCallback, _free: &ExpandFreeCallback) -> Result<usize, ()> {
+        debug!("expand (old_top: {old_top:#x}, new_top: {new_top:#x})");
+        if new_top <= KHEAP_START + KHEAP_MAX_SIZE {
+            let new_top = (new_top / PAGE_SIZE) * PAGE_SIZE + PAGE_SIZE;
+            debug!("new_top now @ {new_top:#x}");
+
+            let old_top = (old_top / PAGE_SIZE) * PAGE_SIZE;
+            debug!("old_top now @ {old_top:#x}");
+
+            let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+
+            for addr in (old_top..new_top).step_by(PAGE_SIZE) {
+                if !dir.has_page_table(addr.try_into().unwrap()) {
+                    trace!("allocating new page table");
+
+                    let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
+                        Ok(ptr) => ptr,
+                        Err(()) => return Ok(addr), // fail gracefully if we can't allocate
+                    };
+                    let phys = dir.virt_to_phys(virt as usize).ok_or(())?;
+
+                    dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *(virt as *mut PageTable) }, phys.try_into().unwrap(), true);
+                }
+
+                get_page_manager().alloc_frame(dir, addr, false, true).map_err(|err| {
+                    error!("error allocating page for heap: {err:?}");
+                })?;
+            }
+
+            Ok(new_top)
+        } else {
+            Err(())
+        }
+    }
+
+    ALLOCATOR.set_expand_callback(&expand);
+
+    unsafe {
+        crate::mm::bump_alloc::free_unused_bump_alloc(&mut get_page_manager(), PAGE_DIR.as_mut().unwrap());
+    }
+
+    get_page_manager().print_free();
+
+    // === multiboot init after heap init ===
+
+    unsafe {
+        bootloader::init_after_heap(&mut get_page_manager(), PAGE_DIR.as_mut().unwrap());
+    }
+
+    let info = bootloader::get_multiboot_info();
+
+    debug!("{info:?}");
+
+    // === discover modules ===
+
+    if info.mods.is_none() || info.mods.as_ref().unwrap().is_empty() {
+        panic!("no modules found, cannot continue booting");
+    }
+
+    let bootloader_modules = info.mods.as_ref().unwrap();
+
+    let mut modules: BTreeMap<String, &'static [u8]> = BTreeMap::new();
+
+    fn discover_module(modules: &mut BTreeMap<String, &'static [u8]>, name: String, data: &'static [u8]) {
+        debug!("found module {name:?}: {:?}", DebugArray(data));
+
+        match name.split('.').last() {
+            Some("tar") => {
+                info!("discovering all files in {name:?} as modules");
+
+                for entry in TarIterator::new(data) {
+                    if entry.header.kind() == EntryKind::NormalFile {
+                        discover_module(modules, entry.header.name().to_string(), entry.contents);
+                    }
+                }
+            }
+            Some("bz2") => {
+                // remove the extension from the name of the compressed file
+                let new_name = {
+                    let mut split: Vec<&str> = name.split('.').collect();
+                    split.pop();
+                    split.join(".")
+                };
+
+                info!("decompressing {name:?} as {new_name:?}");
+
+                match data.iter().cloned().decode(&mut BZip2Decoder::new()).collect::<Result<Vec<_>, _>>() {
+                    // Box::leak() prevents the decompressed data from being dropped, giving it the 'static lifetime since it doesn't
+                    // contain any references to anything else
+                    Ok(decompressed) => discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice())),
+                    Err(err) => error!("error decompressing {name}: {err:?}"),
+                }
+            }
+            Some("gz") => {
+                let new_name = {
+                    let mut split: Vec<&str> = name.split('.').collect();
+                    split.pop();
+                    split.join(".")
+                };
+
+                info!("decompressing {name:?} as {new_name:?}");
+
+                match data.iter().cloned().decode(&mut GZipDecoder::new()).collect::<Result<Vec<_>, _>>() {
+                    Ok(decompressed) => discover_module(modules, new_name, Box::leak(decompressed.into_boxed_slice())),
+                    Err(err) => error!("error decompressing {name}: {err:?}"),
+                }
+            }
+            // no special handling for this file, assume it's a module
+            _ => {
+                modules.insert(name, data);
+            }
+        }
+    }
+
+    for module in bootloader_modules.iter() {
+        discover_module(&mut modules, module.string().to_string(), module.data());
+    }
+
+    // === add special modules ===
+
+    // add cmdline module and parse cmdline at the same time
+    let cmdline = bootloader::get_multiboot_info().cmdline.filter(|s| !s.is_empty()).map(|cmdline| {
+        modules.insert("*cmdline".to_string(), cmdline.as_bytes());
+
+        let mut map = BTreeMap::new();
+
+        for arg in cmdline.split(' ') {
+            if !arg.is_empty() {
+                let arg = arg.split('=').collect::<Vec<_>>();
+                map.insert(arg[0], arg.get(1).copied().unwrap_or(""));
+            }
+        }
+
+        map
+    });
+
+    debug!("{:?}", cmdline);
+
+    // === print module info ===
+
+    let mut num_modules = 0;
+    let mut max_len = 0;
+    for (name, _) in modules.iter() {
+        num_modules += 1;
+        if name.len() > max_len {
+            max_len = name.len();
+        }
+    }
+
+    if num_modules == 1 {
+        info!("1 module:");
+    } else {
+        info!("{num_modules} modules:");
+    }
+
+    for (name, data) in modules.iter() {
+        let size = if data.len() > 1024 * 1024 * 10 {
+            format!("{} MB", data.len() / 1024 / 1024)
+        } else if data.len() > 1024 * 10 {
+            format!("{} KB", data.len() / 1024)
+        } else {
+            format!("{} B", data.len())
+        };
+        info!("\t{name:max_len$} : {size}");
+    }
+
+    get_page_manager().print_free();
+
+    unsafe {
+        crate::arch::ints::init_irqs();
+    }
+
+    let timer = crate::timer::get_timer(0).unwrap();
+    timer.add_timer_in(timer.hz(), test_timer_callback).unwrap();
+
+    crate::arch::init();
+
+    unsafe {
+        //crate::arch::halt();
+
+        use core::arch::asm;
+
+        loop {
+            asm!("sti; hlt");
+        }
+    }
+}
+
+fn test_timer_callback(_regs: &mut crate::arch::Registers) {
+    info!("timed out!");
+
+    let timer = crate::timer::get_timer(0).unwrap();
+    timer.add_timer_in(timer.hz(), test_timer_callback).unwrap();
 }

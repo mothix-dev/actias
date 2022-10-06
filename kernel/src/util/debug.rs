@@ -1,5 +1,3 @@
-pub mod array;
-
 use core::{fmt, fmt::LowerHex};
 
 pub struct FormatHex<T: LowerHex>(pub T);

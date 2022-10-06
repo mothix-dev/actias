@@ -1,64 +1,126 @@
 pub mod gdt;
 pub mod ints;
 pub mod paging;
-pub mod syscalls;
-pub mod tasks;
 
-use crate::platform::bootloader;
+use alloc::{string::ToString, format};
 use core::arch::asm;
-use log::{error, warn, info, debug, trace};
+use log::{info, warn};
+use raw_cpuid::{CpuId, CpuIdResult};
+use x86::bits32::eflags::EFlags;
 
 // various useful constants
 pub const MEM_TOP: usize = 0xffffffff;
-pub const LINKED_BASE: usize = 0xc0000000;
-pub const KHEAP_START: usize = LINKED_BASE + 0x10000000;
 
 pub const PAGE_SIZE: usize = 0x1000;
 pub const INV_PAGE_SIZE: usize = !(PAGE_SIZE - 1);
 
 pub const MAX_STACK_FRAMES: usize = 1024;
 
-pub static mut MEM_SIZE: u64 = 0; // filled in later by BIOS or something similar
 
-/// halt system
-pub fn halt() -> ! {
-    info!("halting");
-
+/// gets the value of the eflags register in the cpu as an easy to use struct
+pub fn get_eflags() -> EFlags {
     unsafe {
-        loop {
-            asm!("cli; hlt"); // clear interrupts, halt
-        }
+        let mut flags: u32;
+
+        asm!(
+            "pushfd",
+            "pop {}",
+            out(reg) flags,
+        );
+
+        EFlags::from_bits(flags).unwrap()
     }
 }
 
-/// initialize sub-modules
+/// sets the value of the eflags register in the cpu
+pub fn set_eflags(flags: EFlags) {
+    unsafe {
+        let flags: u32 = flags.bits();
+
+        asm!(
+            "push {}",
+            "popfd",
+            in(reg) flags,
+        );
+    }
+}
+
+// ==== standard architecture exports ====
+
+pub use ints::register_irq;
+
+/// registers passed to interrupt handlers
+pub type Registers = ints::InterruptRegisters;
+
+/// page directory type
+pub type PageDirectory<'a> = paging::PageDir<'a>;
+
+/// exits emulators if applicable then completely halts the CPU
+///
+/// # Safety
+///
+/// yeah
+pub unsafe fn halt() -> ! {
+    warn!("halting CPU");
+
+    // exit qemu
+    x86::io::outb(0x501, 0x31);
+
+    // exit bochs
+    x86::io::outw(0x8a00, 0x8a00);
+    x86::io::outw(0x8a00, 0x8ae0);
+
+    // halt cpu
+    loop {
+        asm!("cli; hlt");
+    }
+}
+
 pub fn init() {
-    info!("bootloader pre init");
-    unsafe {
-        bootloader::pre_init();
+    fn cpuid_reader(leaf: u32, subleaf: u32) -> CpuIdResult {
+        let eax: u32;
+        let ebx: u32;
+        let ecx: u32;
+        let edx: u32;
+
+        unsafe {
+            asm!(
+                "cpuid",
+
+                inout("eax") leaf => eax,
+                out("ebx") ebx,
+                inout("ecx") subleaf => ecx,
+                out("edx") edx,
+            );
+        }
+
+        CpuIdResult { eax, ebx, ecx, edx }
     }
 
-    info!("initializing GDT");
-    unsafe {
-        gdt::init();
-    }
-    info!("initializing interrupts");
-    unsafe {
-        ints::init();
-    }
+    let cpuid = CpuId::with_cpuid_fn(cpuid_reader);
 
-    info!("bootloader init");
-    unsafe {
-        bootloader::init();
-    }
+    info!("{:?}", cpuid);
 
-    info!("initializing paging");
-    unsafe {
-        paging::init();
-    }
-}
+    let model = 
+        if let Some(brand) = cpuid.get_processor_brand_string() {
+            brand.as_str().to_string()
+        } else if let Some(feature_info) = cpuid.get_feature_info() {
+            let vendor = cpuid.get_vendor_info().map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
+            let family = feature_info.family_id();
+            let model = feature_info.model_id();
+            let stepping = feature_info.stepping_id();
+            format!("{vendor} family {family} model {model} stepping {stepping}")
+        } else {
+            "unknown".to_string()
+        };
 
-pub fn init_after_heap() {
-    info!("bootloader init after heap");
-    bootloader::init_after_heap();
+    info!("cpu model is {model:?}");
+
+    let has_apic =
+        match cpuid.get_feature_info() {
+            Some(feature_info) => feature_info.has_apic(),
+            None => false,
+        };
+
+    info!("has apic: {has_apic:?}");
 }

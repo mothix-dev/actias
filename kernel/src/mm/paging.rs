@@ -1,15 +1,14 @@
 //! paging abstraction layer
 
-use crate::{
-    types::errno::Errno,
-    util::{array::BitSet, FormatHex},
-};
+use crate::util::{array::BitSet, debug::FormatHex};
+//use common::types::errno::Errno;
 use alloc::{
     alloc::{alloc, dealloc, Layout},
     vec::Vec,
 };
 use core::{fmt, marker::PhantomData};
 use log::{debug, error, trace};
+use spin::{Mutex, MutexGuard};
 
 /// an error that can be returned from paging operations
 pub enum PageError {
@@ -23,7 +22,7 @@ pub enum PageError {
 impl fmt::Display for PageError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", match self {
-            Self::NoAvailableFrames => "no available frames",
+            Self::NoAvailableFrames => "no available frames (out of memory)",
             Self::FrameUnused => "frame is unused",
             Self::FrameInUse => "frame already in use",
             Self::AllocError => "error allocating memory for table",
@@ -181,7 +180,7 @@ pub trait PageDirectory {
     ///
     /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
     /// page directory, and things can and will break if it's called on any other page directory
-    unsafe fn map_memory_from<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, Errno>
+    unsafe fn map_memory_from<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, /*Errno*/ ()>
     where O: FnOnce(&mut [u8]) -> R {
         let page_size = self.page_size();
 
@@ -218,7 +217,7 @@ pub trait PageDirectory {
 
         if ptr.is_null() {
             error!("error allocating buffer in map_memory()");
-            Err(Errno::OutOfMemory)?
+            Err(/*Errno::OutOfMemory*/ ())?
         }
 
         assert!(ptr as usize % page_size == 0); // make absolutely sure pointer is page aligned
@@ -233,7 +232,7 @@ pub trait PageDirectory {
             error!("error reserving memory in map_memory(): {:?}", err);
             dealloc(ptr, layout);
 
-            Err(Errno::OutOfMemory)?
+            Err(/*Errno::OutOfMemory*/ ())?
         }
 
         for i in (ptr as usize..ptr as usize + buf_len).step_by(page_size) {
@@ -245,7 +244,7 @@ pub trait PageDirectory {
                     debug!("aborting map (before remap), dealloc()ing");
                     dealloc(ptr, layout);
 
-                    Err(Errno::BadAddress)?
+                    Err(/*Errno::BadAddress*/ ())?
                 }
             };
             debug!("existing: {:#x} -> {:#x}", i, addr);
@@ -280,7 +279,7 @@ pub trait PageDirectory {
                     }
                     dealloc(ptr, layout);
 
-                    Err(Errno::BadAddress)?
+                    Err(/*Errno::BadAddress*/ ())?
                 }
             };
 
@@ -530,5 +529,47 @@ impl<T: PageDirectory> PageManager<T> {
         let bits_used = self.frame_set.bits_used;
         let size = self.frame_set.size;
         debug!("{}/{} mapped ({}% usage)", bits_used, size, (bits_used * 100) / size);
+    }
+
+    /// sets all the pages mapped in the given page directory to used in this PageManager, so that no future allocations use the same memory
+    ///
+    /// note: this is slow! very slow! this should be done as infrequently as possible
+    pub fn sync_from_dir(&mut self, dir: &T) {
+        let page_size = dir.page_size();
+
+        // iterate over all virtual addresses
+        for i in (0..=usize::MAX).step_by(page_size) {
+            if dir.get_page(i).is_some() {
+                //info!("got page @ {:#x}", i);
+                self.frame_set.set(i / page_size);
+            }
+        }
+    }
+}
+
+/// our kernel-wide page manager instance
+static mut PAGE_MANAGER: Option<Mutex<PageManager<crate::arch::PageDirectory>>> = None;
+
+/// gets the global page manager, locked with a spinlock
+pub fn get_page_manager() -> MutexGuard<'static, PageManager<crate::arch::PageDirectory<'static>>> {
+    unsafe {
+        let manager = PAGE_MANAGER.as_ref().expect("page manager not initialized");
+
+        if manager.is_locked() {
+            debug!("warning: page manager is locked");
+        }
+
+        manager.lock()
+    }
+}
+
+/// sets the global page manager. can only be called once
+pub fn set_page_manager(manager: PageManager<crate::arch::PageDirectory<'static>>) {
+    unsafe {
+        if PAGE_MANAGER.is_some() {
+            panic!("cannot initialize pagemanager twice");
+        } else {
+            PAGE_MANAGER = Some(Mutex::new(manager));
+        }
     }
 }

@@ -27,6 +27,8 @@ pub struct RawPtrArray<T> {
     pub size: usize,
 }
 
+unsafe impl<T> Send for RawPtrArray<T> {}
+
 impl<T> RawPtrArray<T> {
     /// create new raw ptr array and allocate memory for it
     pub fn new(size: usize) -> Self {
@@ -210,7 +212,7 @@ impl BitSet {
 impl fmt::Debug for BitSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         for i in 0..self.size {
-            write!(f, "{}", if self.test(i) { 1 } else { 0 })?;
+            write!(f, "{}", self.test(i) as u8)?;
         }
 
         Ok(())

@@ -6,6 +6,7 @@ use x86::io::{inb, outb};
 /// Write a string to the output channel
 ///
 /// # Safety
+///
 /// This method is unsafe because it does port accesses without synchronisation
 pub unsafe fn serial_puts(s: &str) {
     for b in s.bytes() {
@@ -16,6 +17,7 @@ pub unsafe fn serial_puts(s: &str) {
 /// Write a single byte to the output channel
 ///
 /// # Safety
+///
 /// This method is unsafe because it does port accesses without synchronisation
 pub unsafe fn serial_putb(b: u8) {
     // Wait for the serial port's fifo to not be empty
@@ -56,10 +58,14 @@ impl Log for Logger {
     #[allow(unused_must_use)]
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
+            let level = record.level();
+            let width = 5;
+            let args = record.args();
+
             if let Some(path) = record.module_path() {
-                writeln!(&mut SerialWriter, "{:width$} [{}] {}", record.level(), path, record.args(), width = 5);
+                writeln!(&mut SerialWriter, "{level:width$} [{path}] {args}");
             } else {
-                writeln!(&mut SerialWriter, "{:width$} [unknown] {}", record.level(), record.args(), width = 5);
+                writeln!(&mut SerialWriter, "{level:width$} [unknown] {args}");
             }
         }
     }
@@ -68,7 +74,7 @@ impl Log for Logger {
 }
 
 /// our logger that we will log things with
-static LOGGER: Logger = Logger { max_level: LevelFilter::Trace };
+static LOGGER: Logger = Logger { max_level: LevelFilter::Info };
 
 /// initialize the logger, setting the max level in the process
 pub fn init() -> Result<(), SetLoggerError> {
