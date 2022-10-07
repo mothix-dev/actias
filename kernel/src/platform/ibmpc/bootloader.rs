@@ -184,7 +184,7 @@ impl MultibootInfo {
 
             let chars = s.as_bytes();
             let len = chars.len();
-            let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<u8>(Layout::from_size_align(len, 1).unwrap()).pointer, len) };
+            let new = unsafe { slice::from_raw_parts_mut(bump_alloc::<u8>(Layout::from_size_align(len, 1).unwrap()).unwrap().pointer, len) };
 
             new.copy_from_slice(chars);
 
@@ -197,7 +197,12 @@ impl MultibootInfo {
             if len > 0 {
                 let new = unsafe {
                     let layout = Layout::new::<MultibootModuleCopy>();
-                    slice::from_raw_parts_mut(bump_alloc::<MultibootModuleCopy>(Layout::from_size_align(layout.size() * len, layout.align()).unwrap()).pointer, len)
+                    slice::from_raw_parts_mut(
+                        bump_alloc::<MultibootModuleCopy>(Layout::from_size_align(layout.size() * len, layout.align()).unwrap())
+                            .unwrap()
+                            .pointer,
+                        len,
+                    )
                 };
 
                 for i in 0..len {
@@ -223,7 +228,7 @@ impl MultibootInfo {
             if len > 0 {
                 let new = unsafe {
                     let layout = Layout::new::<MemMapEntry>();
-                    slice::from_raw_parts_mut(bump_alloc::<MemMapEntry>(Layout::from_size_align(layout.size() * len, layout.align()).unwrap()).pointer, len)
+                    slice::from_raw_parts_mut(bump_alloc::<MemMapEntry>(Layout::from_size_align(layout.size() * len, layout.align()).unwrap()).unwrap().pointer, len)
                 };
 
                 for (i, region) in iter.filter(|r| r.length > 0).enumerate() {

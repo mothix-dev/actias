@@ -19,9 +19,9 @@ pub mod arch;
 pub mod platform;
 
 pub mod mm;
-pub mod util;
 pub mod task;
 pub mod timer;
+pub mod util;
 
 use log::error;
 

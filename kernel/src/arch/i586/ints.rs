@@ -10,12 +10,12 @@ use crate::util::debug::FormatHex;
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
 use core::{arch::asm, fmt};
+use interrupt_macro::*;
 use log::{debug, error, info};
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
     io::outb,
 };
-use interrupt_macro::*;
 
 /// IDT flags
 #[bitmask(u8)]
@@ -62,8 +62,8 @@ impl IDTEntry {
         Self {
             // not sure if casting to u16 will only return lower 2 bytes?
             isr_low: ((isr as u32) & 0xffff) as u16, // gets address of function pointer, then chops off the top 2 bytes
-            isr_high: ((isr as u32) >> 16) as u16, // upper 2 bytes
-            kernel_cs: 0x08,                       // offset of kernel code selector in GDT (see boot.S)
+            isr_high: ((isr as u32) >> 16) as u16,   // upper 2 bytes
+            kernel_cs: 0x08,                         // offset of kernel code selector in GDT (see boot.S)
             attributes: flags.0,
             reserved: 0,
         }
@@ -547,7 +547,7 @@ unsafe fn irq8_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[8].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20); // reset secondary interrupt controller
     outb(0x20, 0x20);
 }
@@ -557,7 +557,7 @@ unsafe fn irq9_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[9].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -567,7 +567,7 @@ unsafe fn irq10_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[10].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -577,7 +577,7 @@ unsafe fn irq11_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[11].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -587,7 +587,7 @@ unsafe fn irq12_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[12].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -597,7 +597,7 @@ unsafe fn irq13_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[13].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -607,7 +607,7 @@ unsafe fn irq14_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[14].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -617,7 +617,7 @@ unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[15].as_ref() {
         (h)(regs);
     }
-    
+
     outb(0xa0, 0x20);
     outb(0x20, 0x20);
 }
@@ -688,8 +688,6 @@ pub unsafe fn init() {
 
     // load interrupt handler table
     lidt(&DescriptorTablePointer::new(&IDT));
-
-    asm!("sti");
 }
 
 pub fn init_pit(hz: usize) {

@@ -1,12 +1,9 @@
 //! simple but hopefully scalable timer framework
 
 use crate::arch::Registers;
-use alloc::{
-    collections::VecDeque,
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic;
-use log::{warn, trace};
+use log::{trace, warn};
 
 pub type TimerCallback = fn(&mut Registers);
 
@@ -103,7 +100,8 @@ impl TimerState {
                 Err(TimerAddError)?;
             }
 
-            match self.timers.iter().position(|t| t.expires_at >= expires_at) { // keep the timer queue sorted
+            match self.timers.iter().position(|t| t.expires_at >= expires_at) {
+                // keep the timer queue sorted
                 Some(index) => self.timers.insert(index, timer),
                 None => self.timers.push_back(timer),
             }
@@ -170,7 +168,5 @@ pub fn register_timer(hz: u64) -> Result<usize, TimerRegisterError> {
 /// gets a registered timer
 pub fn get_timer(index: usize) -> Option<&'static mut TimerState> {
     // no need to lock here since timer states handle their own locking
-    unsafe {
-        TIMER_STATES.get_mut(index)
-    }
+    unsafe { TIMER_STATES.get_mut(index) }
 }

@@ -2,9 +2,12 @@
 
 use super::{get_eflags, PAGE_SIZE};
 use crate::{
-    mm::paging::{PageDirectory, PageError, PageFrame},
-    util::debug::FormatHex,
+    mm::{
+        bump_alloc::bump_alloc,
+        paging::{PageDirectory, PageError, PageFrame},
+    },
     platform::LINKED_BASE,
+    util::debug::FormatHex,
 };
 use alloc::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use bitmask_enum::bitmask;
@@ -465,6 +468,19 @@ impl<'a> PageDir<'a> {
                 can_free: true,
             }
         }
+    }
+
+    /// constructs a new PageDir, allocating memory from it from the bump allocator
+    pub fn bump_allocate() -> PageDir<'static> {
+        let layout = Layout::from_size_align(size_of::<[Option<TableRef<'static>>; 1024]>(), PAGE_SIZE).unwrap();
+        let tables = unsafe { &mut *bump_alloc::<[Option<TableRef<'static>>; 1024]>(layout).unwrap().pointer };
+        for table_ref in tables.iter_mut() {
+            *table_ref = None;
+        }
+
+        let ptr = unsafe { bump_alloc::<[PageDirEntry; 1024]>(Layout::from_size_align(size_of::<[PageDirEntry; 1024]>(), PAGE_SIZE).unwrap()).unwrap() };
+
+        PageDir::from_allocated(tables, unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap())
     }
 
     /// constructs a new PageDir with a given physical page table array and the physical address of said array

@@ -3,13 +3,13 @@ pub mod logger;
 
 use crate::{
     arch::{
-        paging::{PageDir, PageDirEntry, PageTable, TableRef},
+        paging::{PageDir, PageTable},
         PAGE_SIZE,
     },
     mm::{
         bump_alloc::{bump_alloc, init_bump_alloc},
         heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
-        paging::{PageDirectory, PageManager, get_page_manager, set_page_manager},
+        paging::{get_page_manager, set_page_manager, PageDirectory, PageManager},
     },
     util::{
         array::BitSet,
@@ -26,7 +26,7 @@ use alloc::{
     vec::Vec,
 };
 use compression::prelude::*;
-use core::mem::size_of;
+use core::{arch::asm, mem::size_of};
 use log::{debug, error, info, trace};
 
 pub const LINKED_BASE: usize = 0xe0000000;
@@ -71,6 +71,10 @@ pub fn kmain() {
     logger::init().unwrap();
 
     unsafe {
+        bootloader::pre_init();
+    }
+
+    unsafe {
         crate::arch::ints::init();
         crate::arch::gdt::init((&int_stack_end as *const _) as u32);
     }
@@ -96,7 +100,11 @@ pub fn kmain() {
     // initialize the pagemanager to manage our page allocations
     set_page_manager(PageManager::new({
         let layout = Layout::new::<u32>();
-        let ptr = unsafe { bump_alloc::<u32>(Layout::from_size_align(mem_size_pages / 32 * layout.size(), layout.align()).unwrap()).pointer };
+        let ptr = unsafe {
+            bump_alloc::<u32>(Layout::from_size_align(mem_size_pages / 32 * layout.size(), layout.align()).unwrap())
+                .unwrap()
+                .pointer
+        };
         let mut bitset = BitSet::place_at(ptr, mem_size_pages);
         bitset.clear_all();
         bootloader::reserve_pages(&mut bitset);
@@ -107,17 +115,7 @@ pub fn kmain() {
     let mut manager = get_page_manager();
 
     // page directory for kernel
-    let mut page_dir = {
-        let layout = Layout::from_size_align(size_of::<[Option<TableRef<'static>>; 1024]>(), PAGE_SIZE).unwrap();
-        let tables = unsafe { &mut *bump_alloc::<[Option<TableRef<'static>>; 1024]>(layout).pointer };
-        for table_ref in tables.iter_mut() {
-            *table_ref = None;
-        }
-
-        let ptr = unsafe { bump_alloc::<[PageDirEntry; 1024]>(Layout::from_size_align(size_of::<[PageDirEntry; 1024]>(), PAGE_SIZE).unwrap()) };
-
-        PageDir::from_allocated(tables, unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap())
-    };
+    let mut page_dir = PageDir::bump_allocate();
 
     let heap_reserved = PAGE_SIZE * 2;
 
@@ -127,7 +125,7 @@ pub fn kmain() {
     for addr in (LINKED_BASE..kernel_end_pos).step_by(PAGE_SIZE) {
         if !page_dir.has_page_table(addr.try_into().unwrap()) {
             debug!("allocating new page table");
-            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) };
+            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
             page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
         }
 
@@ -147,7 +145,7 @@ pub fn kmain() {
     for addr in (KHEAP_START..heap_init_end).step_by(PAGE_SIZE) {
         if !page_dir.has_page_table(addr.try_into().unwrap()) {
             debug!("allocating new page table");
-            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) };
+            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
             page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
         }
 
@@ -214,6 +212,12 @@ pub fn kmain() {
     }
 
     get_page_manager().print_free();
+
+    // === enable interrupts ===
+
+    unsafe {
+        asm!("sti");
+    }
 
     // === multiboot init after heap init ===
 
@@ -351,8 +355,6 @@ pub fn kmain() {
 
     unsafe {
         //crate::arch::halt();
-
-        use core::arch::asm;
 
         loop {
             asm!("sti; hlt");

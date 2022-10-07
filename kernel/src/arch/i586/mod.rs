@@ -2,7 +2,7 @@ pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use alloc::{string::ToString, format};
+use alloc::{format, string::ToString};
 use core::arch::asm;
 use log::{info, warn};
 use raw_cpuid::{CpuId, CpuIdResult};
@@ -15,7 +15,6 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub const INV_PAGE_SIZE: usize = !(PAGE_SIZE - 1);
 
 pub const MAX_STACK_FRAMES: usize = 1024;
-
 
 /// gets the value of the eflags register in the cpu as an easy to use struct
 pub fn get_eflags() -> EFlags {
@@ -101,26 +100,24 @@ pub fn init() {
 
     info!("{:?}", cpuid);
 
-    let model = 
-        if let Some(brand) = cpuid.get_processor_brand_string() {
-            brand.as_str().to_string()
-        } else if let Some(feature_info) = cpuid.get_feature_info() {
-            let vendor = cpuid.get_vendor_info().map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
-            let family = feature_info.family_id();
-            let model = feature_info.model_id();
-            let stepping = feature_info.stepping_id();
-            format!("{vendor} family {family} model {model} stepping {stepping}")
-        } else {
-            "unknown".to_string()
-        };
+    let model = if let Some(brand) = cpuid.get_processor_brand_string() {
+        brand.as_str().to_string()
+    } else if let Some(feature_info) = cpuid.get_feature_info() {
+        let vendor = cpuid.get_vendor_info().map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let family = feature_info.family_id();
+        let model = feature_info.model_id();
+        let stepping = feature_info.stepping_id();
+        format!("{vendor} family {family} model {model} stepping {stepping}")
+    } else {
+        "unknown".to_string()
+    };
 
     info!("cpu model is {model:?}");
 
-    let has_apic =
-        match cpuid.get_feature_info() {
-            Some(feature_info) => feature_info.has_apic(),
-            None => false,
-        };
+    let has_apic = match cpuid.get_feature_info() {
+        Some(feature_info) => feature_info.has_apic(),
+        None => false,
+    };
 
     info!("has apic: {has_apic:?}");
 }

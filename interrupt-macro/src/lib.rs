@@ -3,7 +3,7 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::{quote, quote_spanned};
-use syn::{spanned::Spanned, ItemFn, parse_macro_input};
+use syn::{parse_macro_input, spanned::Spanned, ItemFn};
 
 /// procedural macro to seamlessly declare interrupt handler wrappers
 #[proc_macro_attribute]
@@ -11,11 +11,12 @@ pub fn interrupt(metadata: TokenStream, input: TokenStream) -> TokenStream {
     let kind = parse_macro_input!(metadata as Ident);
     let input = parse_macro_input!(input as ItemFn);
 
-    if input.sig.unsafety.is_none() { // make sure function is marked as unsafe
+    // make sure function's signature is ok
+    if input.sig.unsafety.is_none() {
         TokenStream::from(quote_spanned! {
             input.sig.span() => compile_error!("interrupt handlers must be unsafe");
         })
-    } else if !matches!(input.sig.output, syn::ReturnType::Default) { // make sure function doesn't return anything
+    } else if !matches!(input.sig.output, syn::ReturnType::Default) {
         TokenStream::from(quote_spanned! {
             input.sig.output.span() => compile_error!("interrupt handlers cannot return values");
         })
@@ -59,7 +60,7 @@ pub fn interrupt(metadata: TokenStream, input: TokenStream) -> TokenStream {
                             "mov gs, bx",
 
                             "popa",
-                            
+
                             "add esp, 4", // clean up error code
 
                             "iretd",
@@ -73,7 +74,7 @@ pub fn interrupt(metadata: TokenStream, input: TokenStream) -> TokenStream {
                         #block
                     }
                 })
-            },
+            }
             // x86 exception with error code pushed
             "x86_error_code" => {
                 let name = &input.sig.ident;
@@ -81,7 +82,7 @@ pub fn interrupt(metadata: TokenStream, input: TokenStream) -> TokenStream {
                 let call_asm = format!("call {}", internal_name);
                 let inputs = &input.sig.inputs;
                 let block = &input.block;
-                
+
                 TokenStream::from(quote! {
                     #[naked]
                     unsafe extern fn #name() -> ! {
@@ -124,13 +125,11 @@ pub fn interrupt(metadata: TokenStream, input: TokenStream) -> TokenStream {
                         #block
                     }
                 })
-            },
+            }
             // unknown interrupt kind
-            _ => {
-                TokenStream::from(quote_spanned! {
-                    kind.span() => compile_error!("unsupported interrupt kind");
-                })
-            },
+            _ => TokenStream::from(quote_spanned! {
+                kind.span() => compile_error!("unsupported interrupt kind");
+            }),
         }
     }
 }
