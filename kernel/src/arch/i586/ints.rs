@@ -705,7 +705,7 @@ pub fn init_pit(hz: usize) {
 
     // register timer
     unsafe {
-        PIT_TIMER_NUM = crate::timer::register_timer(hz as u64).expect("couldn't register PIT timer");
+        PIT_TIMER_NUM = crate::timer::register_timer(Some(crate::task::cpu::ThreadID { core: 0, thread: 0 }), hz as u64).expect("couldn't register PIT timer");
     }
 }
 

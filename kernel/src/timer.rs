@@ -1,11 +1,11 @@
 //! simple but hopefully scalable timer framework
 
-use crate::arch::Registers;
+use crate::{arch::Registers, task::cpu::ThreadID};
 use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic;
 use log::{trace, warn};
 
-pub type TimerCallback = fn(&mut Registers);
+pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers);
 
 struct Timer {
     expires_at: u64,
@@ -13,6 +13,8 @@ struct Timer {
 }
 
 pub struct TimerState {
+    num: usize,
+    cpu: Option<ThreadID>,
     jiffies: u64,
     hz: u64,
     timers: VecDeque<Timer>,
@@ -23,8 +25,10 @@ pub struct TimerState {
 pub struct TimerAddError;
 
 impl TimerState {
-    fn new(hz: u64) -> Self {
+    fn new(num: usize, cpu: Option<ThreadID>, hz: u64) -> Self {
         Self {
+            num,
+            cpu,
             jiffies: 0,
             hz,
             timers: VecDeque::new(),
@@ -59,7 +63,7 @@ impl TimerState {
 
                 self.release_lock();
 
-                (callback)(registers);
+                (callback)(self.num, self.cpu, registers);
 
                 self.take_lock();
             } else {
@@ -141,7 +145,7 @@ static ADD_TIMER_LOCK: atomic::AtomicBool = atomic::AtomicBool::new(false);
 pub struct TimerRegisterError;
 
 /// registers a new timer with the given tick rate
-pub fn register_timer(hz: u64) -> Result<usize, TimerRegisterError> {
+pub fn register_timer(cpu: Option<ThreadID>, hz: u64) -> Result<usize, TimerRegisterError> {
     // acquire the lock
     if ADD_TIMER_LOCK.swap(true, atomic::Ordering::Acquire) {
         warn!("timer states are locked, spinning");
@@ -153,7 +157,7 @@ pub fn register_timer(hz: u64) -> Result<usize, TimerRegisterError> {
             Err(TimerRegisterError)
         } else {
             let next_timer = TIMER_STATES.len();
-            TIMER_STATES.push(TimerState::new(hz));
+            TIMER_STATES.push(TimerState::new(next_timer, cpu, hz));
 
             Ok(next_timer)
         }

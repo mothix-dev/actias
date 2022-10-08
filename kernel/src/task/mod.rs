@@ -1,8 +1,5 @@
 //! smooth brain scheduler
 
-use alloc::{collections::VecDeque, vec::Vec};
-use spin::Mutex;
-
 /*
 each logical CPU has its own task queue
 if a CPU's task queue is empty, it will search thru other CPU task queues (in order of distance, SMT threads first, then other cores, then other CPUs?) to find a task to run (todo: do we want to steal tasks from other physical processors? will that fuck up cache?)
@@ -18,132 +15,207 @@ context switch would go something like
  - load state of process
 */
 
-/// a per-CPU task queue
-pub struct TaskQueue {
-    /// tasks waiting for CPU time
-    queue: VecDeque<TaskQueueEntry>,
+pub mod cpu;
+pub mod queue;
+
+use crate::{arch::Registers, mm::paging::PageDirectory};
+use alloc::vec::Vec;
+use log::{debug, error, info};
+use spin::Mutex;
+
+use self::queue::TaskQueueEntry;
+
+/// how much time each process gets before it's forcefully preempted
+pub const CPU_TIME_SLICE: u64 = 200; // 5 ms quantum
+
+pub struct Process {
+    /// the page directory of this process
+    pub page_directory: crate::arch::PageDirectory<'static>,
+
+    /// all the threads of this process
+    pub threads: Vec<Thread>,
 }
 
-impl TaskQueue {
-    pub fn new() -> Self {
-        Self { queue: VecDeque::new() }
+pub struct Thread {
+    /// this thread's registers
+    pub registers: Registers,
+
+    /// this thread's priority
+    pub priority: i8,
+
+    /// the CPU this thread was last on
+    pub cpu: cpu::ThreadID,
+
+    /// whether this thread is blocked or not
+    pub is_blocked: bool,
+}
+
+pub struct ProcessList {
+    pub processes: Vec<Option<Process>>,
+}
+
+impl ProcessList {
+    pub const fn new() -> Self {
+        Self { processes: Vec::new() }
     }
 
-    /// gets the first task in the queue
-    pub fn consume(&mut self) -> Option<TaskQueueEntry> {
-        self.queue.pop_front()
+    pub fn get_process(&self, id: ProcessID) -> Option<&Process> {
+        self.processes.get(id.process)?.as_ref()
     }
 
-    /// inserts a task into the queue
-    pub fn insert(&mut self, entry: TaskQueueEntry) {
-        // this may not be the most efficient way to do this
-        match self.queue.iter().position(|e| e.priority < entry.priority) {
-            Some(index) => self.queue.insert(index, entry),
-            None => self.queue.push_back(entry),
-        }
+    pub fn get_process_mut(&mut self, id: ProcessID) -> Option<&mut Process> {
+        self.processes.get_mut(id.process)?.as_mut()
     }
 
-    /// checks whether this taskqueue is empty
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+    pub fn get_thread(&self, id: ProcessID) -> Option<&Thread> {
+        self.processes.get(id.process)?.as_ref()?.threads.get(id.thread)
+    }
+
+    pub fn get_thread_mut(&mut self, id: ProcessID) -> Option<&mut Thread> {
+        self.processes.get_mut(id.process)?.as_mut()?.threads.get_mut(id.thread)
     }
 }
 
-impl Default for TaskQueue {
+impl Default for ProcessList {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// an entry in a task queue
-pub struct TaskQueueEntry {
-    pub priority: u8,
-}
-
-/// describes a CPU and its layout of cores and threads
-///
-/// this kind of knowledge of the CPU's geometry is required for more intelligent load balancing
-pub struct CPU {
-    cores: Vec<CPUCore>,
-    last_thread_id: usize,
-}
-
-impl CPU {
-    pub fn new() -> Self {
-        Self { cores: Vec::new(), last_thread_id: 0 }
-    }
-
-    /// adds a core with the given number of threads to this CPU representation
-    pub fn add_core(&mut self, num_threads: usize) {
-        //let core = self.cores.len();
-
-        let mut threads = Vec::new();
-
-        for _thread in 0..num_threads {
-            threads.push(CPUThread {
-                queue: Mutex::new(TaskQueue::new(/*ThreadID { core, thread }*/)),
-            });
-            self.last_thread_id += 1;
-        }
-
-        self.cores.push(CPUCore { threads });
-    }
-
-    /// gets a CPU thread given its ID
-    pub fn get_thread(&self, id: ThreadID) -> Option<&CPUThread> {
-        self.cores.get(id.core)?.threads.get(id.thread)
-    }
-
-    /// searches through threads in this CPU in hierarchical order to find a thread with at least one extra task
-    pub fn find_thread_to_steal_from(&self, id: ThreadID) -> Option<ThreadID> {
-        // search threads in the same core as the provided ID
-        // Iterator::find() exists, but would be much less readable so i'm not using it
-        for (thread_id, thread) in self.cores.get(id.core)?.threads.iter().enumerate() {
-            // is the queue for this thread empty?
-            if !thread.queue.lock().is_empty() {
-                return Some(ThreadID { core: id.core, thread: thread_id });
-            }
-        }
-
-        // search all other cores
-        for (core_id, core) in self.cores.iter().enumerate() {
-            // skip the original core, no need to search it twice
-            // it's possible that since the CPU struct itself won't be locked that maybe another task will pop up by now,
-            // but it probably doesn't matter and is likely not worth the overhead
-            if core_id == id.core {
-                continue;
-            }
-
-            for (thread_id, thread) in core.threads.iter().enumerate() {
-                // is the queue for this thread empty?
-                if !thread.queue.lock().is_empty() {
-                    return Some(ThreadID { core: core_id, thread: thread_id });
-                }
-            }
-        }
-
-        // no tasks?
-        None
-    }
-}
-
-impl Default for CPU {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct CPUCore {
-    pub threads: Vec<CPUThread>,
-}
-
-pub struct CPUThread {
-    pub queue: Mutex<TaskQueue>,
-}
-
-/// an ID of a CPU thread
 #[derive(Copy, Clone, Debug)]
-pub struct ThreadID {
-    pub core: usize,
+pub struct ProcessID {
+    pub process: usize,
     pub thread: usize,
+}
+
+static PROCESSES: Mutex<ProcessList> = Mutex::new(ProcessList::new());
+
+static mut CPUS: Option<cpu::CPU> = None;
+
+pub fn get_cpus() -> &'static cpu::CPU {
+    unsafe { CPUS.as_mut().expect("CPUs not initialized") }
+}
+
+pub fn set_cpus(cpus: cpu::CPU) {
+    unsafe {
+        if CPUS.is_some() {
+            panic!("can't set CPUs twice");
+        }
+
+        info!("setting CPUs: {:#?}", cpus);
+
+        CPUS = Some(cpus);
+    }
+}
+
+/// performs a context switch
+fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, manual: bool, block_thread: bool) {
+    let cpu = cpu.unwrap_or(cpu::ThreadID { core: 0, thread: 0 });
+
+    // get the task queue for this CPU
+    let mut queue = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object").queue.lock();
+
+    if manual {
+        // remove the pending timer if there is one
+        if let Some(expires) = queue.timer {
+            let timer_state = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
+            timer_state.remove_timer(expires);
+        }
+    }
+
+    // do we have an active task?
+    let last_id = if let Some(current) = queue.current() {
+        // yes, save task state
+        let mut processes = PROCESSES.lock();
+
+        if let Some(thread) = processes.get_thread_mut(current.id()) {
+            thread.registers = *regs;
+
+            // todo: saving of other registers (x87, MMX, SSE, etc.)
+
+            if block_thread {
+                thread.is_blocked = true;
+
+                None
+            } else if thread.is_blocked {
+                None
+            } else {
+                Some((current.id(), thread.priority))
+            }
+        } else {
+            error!("couldn't get thread {:?} for saving in context switch", current.id());
+
+            None
+        }
+    } else {
+        None
+    };
+
+    // do we have another task to load?
+    let mut has_task = false;
+
+    while let Some(next) = queue.consume() {
+        // yes, save task state
+        let processes = PROCESSES.lock();
+
+        if let Some(process) = processes.get_process(next.id()) {
+            if let Some(thread) = process.threads.get(next.id().thread) {
+                if thread.is_blocked {
+                    continue;
+                }
+
+                *regs = thread.registers;
+
+                // todo: loading of other registers (x87, MMX, SSE, etc.)
+
+                // todo: keeping page directory up to date
+                unsafe {
+                    process.page_directory.switch_to();
+                }
+
+                has_task = true;
+                break;
+            } else {
+                error!("couldn't get thread {:?} for saving in context switch", next.id());
+            }
+        } else {
+            error!("couldn't get process {:?} for loading in context switch", next.id().process);
+        }
+    }
+
+    // put previous task back into queue if necessary
+    if !block_thread {
+        if let Some((id, priority)) = last_id {
+            queue.insert(TaskQueueEntry::new(id, priority));
+        }
+    }
+
+    // requeue timer
+    let timer = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
+    let expires = timer
+        .add_timer_in(timer.hz() / CPU_TIME_SLICE, context_switch_timer)
+        .expect("unable to add timer callback for next context switch");
+    queue.timer = Some(expires);
+
+    // release lock on queue
+    drop(queue);
+
+    if !has_task {
+        crate::arch::halt_until_interrupt();
+    }
+}
+
+/// timer callback run every time we want to perform a context switch
+pub fn context_switch_timer(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
+    _context_switch(timer_num, cpu, regs, false, false);
+}
+
+/// blocks the current thread and switches to the next thread
+pub fn block_thread_and_context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
+    _context_switch(timer_num, cpu, regs, true, true);
+}
+
+/// manually switches to the next thread
+pub fn context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
+    _context_switch(timer_num, cpu, regs, true, false);
 }

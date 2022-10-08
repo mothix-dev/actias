@@ -300,6 +300,8 @@ pub fn kmain() {
     let cmdline = bootloader::get_multiboot_info().cmdline.filter(|s| !s.is_empty()).map(|cmdline| {
         modules.insert("*cmdline".to_string(), cmdline.as_bytes());
 
+        info!("kernel command line: {:?}", cmdline);
+
         let mut map = BTreeMap::new();
 
         for arg in cmdline.split(' ') {
@@ -344,25 +346,17 @@ pub fn kmain() {
 
     get_page_manager().print_free();
 
-    unsafe {
-        crate::arch::ints::init_irqs();
-    }
+    crate::arch::init(cmdline);
 
     let timer = crate::timer::get_timer(0).unwrap();
     timer.add_timer_in(timer.hz(), test_timer_callback).unwrap();
 
-    crate::arch::init();
-
-    unsafe {
-        //crate::arch::halt();
-
-        loop {
-            asm!("sti; hlt");
-        }
+    loop {
+        crate::arch::halt_until_interrupt();
     }
 }
 
-fn test_timer_callback(_regs: &mut crate::arch::Registers) {
+fn test_timer_callback(_num: usize, _cpu: Option<crate::task::cpu::ThreadID>, _regs: &mut crate::arch::Registers) {
     info!("timed out!");
 
     let timer = crate::timer::get_timer(0).unwrap();

@@ -1,8 +1,10 @@
+pub mod acpi;
 pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use alloc::{format, string::ToString};
+use crate::task::{cpu::CPU, set_cpus};
+use alloc::{collections::BTreeMap, format, string::ToString};
 use core::arch::asm;
 use log::{info, warn};
 use raw_cpuid::{CpuId, CpuIdResult};
@@ -75,49 +77,81 @@ pub unsafe fn halt() -> ! {
     }
 }
 
-pub fn init() {
-    fn cpuid_reader(leaf: u32, subleaf: u32) -> CpuIdResult {
-        let eax: u32;
-        let ebx: u32;
-        let ecx: u32;
-        let edx: u32;
+/// halts the CPU until an interrupt occurs
+pub fn halt_until_interrupt() {
+    unsafe {
+        asm!("sti; hlt");
+    }
+}
 
-        unsafe {
-            asm!(
-                "cpuid",
-
-                inout("eax") leaf => eax,
-                out("ebx") ebx,
-                inout("ecx") subleaf => ecx,
-                out("edx") edx,
-            );
-        }
-
-        CpuIdResult { eax, ebx, ecx, edx }
+pub fn init(args: Option<BTreeMap<&str, &str>>) {
+    unsafe {
+        ints::init_irqs();
     }
 
-    let cpuid = CpuId::with_cpuid_fn(cpuid_reader);
+    let mut cpus = CPU::new();
 
-    info!("{:?}", cpuid);
+    if args.and_then(|a| a.get("acpi").cloned()).unwrap_or("yes") == "no" {
+        warn!("ACPI disabled, ignoring APIC and other CPUs");
 
-    let model = if let Some(brand) = cpuid.get_processor_brand_string() {
-        brand.as_str().to_string()
-    } else if let Some(feature_info) = cpuid.get_feature_info() {
-        let vendor = cpuid.get_vendor_info().map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
-        let family = feature_info.family_id();
-        let model = feature_info.model_id();
-        let stepping = feature_info.stepping_id();
-        format!("{vendor} family {family} model {model} stepping {stepping}")
+        // populate CPU geometry - 1 core, 1 thread
+        cpus.add_core(1);
     } else {
-        "unknown".to_string()
-    };
+        fn cpuid_reader(leaf: u32, subleaf: u32) -> CpuIdResult {
+            let eax: u32;
+            let ebx: u32;
+            let ecx: u32;
+            let edx: u32;
 
-    info!("cpu model is {model:?}");
+            unsafe {
+                asm!(
+                    "cpuid",
 
-    let has_apic = match cpuid.get_feature_info() {
-        Some(feature_info) => feature_info.has_apic(),
-        None => false,
-    };
+                    inout("eax") leaf => eax,
+                    out("ebx") ebx,
+                    inout("ecx") subleaf => ecx,
+                    out("edx") edx,
+                );
+            }
 
-    info!("has apic: {has_apic:?}");
+            CpuIdResult { eax, ebx, ecx, edx }
+        }
+
+        let cpuid = CpuId::with_cpuid_fn(cpuid_reader);
+
+        info!("{:?}", cpuid);
+
+        let model = if let Some(brand) = cpuid.get_processor_brand_string() {
+            brand.as_str().to_string()
+        } else if let Some(feature_info) = cpuid.get_feature_info() {
+            let vendor = cpuid.get_vendor_info().map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
+            let family = feature_info.family_id();
+            let model = feature_info.model_id();
+            let stepping = feature_info.stepping_id();
+            format!("{vendor} family {family} model {model} stepping {stepping}")
+        } else {
+            "unknown".to_string()
+        };
+
+        info!("cpu model is {model:?}");
+
+        let has_apic = match cpuid.get_feature_info() {
+            Some(feature_info) => feature_info.has_apic(),
+            None => false,
+        };
+
+        if has_apic {
+            // check for multiple logical processors
+
+            let has_htt = cpuid.get_feature_info().unwrap().has_htt();
+
+            info!("has_htt: {has_htt}");
+        } else {
+            info!("no APIC detected, assuming 1 core 1 thread");
+
+            cpus.add_core(1);
+        }
+    }
+
+    set_cpus(cpus);
 }
