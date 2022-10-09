@@ -473,7 +473,7 @@ unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
     }*/
     // irq0 is always timer
     if let Some(timer) = crate::timer::get_timer(PIT_TIMER_NUM) {
-        timer.tick(regs);
+        timer.try_tick(regs);
     }
 
     outb(0x20, 0x20); // reset primary interrupt controller

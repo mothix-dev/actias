@@ -2,7 +2,7 @@
 
 use crate::{arch::Registers, task::cpu::ThreadID};
 use alloc::{collections::VecDeque, vec::Vec};
-use core::sync::atomic;
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::{trace, warn};
 
 pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers);
@@ -18,7 +18,7 @@ pub struct TimerState {
     jiffies: u64,
     hz: u64,
     timers: VecDeque<Timer>,
-    lock: atomic::AtomicBool,
+    lock: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -32,19 +32,19 @@ impl TimerState {
             jiffies: 0,
             hz,
             timers: VecDeque::new(),
-            lock: atomic::AtomicBool::new(false),
+            lock: AtomicBool::new(false),
         }
     }
 
     fn take_lock(&self) {
-        if self.lock.swap(true, atomic::Ordering::Acquire) {
+        if self.lock.swap(true, Ordering::Acquire) {
             warn!("timer state is locked, spinning");
-            while self.lock.swap(true, atomic::Ordering::Acquire) {}
+            while self.lock.swap(true, Ordering::Acquire) {}
         }
     }
 
     fn release_lock(&self) {
-        self.lock.store(false, atomic::Ordering::Release);
+        self.lock.store(false, Ordering::Release);
     }
 
     /// ticks the timer, incrementing its jiffies counter and calling any callbacks that are due
@@ -78,6 +78,15 @@ impl TimerState {
     /// ticks the timer without running any callbacks (may be useful if things are locked? idk)
     pub fn tick_no_callbacks(&mut self) {
         self.jiffies += 1;
+    }
+
+    /// ticks the timer, calling callbacks if it's not locked
+    pub fn try_tick(&mut self, registers: &mut Registers) {
+        if self.lock.load(Ordering::Relaxed) {
+            self.tick_no_callbacks();
+        } else {
+            self.tick(registers);
+        }
     }
 
     /// returns the current jiffies counter of the timer
@@ -139,7 +148,7 @@ impl TimerState {
 static mut TIMER_STATES: Vec<TimerState> = Vec::new();
 
 /// used to lock TIMER_STATES while we're adding a timer
-static ADD_TIMER_LOCK: atomic::AtomicBool = atomic::AtomicBool::new(false);
+static ADD_TIMER_LOCK: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
 pub struct TimerRegisterError;
@@ -147,9 +156,9 @@ pub struct TimerRegisterError;
 /// registers a new timer with the given tick rate
 pub fn register_timer(cpu: Option<ThreadID>, hz: u64) -> Result<usize, TimerRegisterError> {
     // acquire the lock
-    if ADD_TIMER_LOCK.swap(true, atomic::Ordering::Acquire) {
+    if ADD_TIMER_LOCK.swap(true, Ordering::Acquire) {
         warn!("timer states are locked, spinning");
-        while ADD_TIMER_LOCK.swap(true, atomic::Ordering::Acquire) {}
+        while ADD_TIMER_LOCK.swap(true, Ordering::Acquire) {}
     }
 
     let result = unsafe {
@@ -164,7 +173,7 @@ pub fn register_timer(cpu: Option<ThreadID>, hz: u64) -> Result<usize, TimerRegi
     };
 
     // release the lock
-    ADD_TIMER_LOCK.store(false, atomic::Ordering::Release);
+    ADD_TIMER_LOCK.store(false, Ordering::Release);
 
     result
 }

@@ -11,29 +11,31 @@ use log::{debug, error, trace};
 use spin::{Mutex, MutexGuard};
 
 /// an error that can be returned from paging operations
-pub enum PageError {
+pub enum PagingError {
     NoAvailableFrames,
     FrameUnused,
     FrameInUse,
     AllocError,
     BadFrame,
+    BadAddress,
 }
 
-impl fmt::Display for PageError {
+impl fmt::Display for PagingError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", match self {
             Self::NoAvailableFrames => "no available frames (out of memory)",
             Self::FrameUnused => "frame is unused",
             Self::FrameInUse => "frame already in use",
-            Self::AllocError => "error allocating memory for table",
+            Self::AllocError => "error allocating memory",
             Self::BadFrame => "bad frame",
+            Self::BadAddress => "address not mapped",
         })
     }
 }
 
-impl fmt::Debug for PageError {
+impl fmt::Debug for PagingError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PageError: \"{}\"", self)
+        write!(f, "PagingError: \"{self}\"")
     }
 }
 
@@ -85,7 +87,7 @@ pub trait PageDirectory {
     ///
     /// * `addr` - the virtual address to insert the page frame at
     /// * `page` - the page frame to insert
-    fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PageError>;
+    fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError>;
 
     /// switch the mmu to this page directory
     ///
@@ -112,7 +114,7 @@ pub trait PageDirectory {
     /// * `from` - the starting index in the page directory to be copied from (index here means an address divided by the system's page size, i.e. 4 KiB on x86)
     /// * `to` - the starting index in the page directory we're copying to
     /// * `num` - the number of pages to copy
-    fn copy_from(&mut self, dir: &mut Self, from: usize, to: usize, num: usize) -> Result<(), PageError> {
+    fn copy_from(&mut self, dir: &mut Self, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
         let page_size = self.page_size();
 
         // just iterate over all pages in the range provided and copy them
@@ -131,7 +133,7 @@ pub trait PageDirectory {
     /// * `from` - the starting index in the page directory to be copied from (index here means an address divided by the system's page size, i.e. 4 KiB on x86)
     /// * `to` - the starting index in the page directory we're copying to
     /// * `num` - the number of pages to copy
-    fn copy_on_write_from(&mut self, dir: &mut Self, from: usize, to: usize, num: usize) -> Result<(), PageError> {
+    fn copy_on_write_from(&mut self, dir: &mut Self, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
         let page_size = self.page_size();
 
         for i in (0..(num * page_size)).step_by(page_size) {
@@ -180,7 +182,7 @@ pub trait PageDirectory {
     ///
     /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
     /// page directory, and things can and will break if it's called on any other page directory
-    unsafe fn map_memory_from<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, /*Errno*/ ()>
+    unsafe fn map_memory_from<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, PagingError>
     where O: FnOnce(&mut [u8]) -> R {
         let page_size = self.page_size();
 
@@ -191,7 +193,7 @@ pub trait PageDirectory {
         assert!(end > start);
 
         debug!("mapping partial page directory in");
-        debug!("start @ {:#x}, end @ {:#x}", start, end);
+        debug!("start @ {start:#x}, end @ {end:#x}");
 
         // offset into memory we've paged in
         let mut offset = 0;
@@ -206,33 +208,77 @@ pub trait PageDirectory {
             end = (end & !(page_size - 1)) + (page_size - 1);
         }
 
-        let buf_len = end - start + 1;
+        debug!("start now @ {start:#x}, end now @ {end:#x}");
+        debug!("offset is {offset:#x}, len is {len:#x}");
 
-        debug!("start now @ {:#x}, end now @ {:#x}", start, end);
+        let mut addresses: Vec<u64> = Vec::new();
 
-        debug!("buf size {:#x}, aligned to {:#x}, offset {:#x}", len, buf_len, offset);
+        // attempt to safely reserve memory
+        if let Err(err) = addresses.try_reserve_exact((end - start) / page_size) {
+            error!("error reserving memory in map_memory_from(): {err:?}");
 
+            return Err(PagingError::AllocError);
+        }
+
+        // get physical addresses of this region
+        for i in (start..=end).step_by(page_size) {
+            let phys_addr = match from.virt_to_phys(i) {
+                Some(a) => a,
+                None => {
+                    debug!("couldn't get phys addr for virt {i:#x}");
+
+                    return Err(PagingError::BadAddress);
+                }
+            };
+
+            addresses.push(phys_addr);
+        }
+
+        debug!("addresses: {addresses:x?}");
+
+        // map the memory
+        self.map_memory(&addresses, |s| op(&mut s[offset..offset + len]))
+    }
+
+    /// maps the given physical addresses in order into a region of memory allocated on the heap, then calls `op` with a slice over all the mapped memory
+    ///
+    /// # Arguments
+    ///
+    /// * `addresses` - a list of physical addresses to map into memory in order
+    /// * `op` - function to be called while memory is mapped
+    ///
+    /// # Safety
+    ///
+    /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
+    /// page directory, and things can and will break if it's called on any other page directory
+    unsafe fn map_memory<O, R>(&mut self, addresses: &[u64], op: O) -> Result<R, PagingError>
+    where O: FnOnce(&mut [u8]) -> R {
+        let page_size = self.page_size();
+
+        let buf_len = addresses.len() * page_size;
+
+        // allocate memory for us to remap
         let layout = Layout::from_size_align(buf_len, page_size).unwrap();
         let ptr = alloc(layout);
 
         if ptr.is_null() {
             error!("error allocating buffer in map_memory()");
-            Err(/*Errno::OutOfMemory*/ ())?
+            return Err(PagingError::AllocError);
         }
 
         assert!(ptr as usize % page_size == 0); // make absolutely sure pointer is page aligned
 
-        debug!("mapping {} pages from {:#x} (task mem) to {:#x} (kernel mem)", (end - start) / page_size, start, ptr as usize);
+        debug!("mapping {} pages to {:#x} (kernel mem)", addresses.len(), ptr as usize);
 
         // get addresses of pages we're gonna remap so we can map them back later
         let mut existing_phys: Vec<u64> = Vec::new();
 
         // attempt to safely reserve memory for our mapping
-        if let Err(err) = existing_phys.try_reserve_exact((end - start) / page_size) {
-            error!("error reserving memory in map_memory(): {:?}", err);
+        if let Err(err) = existing_phys.try_reserve_exact(addresses.len()) {
+            error!("error reserving memory in map_memory(): {err:?}");
             dealloc(ptr, layout);
 
-            Err(/*Errno::OutOfMemory*/ ())?
+            return Err(PagingError::AllocError);
         }
 
         for i in (ptr as usize..ptr as usize + buf_len).step_by(page_size) {
@@ -244,57 +290,29 @@ pub trait PageDirectory {
                     debug!("aborting map (before remap), dealloc()ing");
                     dealloc(ptr, layout);
 
-                    Err(/*Errno::BadAddress*/ ())?
+                    return Err(PagingError::BadAddress);
                 }
             };
-            debug!("existing: {:#x} -> {:#x}", i, addr);
+            debug!("existing: {i:#x} -> {addr:#x}");
             existing_phys.push(addr);
         }
 
-        debug!("existing_phys: {:x?}", existing_phys);
+        debug!("existing_phys: {existing_phys:x?}");
 
-        // loop over pages, get physical address of each page and map it in or create new page and alloc mem
-        for i in (start..=end).step_by(page_size) {
-            // get the physical address of the page at the given address, or allocate a new one if there isn't one mapped
-            let phys_addr = match from.virt_to_phys(i) {
-                Some(a) => a,
-                None => {
-                    debug!("couldn't get phys addr for virt {:#x}", i);
+        // remap all pages in region
+        for (i, phys_addr) in addresses.iter().enumerate() {
+            let virt = ptr as usize + i * page_size;
 
-                    // something bad happened, revert back to original state and return an error
-                    debug!("aborting map (during remap), dealloc()ing and fixing mapping");
-                    for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
-                        debug!("virt @ {:x}, phys @ {:x}", addr, existing_phys[idx]);
-                        self.set_page(
-                            addr,
-                            Some(PageFrame {
-                                addr: existing_phys[idx],
-                                present: true,
-                                user_mode: false,
-                                writable: true,
-                                copy_on_write: false,
-                            }),
-                        )
-                        .expect("couldn't remap page");
-                    }
-                    dealloc(ptr, layout);
-
-                    Err(/*Errno::BadAddress*/ ())?
-                }
-            };
-
-            debug!("{:x} @ phys addr: {:x}", i, phys_addr);
+            debug!("{virt:x} now @ phys addr: {phys_addr:x}");
 
             // todo: maybe change this to debug_assert at some point? its prolly hella slow
             assert!(!existing_phys.contains(&phys_addr), "trampling on other page directory's memory");
-
-            let virt = ptr as usize + (i - start) as usize;
 
             // remap memory
             self.set_page(
                 virt,
                 Some(PageFrame {
-                    addr: phys_addr,
+                    addr: *phys_addr,
                     present: true,
                     user_mode: false,
                     writable: true,
@@ -304,19 +322,20 @@ pub trait PageDirectory {
             .expect("couldn't remap page");
         }
 
-        debug!("slice @ {:#x} + {:#x}: {:#x}, len {:#x}", ptr as usize, offset as usize, ptr as usize + offset as usize, len);
+        debug!("slice @ {ptr:?}, len {buf_len:#x}");
 
         // call function
-        let res = op(core::slice::from_raw_parts_mut((ptr as usize + offset as usize) as *mut u8, len));
+        let res = op(core::slice::from_raw_parts_mut(ptr as *mut u8, buf_len));
 
         // map pages back to their original addresses
         debug!("cleaning up mapping");
         for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
-            debug!("virt @ {:x}, phys @ {:x}", addr, existing_phys[idx]);
+            let phys_addr = existing_phys[idx];
+            debug!("virt @ {addr:x}, phys @ {phys_addr:x}");
             self.set_page(
                 addr,
                 Some(PageFrame {
-                    addr: existing_phys[idx],
+                    addr: phys_addr,
                     present: true,
                     user_mode: false,
                     writable: true,
@@ -403,7 +422,7 @@ impl<T: PageDirectory> PageManager<T> {
     /// * `addr` - the virtual address to allocate the frame at. must be page aligned
     /// * `user_mode` - whether the allocated page will be accessible in user mode
     /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool) -> Result<u64, PageError> {
+    pub fn alloc_frame(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool) -> Result<u64, PagingError> {
         let page_size = dir.page_size();
 
         assert!(addr % page_size == 0, "frame address is not page aligned");
@@ -427,10 +446,10 @@ impl<T: PageDirectory> PageManager<T> {
 
                 Ok(phys_addr)
             } else {
-                Err(PageError::NoAvailableFrames)
+                Err(PagingError::NoAvailableFrames)
             }
         } else {
-            Err(PageError::FrameInUse)
+            Err(PagingError::FrameInUse)
         }
     }
 
@@ -443,7 +462,7 @@ impl<T: PageDirectory> PageManager<T> {
     /// * `phys` - the physical address to map the frame to. must also be page aligned
     /// * `user_mode` - whether the allocated page will be accessible in user mode
     /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame_at(&mut self, dir: &mut T, addr: usize, phys: u64, user_mode: bool, writable: bool) -> Result<(), PageError> {
+    pub fn alloc_frame_at(&mut self, dir: &mut T, addr: usize, phys: u64, user_mode: bool, writable: bool) -> Result<(), PagingError> {
         let page_size = dir.page_size();
 
         assert!(addr % page_size == 0, "frame address is not page aligned");
@@ -467,7 +486,7 @@ impl<T: PageDirectory> PageManager<T> {
 
             Ok(())
         } else {
-            Err(PageError::FrameInUse)
+            Err(PagingError::FrameInUse)
         }
     }
 
@@ -507,7 +526,7 @@ impl<T: PageDirectory> PageManager<T> {
     ///
     /// * `dir` - the page directory to free the frame in
     /// * `addr` - the virtual address to free the frame at. must be page aligned
-    pub fn free_frame(&mut self, dir: &mut T, addr: usize) -> Result<u64, PageError> {
+    pub fn free_frame(&mut self, dir: &mut T, addr: usize) -> Result<u64, PagingError> {
         let page_size = dir.page_size();
 
         assert!(addr % page_size == 0, "frame address is not page aligned");
@@ -520,7 +539,7 @@ impl<T: PageDirectory> PageManager<T> {
 
             Ok(page.addr)
         } else {
-            Err(PageError::FrameUnused)
+            Err(PagingError::FrameUnused)
         }
     }
 

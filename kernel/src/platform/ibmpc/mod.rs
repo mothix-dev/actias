@@ -346,7 +346,7 @@ pub fn kmain() {
 
     get_page_manager().print_free();
 
-    crate::arch::init(cmdline);
+    crate::arch::init(unsafe { PAGE_DIR.as_mut().unwrap() }, cmdline);
 
     let timer = crate::timer::get_timer(0).unwrap();
     timer.add_timer_in(timer.hz(), test_timer_callback).unwrap();

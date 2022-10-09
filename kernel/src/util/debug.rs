@@ -20,3 +20,15 @@ impl<T: fmt::Debug> fmt::Debug for DebugArray<'_, T> {
         }
     }
 }
+
+pub struct DebugHexArray<'a, T: fmt::Debug>(pub &'a [T]);
+
+impl<T: fmt::Debug> fmt::Debug for DebugHexArray<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.len() > ARRAY_LIMIT {
+            write!(f, "[{}; {}]", core::any::type_name::<T>(), self.0.len())
+        } else {
+            write!(f, "{:x?}", self.0)
+        }
+    }
+}

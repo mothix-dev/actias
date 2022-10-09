@@ -4,7 +4,7 @@ use super::{get_eflags, PAGE_SIZE};
 use crate::{
     mm::{
         bump_alloc::bump_alloc,
-        paging::{PageDirectory, PageError, PageFrame},
+        paging::{PageDirectory, PageFrame, PagingError},
     },
     platform::LINKED_BASE,
     util::debug::FormatHex,
@@ -584,7 +584,7 @@ impl<'a> PageDirectory for PageDir<'a> {
         }
     }
 
-    fn set_page(&mut self, mut addr: usize, page: Option<PageFrame>) -> Result<(), PageError> {
+    fn set_page(&mut self, mut addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
         addr /= PAGE_SIZE;
 
         let table_idx = (addr / 1024) as usize;
@@ -595,7 +595,7 @@ impl<'a> PageDirectory for PageDir<'a> {
             let ptr = unsafe { alloc_zeroed(layout) };
 
             if ptr.is_null() {
-                Err(PageError::AllocError)?;
+                Err(PagingError::AllocError)?;
             }
 
             // make sure this newly allocated page table is located in kernel memory so its reference will be valid as long as our current page directory has an up to date copy of the kernel's page directory
@@ -621,7 +621,7 @@ impl<'a> PageDirectory for PageDir<'a> {
         }
 
         self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] = if let Some(page) = page {
-            page.try_into().map_err(|_| PageError::BadFrame)?
+            page.try_into().map_err(|_| PagingError::BadFrame)?
         } else {
             PageTableEntry::new_unused()
         };

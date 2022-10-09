@@ -20,7 +20,7 @@ pub mod queue;
 
 use crate::{arch::Registers, mm::paging::PageDirectory};
 use alloc::vec::Vec;
-use log::{debug, error, info};
+use log::{debug, error};
 use spin::Mutex;
 
 use self::queue::TaskQueueEntry;
@@ -102,7 +102,7 @@ pub fn set_cpus(cpus: cpu::CPU) {
             panic!("can't set CPUs twice");
         }
 
-        info!("setting CPUs: {:#?}", cpus);
+        debug!("setting CPUs: {:#?}", cpus);
 
         CPUS = Some(cpus);
     }
