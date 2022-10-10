@@ -465,20 +465,37 @@ const IRQ_HANDLER_INIT: Option<InterruptHandler> = None;
 static mut IRQ_HANDLERS: [Option<InterruptHandler>; 16] = [IRQ_HANDLER_INIT; 16];
 static mut PIT_TIMER_NUM: usize = 0;
 
-// this is a terrible and inefficient way of doing things but i don't really care
-#[interrupt(x86)]
-unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
-    /*if let Some(h) = IRQ_HANDLERS[0].as_ref() {
-        (h)(regs);
-    }*/
-    // irq0 is always timer
-    if let Some(timer) = crate::timer::get_timer(PIT_TIMER_NUM) {
-        timer.try_tick(regs);
-    }
-
-    outb(0x20, 0x20); // reset primary interrupt controller
+// basically just halts and waits for an interrupt
+#[naked]
+unsafe extern "C" fn set_interrups_and_halt() {
+    asm!(
+        "2:", // 0 and 1 don't work lmao
+        "sti",
+        "hlt",
+        "jmp 2b", // jump backwards to nearest label 2
+        options(noreturn),
+    );
 }
 
+#[interrupt(x86)]
+unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
+    // irq0 is always timer
+    let should_halt = match crate::timer::get_timer(PIT_TIMER_NUM) {
+        Some(timer) => !timer.try_tick(regs),
+        None => false,
+    };
+
+    outb(0x20, 0x20); // reset primary interrupt controller
+
+    // is it not safe to return?
+    if should_halt {
+        // sets the instruction pointer to set_interrupts_and_halt so the stack is properly cleaned up
+        // failing to do this would cause the system to triple fault presumably due to stack overflow
+        regs.eip = set_interrups_and_halt as *const u8 as u32;
+    }
+}
+
+// this is a terrible and inefficient way of doing things but i don't really care
 #[interrupt(x86)]
 unsafe fn irq1_handler(regs: &mut InterruptRegisters) {
     if let Some(h) = IRQ_HANDLERS[1].as_ref() {
@@ -707,6 +724,10 @@ pub fn init_pit(hz: usize) {
     unsafe {
         PIT_TIMER_NUM = crate::timer::register_timer(Some(crate::task::cpu::ThreadID { core: 0, thread: 0 }), hz as u64).expect("couldn't register PIT timer");
     }
+}
+
+pub fn pit_timer_num() -> usize {
+    unsafe { PIT_TIMER_NUM }
 }
 
 /// set up IRQ handler list, separate from init() since this requires the heap to be initialized

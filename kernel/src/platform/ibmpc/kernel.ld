@@ -10,6 +10,10 @@ SECTIONS {
     .init : AT(ADDR(.init)) {
         KEEP( *(.multiboot) )
         *(.inittext)
+
+        /* other CPU bringup code, needs to be page aligned for SIPI */
+        . = ALIGN(0x1000);
+        *(.inittext2)
     }
 
     . += KERNEL_BASE;

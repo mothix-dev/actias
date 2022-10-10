@@ -453,6 +453,10 @@ impl<T: PageDirectory> PageManager<T> {
         }
     }
 
+    pub fn first_available_frame(&self, dir: &T) -> Option<u64> {
+        self.frame_set.first_unset().map(|i| (i as u64) * (dir.page_size() as u64))
+    }
+
     /// allocates a frame in the provided page directory at the given physical address, if available
     ///
     /// # Arguments
@@ -496,12 +500,16 @@ impl<T: PageDirectory> PageManager<T> {
     ///
     /// * `dir` - a page table, used to get page size
     /// * `addr` - the address of the frame
-    pub fn set_frame_used(&mut self, dir: &mut T, addr: usize) {
-        let page_size = dir.page_size();
+    pub fn set_frame_used(&mut self, dir: &T, addr: u64) {
+        let page_size = dir.page_size() as u64;
 
         assert!(addr % page_size == 0, "frame address is not page aligned");
 
-        self.frame_set.set(addr / page_size);
+        let idx = (addr / page_size).try_into().unwrap();
+        debug!("setting {idx:#x} as used");
+        self.frame_set.set(idx);
+
+        debug!("first_unset is now {:?}", self.frame_set.first_unset());
     }
 
     /// sets a frame in our list of frames as free, allowing it to be allocated elsewhere
@@ -510,12 +518,12 @@ impl<T: PageDirectory> PageManager<T> {
     ///
     /// * `dir` - a page table, used to get page size
     /// * `addr` - the address of the frame
-    pub fn set_frame_free(&mut self, dir: &mut T, addr: usize) {
-        let page_size = dir.page_size();
+    pub fn set_frame_free(&mut self, dir: &T, addr: u64) {
+        let page_size = dir.page_size() as u64;
 
         assert!(addr % page_size == 0, "frame address is not page aligned");
 
-        self.frame_set.clear(addr / page_size);
+        self.frame_set.clear((addr / page_size).try_into().unwrap());
     }
 
     /// frees a frame in the provided page directory, allowing that region of memory to be used by other things

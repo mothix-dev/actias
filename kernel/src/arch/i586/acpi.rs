@@ -3,14 +3,10 @@
 use super::{paging::PageDir, PAGE_SIZE};
 use crate::{
     mm::paging::PageDirectory,
-    task::cpu::CPU,
+    task::cpu::{ThreadID, CPU},
     util::debug::{DebugHexArray, FormatHex},
 };
-use alloc::{
-    format,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{format, vec::Vec};
 use core::{fmt, mem::size_of, slice, str};
 use log::{debug, error, warn};
 
@@ -398,8 +394,6 @@ pub fn find_sdts(page_dir: &mut PageDir) -> Option<Vec<u64>> {
 
         let rsdp = read_rsdp(page_dir, addr).expect("failed to read RSDP");
 
-        let sdt_pointers: Vec<u64>;
-
         // accessing these union fields is perfectly safe
         if unsafe { rsdp.original.revision } > 0 {
             // acpi 2.0+ uses extended fields in the RSDP
@@ -452,33 +446,144 @@ pub fn find_sdts(page_dir: &mut PageDir) -> Option<Vec<u64>> {
     }
 }
 
-/*
-        let mut madt = None;
+pub fn find_madt(page_dir: &mut PageDir, sdt_pointers: &[u64]) -> Option<MADT> {
+    // find the MADT
+    for &ptr in sdt_pointers.iter() {
+        if let Some(header) = read_header(page_dir, ptr) {
+            debug!("found header {:?}", header);
 
-        // find the MADT
-        for ptr in sdt_pointers {
-            if let Some(header) = read_header(page_dir, ptr as u64) {
-                debug!("found header {:?}", header);
-
-                // check for MADT signature ("APIC")
-                if header.signature == [b'A', b'P', b'I', b'C'] {
-                    // read MADT data
-                    if let Some(data) = read_data(page_dir, ptr as u64, header.length) {
-                        if (calculate_checksum(&header) + calculate_checksum_bytes(&data)) & 0xff != 0 {
-                            error!("MADT checksum invalid");
-                        } else {
-                            madt = MADT::from_raw_data(&data);
-
-                            break;
-                        }
+            // check for MADT signature ("APIC")
+            if header.signature == [b'A', b'P', b'I', b'C'] {
+                // read MADT data
+                if let Some(data) = read_data(page_dir, ptr, header.length) {
+                    if (calculate_checksum(&header) + calculate_checksum_bytes(&data)) & 0xff != 0 {
+                        error!("MADT checksum invalid");
                     } else {
-                        error!("failed to read MADT data");
+                        return MADT::from_raw_data(&data);
                     }
+                } else {
+                    error!("failed to read MADT data");
                 }
-            } else {
-                warn!("ACPI SDT @ {ptr:#x} is invalid");
             }
+        } else {
+            warn!("ACPI SDT @ {ptr:#x} is invalid");
         }
+    }
 
-        debug!("madt is {madt:#?}");
-*/
+    None
+}
+
+pub fn init_apic(page_dir: &mut PageDir, topology: Option<super::CPUTopology>, mapping: Option<super::APICToCPU>) {
+    let sdt_pointers = find_sdts(page_dir).unwrap();
+    let madt = find_madt(page_dir, &sdt_pointers).unwrap();
+
+    let mut local_apic_addr: u64 = madt.header.local_apic_addr as u64;
+    let mut local_apics: Vec<(usize, usize, ThreadID)> = Vec::new();
+
+    // parse MADT records
+    for record in madt.records.iter() {
+        match record {
+            MADTRecord::LocalAPIC { processor_id, apic_id, flags } => {
+                if (flags & 0x3) > 0 {
+                    let thread_id = if let Some(m) = mapping {
+                        m.apic_to_cpu(*apic_id as usize)
+                    } else {
+                        ThreadID {
+                            core: *processor_id as usize,
+                            thread: 0,
+                        }
+                    };
+                    local_apics.push((*apic_id as usize, *processor_id as usize, thread_id));
+                }
+            }
+            MADTRecord::LocalX2APIC { processor_id, flags, acpi_id } => {
+                if (flags & 0x3) > 0 {
+                    let thread_id = if let Some(m) = mapping {
+                        m.apic_to_cpu(*processor_id as usize)
+                    } else {
+                        ThreadID { core: *acpi_id as usize, thread: 0 }
+                    };
+                    local_apics.push((*processor_id as usize, *acpi_id as usize, thread_id));
+                }
+            }
+            MADTRecord::LocalAddressOverride { apic_addr } => local_apic_addr = *apic_addr,
+            _ => (),
+        }
+    }
+
+    debug!("local APIC is mapped @ {local_apic_addr:#x}");
+
+    super::apic::map_local_apic(page_dir, local_apic_addr);
+
+    // sanity check
+    assert!((local_apic_addr % page_dir.page_size() as u64) == 0, "local APIC address isn't page aligned");
+
+    // set up CPUs
+    let mut cpus = CPU::new();
+
+    let num_cores = match topology.as_ref() {
+        Some(topology) => topology.num_cores,
+        None => local_apics.len(),
+    };
+
+    let threads_per_core = match topology.as_ref() {
+        Some(topology) => topology.threads_per_core,
+        None => 1,
+    };
+
+    // populate cores
+    for i in 0..num_cores {
+        cpus.add_core();
+
+        for _j in 0..threads_per_core {
+            cpus.cores.get_mut(i).unwrap().add_thread(super::ThreadInfo { apic_id: None, processor_id: 0 }, None);
+        }
+    }
+
+    // populate threads
+    for (apic_id, processor_id, thread_id) in local_apics.iter() {
+        let thread = cpus
+            .get_thread_mut(*thread_id)
+            .unwrap_or_else(|| panic!("couldn't get CPU {thread_id} for local APIC {apic_id}, address is probably invalid"));
+
+        thread.info.apic_id = Some(*apic_id);
+        thread.info.processor_id = *processor_id;
+    }
+
+    // set global cpu topology, queues, etc
+    crate::task::set_cpus(cpus);
+
+    // todo: cpu bringup
+
+    let local_apic = super::apic::get_local_apic();
+
+    let local_apic_id = local_apic.local_apic_id.read();
+    let local_apic_version = local_apic.local_apic_id.read();
+
+    debug!("local APIC is {local_apic_id}, version {local_apic_version}");
+
+    //local_apic.send_sipi(1, 0);
+    /*local_apic.interrupt_command[0].write(0xc4500);
+
+    let timer = crate::timer::get_timer(0).unwrap();
+    timer.add_timer_in(timer.hz() / 100, test_timer_callback).unwrap();
+
+    loop {
+        crate::arch::halt_until_interrupt();
+    }*/
+}
+
+/*fn test_timer_callback(_num: usize, _cpu: Option<crate::task::cpu::ThreadID>, _regs: &mut crate::arch::Registers) -> bool {
+    super::apic::get_local_apic().interrupt_command[0].write(0xc4602);
+
+    let timer = crate::timer::get_timer(0).unwrap();
+    timer.add_timer_in(timer.hz() / 1000, test_timer_callback_2).unwrap();
+
+    true
+}
+
+fn test_timer_callback_2(_num: usize, _cpu: Option<crate::task::cpu::ThreadID>, _regs: &mut crate::arch::Registers) -> bool {
+    super::apic::get_local_apic().interrupt_command[0].write(0xc4602);
+
+    true
+}*/

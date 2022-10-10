@@ -19,6 +19,7 @@ num-traits = { version = "0.2", default_features = false }
 compression = { version = "0.1", default_features = false, features = [ "gzip", "bzip2" ] }
 raw-cpuid = "10.6"
 spin = "0.9"
+volatile = "0.4"
 
 [build-dependencies]
 cc = "1.0"

@@ -5,7 +5,8 @@ use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::{trace, warn};
 
-pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers);
+/// if any timer callback returns false, the interrupt handler should just send EOI and wait for the next interrupt without iret
+pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers) -> bool;
 
 struct Timer {
     expires_at: u64,
@@ -48,22 +49,25 @@ impl TimerState {
     }
 
     /// ticks the timer, incrementing its jiffies counter and calling any callbacks that are due
-    pub fn tick(&mut self, registers: &mut Registers) {
+    pub fn tick(&mut self, registers: &mut Registers) -> bool {
         self.tick_no_callbacks();
 
         // run callbacks for all expired timers
+
+        let mut res = true;
 
         self.take_lock();
 
         while let Some(timer) = self.timers.front() {
             if self.jiffies >= timer.expires_at {
+                let lateness = self.jiffies - timer.expires_at;
                 let callback = self.timers.pop_front().unwrap().callback;
 
-                trace!("timer timed out at {}, {} more timers", self.jiffies, self.timers.len());
+                trace!("timer timed out at {} ({lateness} ticks late), {} more timers", self.jiffies, self.timers.len());
 
                 self.release_lock();
 
-                (callback)(self.num, self.cpu, registers);
+                res = res && (callback)(self.num, self.cpu, registers);
 
                 self.take_lock();
             } else {
@@ -73,6 +77,8 @@ impl TimerState {
         }
 
         self.release_lock();
+
+        res
     }
 
     /// ticks the timer without running any callbacks (may be useful if things are locked? idk)
@@ -81,11 +87,13 @@ impl TimerState {
     }
 
     /// ticks the timer, calling callbacks if it's not locked
-    pub fn try_tick(&mut self, registers: &mut Registers) {
+    pub fn try_tick(&mut self, registers: &mut Registers) -> bool {
         if self.lock.load(Ordering::Relaxed) {
             self.tick_no_callbacks();
+
+            true
         } else {
-            self.tick(registers);
+            self.tick(registers)
         }
     }
 

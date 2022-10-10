@@ -1,12 +1,16 @@
 pub mod acpi;
+pub mod apic;
 pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use crate::task::{cpu::CPU, set_cpus};
+use crate::task::{
+    cpu::{ThreadID, CPU},
+    set_cpus,
+};
 use alloc::{collections::BTreeMap, format, string::ToString};
 use core::arch::asm;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use raw_cpuid::{CpuId, CpuIdResult, TopologyType};
 use x86::{bits32::eflags::EFlags, cpuid};
 
@@ -83,18 +87,6 @@ pub struct CPUTopology {
     pub logical_processors: usize,
 }
 
-impl CPUTopology {
-    pub fn to_cpu(&self) -> CPU {
-        let mut cpu = CPU::new();
-
-        for _i in 0..self.num_cores {
-            cpu.add_core(self.threads_per_core);
-        }
-
-        cpu
-    }
-}
-
 impl Default for CPUTopology {
     fn default() -> Self {
         Self {
@@ -115,8 +107,17 @@ pub struct APICToCPU {
     pub smt_bitwise_and: usize,
 }
 
+impl APICToCPU {
+    pub fn apic_to_cpu(&self, apic_id: usize) -> ThreadID {
+        ThreadID {
+            core: apic_id >> self.core_shift_right,
+            thread: apic_id & self.smt_bitwise_and,
+        }
+    }
+}
+
 /// given a number, finds the next highest power of 2 for it
-/// 
+///
 /// https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
 fn find_nearest_power_of_2(mut num: u32) -> u32 {
     num -= 1;
@@ -144,7 +145,7 @@ fn bits_required_for(num: usize) -> usize {
 /// attempts to find the CPU topology based on CPUID calls
 fn get_cpu_topology() -> Option<(CPUTopology, APICToCPU)> {
     // TODO: figure out more ways to detect CPU topology with CPUID, this current method is a bit lacking
-    
+
     let cpuid = read_cpuid();
 
     let has_htt = match cpuid.get_feature_info() {
@@ -180,15 +181,19 @@ fn get_cpu_topology() -> Option<(CPUTopology, APICToCPU)> {
                 return None;
             }
 
+            let num_cores = level3_cores / level2_cores;
+            let threads_per_core = level2_cores;
+            let logical_processors = num_cores * threads_per_core;
+
             Some((
                 CPUTopology {
-                    num_cores: level3_cores / level2_cores,
-                    threads_per_core: level2_cores,
-                    logical_processors: level3_cores,
+                    num_cores,
+                    threads_per_core,
+                    logical_processors,
                 },
                 APICToCPU {
-                    core_shift_right: bits_required_for(level2_cores),
-                    smt_bitwise_and: find_nearest_power_of_2(level2_cores.try_into().unwrap()) as usize - 1,
+                    core_shift_right: bits_required_for(threads_per_core + 1),
+                    smt_bitwise_and: find_nearest_power_of_2(threads_per_core.try_into().unwrap()) as usize - 1,
                 },
             ))
         } else if let Some(info) = cpuid.get_extended_topology_info() {
@@ -204,7 +209,7 @@ fn get_cpu_topology() -> Option<(CPUTopology, APICToCPU)> {
                     TopologyType::SMT => {
                         core_shift = level.shift_right_for_next_apic_id();
                         smt_count = level.processors();
-                    },
+                    }
                     TopologyType::Core => core_count = level.processors(),
                     _ => (),
                 }
@@ -241,6 +246,12 @@ pub type Registers = ints::InterruptRegisters;
 /// page directory type
 pub type PageDirectory<'a> = paging::PageDir<'a>;
 
+#[derive(Copy, Clone, Debug)]
+pub struct ThreadInfo {
+    pub apic_id: Option<usize>,
+    pub processor_id: usize,
+}
+
 /// exits emulators if applicable then completely halts the CPU
 ///
 /// # Safety
@@ -269,19 +280,31 @@ pub fn halt_until_interrupt() {
     }
 }
 
+fn init_single_core_pit() {
+    // set up CPUs
+    let mut cpus = CPU::new();
+
+    // 1 core, 1 thread
+    // using PIT timer
+    cpus.add_core();
+    cpus.cores.get_mut(0).unwrap().add_thread(ThreadInfo { apic_id: None, processor_id: 0 }, Some(ints::pit_timer_num()));
+
+    // set global cpu topology, queues, etc
+    set_cpus(cpus);
+
+    // set timer and wait for it to expire to kick off context switching
+    crate::task::wait_for_context_switch(ints::pit_timer_num(), ThreadID { core: 0, thread: 0 });
+}
+
 pub fn init(page_dir: &mut paging::PageDir, args: Option<BTreeMap<&str, &str>>) {
     unsafe {
         ints::init_irqs();
     }
 
-    let mut cpus: CPU;
-
     if args.and_then(|a| a.get("acpi").cloned()).unwrap_or("yes") == "no" {
         warn!("ACPI disabled, ignoring APIC and other CPUs");
 
-        // populate CPU geometry - 1 core, 1 thread
-        cpus = CPU::new();
-        cpus.add_core(1);
+        init_single_core_pit();
     } else {
         let cpuid = read_cpuid();
 
@@ -301,43 +324,25 @@ pub fn init(page_dir: &mut paging::PageDir, args: Option<BTreeMap<&str, &str>>) 
 
         debug!("cpu model is {model:?}");
 
-        // try to get cpu topology from cpuid
-        let res = get_cpu_topology();
-
-        let mut topology = res.map(|(t, _)| t);
-
-        // we can just assume everything's a core if get_cpu_topology failed
-        let mapping = res.map(|(_, m)| m).unwrap_or_else(|| Default::default());
-
-        debug!("cpu topology: {topology:#?}");
-        debug!("apic id to cpu id mapping: {mapping:#?}");
-
         let has_apic = match cpuid.get_feature_info() {
             Some(feature_info) => feature_info.has_apic(),
             None => false,
         };
 
         if has_apic {
-            // `mapping` only really matters here
+            // try to get cpu topology from cpuid
+            let res = get_cpu_topology();
+            let topology = res.map(|(t, _)| t);
+            let mapping = res.map(|(_, m)| m);
 
-            /*if let Some(detected_cpus) = acpi::detect_cpu_geometry(page_dir) {
-                cpus = detected_cpus;
-            } else {
-                error!("error detecting CPUs, assuming 1 core 1 thread");
+            debug!("cpu topology: {topology:#?}");
+            debug!("apic id to cpu id mapping: {mapping:#?}");
 
-                cpus = CPU::new();
-                cpus.add_core(1);
-            }*/
-
-            topology = Some(Default::default());
+            acpi::init_apic(page_dir, topology, mapping);
         } else {
             info!("no APIC detected, assuming 1 core 1 thread");
 
-            topology = Some(Default::default());
+            init_single_core_pit();
         }
-
-        cpus = topology.unwrap().to_cpu();
     }
-
-    set_cpus(cpus);
 }

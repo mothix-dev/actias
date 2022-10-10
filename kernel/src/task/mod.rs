@@ -109,7 +109,7 @@ pub fn set_cpus(cpus: cpu::CPU) {
 }
 
 /// performs a context switch
-fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, manual: bool, block_thread: bool) {
+fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, manual: bool, block_thread: bool) -> bool {
     let cpu = cpu.unwrap_or(cpu::ThreadID { core: 0, thread: 0 });
 
     // get the task queue for this CPU
@@ -169,8 +169,14 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
                 // todo: loading of other registers (x87, MMX, SSE, etc.)
 
                 // todo: keeping page directory up to date
-                unsafe {
-                    process.page_directory.switch_to();
+                if let Some((id, _)) = last_id.as_ref() {
+                    // is the process different? (i.e. not the same thread)
+                    if id.process != next.id().process {
+                        // yes, switch the page directory
+                        unsafe {
+                            process.page_directory.switch_to();
+                        }
+                    }
                 }
 
                 has_task = true;
@@ -200,14 +206,12 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
     // release lock on queue
     drop(queue);
 
-    if !has_task {
-        crate::arch::halt_until_interrupt();
-    }
+    has_task
 }
 
 /// timer callback run every time we want to perform a context switch
-pub fn context_switch_timer(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
-    _context_switch(timer_num, cpu, regs, false, false);
+pub fn context_switch_timer(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) -> bool {
+    _context_switch(timer_num, cpu, regs, false, false)
 }
 
 /// blocks the current thread and switches to the next thread
@@ -218,4 +222,23 @@ pub fn block_thread_and_context_switch(timer_num: usize, cpu: Option<cpu::Thread
 /// manually switches to the next thread
 pub fn context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
     _context_switch(timer_num, cpu, regs, true, false);
+}
+
+pub fn wait_for_context_switch(timer_num: usize, cpu: cpu::ThreadID) {
+    // get the task queue for this CPU
+    let mut queue = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object").queue.lock();
+
+    // queue timer
+    let timer = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
+    let expires = timer
+        .add_timer_in(timer.hz() / CPU_TIME_SLICE, context_switch_timer)
+        .expect("unable to add timer callback for next context switch");
+    queue.timer = Some(expires);
+
+    // release lock on queue
+    drop(queue);
+
+    loop {
+        crate::arch::halt_until_interrupt();
+    }
 }
