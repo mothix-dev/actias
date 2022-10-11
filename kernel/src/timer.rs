@@ -3,7 +3,7 @@
 use crate::{arch::Registers, task::cpu::ThreadID};
 use alloc::{collections::VecDeque, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
-use log::{trace, warn};
+use log::warn;
 
 /// if any timer callback returns false, the interrupt handler should just send EOI and wait for the next interrupt without iret
 pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers) -> bool;
@@ -60,10 +60,10 @@ impl TimerState {
 
         while let Some(timer) = self.timers.front() {
             if self.jiffies >= timer.expires_at {
-                let lateness = self.jiffies - timer.expires_at;
+                //let lateness = self.jiffies - timer.expires_at;
                 let callback = self.timers.pop_front().unwrap().callback;
 
-                trace!("timer timed out at {} ({lateness} ticks late), {} more timers", self.jiffies, self.timers.len());
+                //trace!("timer timed out at {} ({lateness} ticks late), {} more timers", self.jiffies, self.timers.len());
 
                 self.release_lock();
 
@@ -105,6 +105,11 @@ impl TimerState {
     /// returns the timer's hz value (how many ticks per second)
     pub fn hz(&self) -> u64 {
         self.hz
+    }
+
+    /// returns the number of ticks per millisecond
+    pub fn millis(&self) -> u64 {
+        self.hz / 1000
     }
 
     /// adds a timer that expires at the given time
@@ -149,6 +154,15 @@ impl TimerState {
         }
 
         self.release_lock();
+    }
+
+    /// waits the given amount of ticks before returning
+    pub fn wait(&self, length: u64) {
+        let expires = self.jiffies + length;
+
+        while self.jiffies < expires {
+            crate::arch::spin();
+        }
     }
 }
 

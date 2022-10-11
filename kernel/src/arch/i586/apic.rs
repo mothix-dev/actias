@@ -1,11 +1,11 @@
 use super::{paging::PageDir, PAGE_SIZE};
-use crate::mm::paging::{PageDirectory, PageFrame};
+use crate::mm::paging::{get_page_manager, PageDirectory, PageFrame};
 use alloc::alloc::{alloc, Layout};
+use log::debug;
 use volatile::{
     access::{ReadOnly, ReadWrite, WriteOnly},
     Volatile, // fluid
 };
-use log::debug;
 
 #[repr(usize)]
 pub enum APICRegisters {
@@ -58,6 +58,7 @@ pub enum APICRegisters {
     TimerDivideConfiguration = 0xf8,
 }
 
+#[derive(Debug)]
 pub struct LocalAPIC {
     pub local_apic_id: Volatile<&'static mut u32, ReadWrite>,
     pub local_apic_version: Volatile<&'static mut u32, ReadOnly>,
@@ -72,7 +73,7 @@ pub struct LocalAPIC {
     pub in_service: [Volatile<&'static mut u32, ReadOnly>; 8],
     pub trigger_mode: [Volatile<&'static mut u32, ReadOnly>; 8],
     pub interrupt_request: [Volatile<&'static mut u32, ReadOnly>; 8],
-    pub error_status: Volatile<&'static mut u32, ReadOnly>,
+    pub error_status: Volatile<&'static mut u32, ReadWrite>,
     pub corrected_machine_check_interrupt: Volatile<&'static mut u32, ReadWrite>,
     pub interrupt_command: [Volatile<&'static mut u32, ReadWrite>; 2],
     pub lvt_timer: Volatile<&'static mut u32, ReadWrite>,
@@ -128,7 +129,7 @@ impl LocalAPIC {
                 Volatile::new_read_only(&mut *(mapped.add(APICRegisters::InterruptRequest6 as usize))),
                 Volatile::new_read_only(&mut *(mapped.add(APICRegisters::InterruptRequest7 as usize))),
             ],
-            error_status: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::ErrorStatus as usize))),
+            error_status: Volatile::new(&mut *(mapped.add(APICRegisters::ErrorStatus as usize))),
             corrected_machine_check_interrupt: Volatile::new(&mut *(mapped.add(APICRegisters::CorrectedMachineCheckInterrupt as usize))),
             interrupt_command: [
                 Volatile::new(&mut *(mapped.add(APICRegisters::InterruptCommand0 as usize))),
@@ -148,20 +149,82 @@ impl LocalAPIC {
         }
     }
 
+    /// writes an interrupt command to the interrupt command registers
     pub fn write_interrupt_command(&mut self, command: InterruptCommand) {
-        debug!("writing interrupt command {:#x}, {:#x}", command.0, command.1);
+        let flags = super::get_flags();
+        super::cli();
+
         self.interrupt_command[1].write(command.1);
         self.interrupt_command[0].write(command.0);
+
+        super::set_flags(flags);
     }
 
-    pub fn send_sipi(&mut self, id: u8, starting_page: u8) {
+    /// checks whether the last interrupt command sent was accepted
+    pub fn was_interrupt_accepted(&self) -> bool {
+        (self.interrupt_command[0].read() & (1 << 12)) > 0
+    }
+
+    /// waits for the last interrupt command sent to be accepted
+    pub fn wait_for_interrupt_accepted(&self) {
+        while !self.was_interrupt_accepted() {
+            super::spin();
+        }
+    }
+
+    /// sends a SIPI interrupt to the given CPU, telling it to start executing code at the provided page
+    pub fn send_sipi(&mut self, timer_id: usize, id: u8, starting_page: u8) {
+        debug!("sending SIPI to APIC {id} @ page {starting_page:#x}");
+
+        let timer = crate::timer::get_timer(timer_id).unwrap();
+
+        // assert INIT
         self.write_interrupt_command(
             InterruptCommandBuilder::new()
-                .dest_mode(super::apic::InterruptDestMode::SIPI)
-                .starting_page_number(starting_page)
+                .dest_mode(InterruptDestMode::INIT)
                 .physical_destination(id)
                 .finish()
         );
+
+        // not sure if this is required or not, works on QEMU but doesn't on bochs
+        //self.wait_for_interrupt_accepted();
+
+        // de-assert INIT
+        self.write_interrupt_command(
+            InterruptCommandBuilder::new()
+                .dest_mode(InterruptDestMode::INIT)
+                .init_level_deassert()
+                .physical_destination(id)
+                .finish(),
+        );
+
+        //self.wait_for_interrupt_accepted();
+
+        // wait for 10 ms
+        timer.wait(timer.millis() * 10);
+
+        for _i in 0..2 {
+            self.write_interrupt_command(
+                InterruptCommandBuilder::new()
+                    .dest_mode(InterruptDestMode::SIPI)
+                    .starting_page_number(starting_page)
+                    .physical_destination(id)
+                    .finish(),
+            );
+
+            // wait 1 ms
+            timer.wait(timer.millis() * 1);
+
+            //self.wait_for_interrupt_accepted();
+        }
+
+        // need to wait for a bit here to ensure things don't break when firing off multiple consecutive SIPIs
+        timer.wait(timer.millis() * 10);
+    }
+
+    /// gets the ID of this APIC
+    pub fn id(&self) -> u8 {
+        (self.local_apic_id.read() >> 24) as u8
     }
 }
 
@@ -195,6 +258,7 @@ pub struct InterruptCommandBuilder {
 }
 
 impl InterruptCommandBuilder {
+    /// creates a new interrupt command builder
     pub fn new() -> Self {
         Self {
             vector_number: 0,
@@ -206,36 +270,43 @@ impl InterruptCommandBuilder {
         }
     }
 
+    /// sets the vector number of this interrupt command
     pub fn vector_number(mut self, vector_number: u8) -> Self {
         self.vector_number = vector_number;
         self
     }
 
+    /// if this interrupt is of mode SIPI, set the page that the CPU should start executing from
     pub fn starting_page_number(mut self, starting_page_number: u8) -> Self {
         self.vector_number = starting_page_number;
         self
     }
 
+    /// sets the destination mode of this interrupt command
     pub fn dest_mode(mut self, dest_mode: InterruptDestMode) -> Self {
         self.dest_mode = dest_mode;
         self
     }
 
+    /// sets whether this interrupt command should have a logical destination
     pub fn logical_destination(mut self) -> Self {
         self.logical_destination = true;
         self
     }
 
+    /// set if
     pub fn init_level_deassert(mut self) -> Self {
         self.init_level_deassert = true;
         self
     }
 
+    /// sets the destination type of this interrupt command
     pub fn dest_kind(mut self, dest_kind: InterruptDestKind) -> Self {
         self.dest_kind = dest_kind;
         self
     }
 
+    /// sets the physical destination of this interrupt command
     pub fn physical_destination(mut self, destination: u8) -> Self {
         self.physical_destination = destination;
         self
@@ -249,6 +320,7 @@ impl InterruptCommandBuilder {
         if self.logical_destination {
             command.0 |= 1 << 11;
         }
+        command.0 |= 1 << 12; // set delivery status to 1, will be cleared when the interrupt is accepted
         if self.init_level_deassert {
             command.0 |= 1 << 15;
         } else {
@@ -262,14 +334,15 @@ impl InterruptCommandBuilder {
     }
 }
 
-pub fn map_local_apic(page_dir: &mut PageDir, addr: u64) {
+pub fn map_local_apic(page_dir: &mut PageDir<'static>, addr: u64) {
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
 
     let buf = unsafe { alloc(layout) };
 
     assert!(!buf.is_null(), "failed to allocate memory for mapping local APIC");
 
-    // FIXME: this page should be freed in the page manager
+    get_page_manager().free_frame(page_dir, buf as usize).expect("couldn't free page");
+
     page_dir
         .set_page(
             buf as usize,
@@ -283,6 +356,8 @@ pub fn map_local_apic(page_dir: &mut PageDir, addr: u64) {
         )
         .expect("couldn't remap page");
 
+    debug!("local APIC: {addr:#x} @ {buf:?}");
+
     unsafe {
         LOCAL_APIC = Some(LocalAPIC::from_raw_pointer(buf as *mut u32));
     }
@@ -293,4 +368,64 @@ static mut LOCAL_APIC: Option<LocalAPIC> = None;
 pub fn get_local_apic() -> &'static mut LocalAPIC {
     // distributing mutable references is fine here since it's MMIO local to the current processor
     unsafe { LOCAL_APIC.as_mut().expect("local APIC not mapped yet") }
+}
+
+pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &[u8]) {
+    // populate cpu bootstrap memory region
+    let bootstrap_bytes = include_bytes!("../../../../target/cpu_bootstrap.bin");
+    let bootstrap_addr = crate::platform::get_cpu_bootstrap_addr();
+
+    // map bootstrap area into memory temporarily
+    page_dir
+        .set_page(
+            bootstrap_addr.try_into().unwrap(),
+            Some(crate::mm::paging::PageFrame {
+                addr: bootstrap_addr,
+                present: true,
+                user_mode: false,
+                writable: true,
+                copy_on_write: false,
+            }),
+        )
+        .unwrap();
+
+    let bootstrap_area = unsafe { &mut *(bootstrap_addr as *mut [u8; PAGE_SIZE]) };
+
+    (&mut bootstrap_area[0..bootstrap_bytes.len()]).copy_from_slice(bootstrap_bytes);
+
+    // specify stack pointer
+    unsafe {
+        *(&mut bootstrap_area[bootstrap_area.len() - 4] as *mut u8 as *mut u32) = 0x2000 - 12;
+    }
+
+    // specify protected mode entry point
+    unsafe {
+        *(&mut bootstrap_area[bootstrap_area.len() - 8] as *mut u8 as *mut u32) = cpu_entry_point as *const u8 as u32;
+    }
+
+    debug!("page dir @ {:#x}", page_dir.tables_physical_addr);
+
+    // specify page table physical address
+    unsafe {
+        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = page_dir.tables_physical_addr;
+    }
+
+    let local_apic = get_local_apic();
+    let local_apic_id = local_apic.id();
+
+    // start up other CPUs
+    for &id in apic_ids {
+        if id != local_apic_id {
+            local_apic.send_sipi(super::ints::pit_timer_num(), id, (crate::platform::get_cpu_bootstrap_addr() / 0x1000).try_into().unwrap());
+        }
+    }
+
+    // unmap the bootstrap area from memory
+    page_dir.set_page(bootstrap_addr.try_into().unwrap(), None).unwrap();
+}
+
+unsafe extern "C" fn cpu_entry_point() {
+    use log::info;
+
+    info!("CPU with APIC {} is alive!", get_local_apic().id());
 }

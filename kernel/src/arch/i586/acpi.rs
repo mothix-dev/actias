@@ -473,7 +473,7 @@ pub fn find_madt(page_dir: &mut PageDir, sdt_pointers: &[u64]) -> Option<MADT> {
     None
 }
 
-pub fn init_apic(page_dir: &mut PageDir, topology: Option<super::CPUTopology>, mapping: Option<super::APICToCPU>) {
+pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTopology>, mapping: Option<super::APICToCPU>) {
     let sdt_pointers = find_sdts(page_dir).unwrap();
     let madt = find_madt(page_dir, &sdt_pointers).unwrap();
 
@@ -553,37 +553,7 @@ pub fn init_apic(page_dir: &mut PageDir, topology: Option<super::CPUTopology>, m
     // set global cpu topology, queues, etc
     crate::task::set_cpus(cpus);
 
-    // todo: cpu bringup
-
-    let local_apic = super::apic::get_local_apic();
-
-    let local_apic_id = local_apic.local_apic_id.read();
-    let local_apic_version = local_apic.local_apic_id.read();
-
-    debug!("local APIC is {local_apic_id}, version {local_apic_version}");
-
-    //local_apic.send_sipi(1, 0);
-    /*local_apic.interrupt_command[0].write(0xc4500);
-
-    let timer = crate::timer::get_timer(0).unwrap();
-    timer.add_timer_in(timer.hz() / 100, test_timer_callback).unwrap();
-
-    loop {
-        crate::arch::halt_until_interrupt();
-    }*/
+    // bring up CPUs
+    let apic_ids: Vec<u8> = local_apics.iter().map(|(id, _, _)| *id as u8).collect();
+    super::apic::bring_up_cpus(page_dir, &apic_ids);
 }
-
-/*fn test_timer_callback(_num: usize, _cpu: Option<crate::task::cpu::ThreadID>, _regs: &mut crate::arch::Registers) -> bool {
-    super::apic::get_local_apic().interrupt_command[0].write(0xc4602);
-
-    let timer = crate::timer::get_timer(0).unwrap();
-    timer.add_timer_in(timer.hz() / 1000, test_timer_callback_2).unwrap();
-
-    true
-}
-
-fn test_timer_callback_2(_num: usize, _cpu: Option<crate::task::cpu::ThreadID>, _regs: &mut crate::arch::Registers) -> bool {
-    super::apic::get_local_apic().interrupt_command[0].write(0xc4602);
-
-    true
-}*/

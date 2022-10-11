@@ -38,6 +38,8 @@ pub const HEAP_MIN_SIZE: usize = 0x70000;
 //static mut PAGE_MANAGER: Option<PageManager<PageDir>> = None;
 static mut PAGE_DIR: Option<PageDir> = None;
 
+static mut BOOTSTRAP_ADDR: u64 = 0;
+
 extern "C" {
     /// located at end of loader, used for more efficient memory mappings
     static kernel_end: u8;
@@ -64,6 +66,11 @@ pub extern "C" fn x86_prep_page_table(buf: &mut [u32; 1024]) {
 
     buf[((unsafe { (&int_stack_base as *const _) as usize } - LINKED_BASE) / PAGE_SIZE) - 1] = 0;
     buf[((unsafe { (&stack_base as *const _) as usize } - LINKED_BASE) / PAGE_SIZE) - 1] = 0;
+}
+
+/// gets the physical address for bootstrap code for other cpus
+pub fn get_cpu_bootstrap_addr() -> u64 {
+    unsafe { BOOTSTRAP_ADDR }
 }
 
 #[no_mangle]
@@ -119,10 +126,12 @@ pub fn kmain() {
 
     let heap_reserved = PAGE_SIZE * 2;
 
-    // allocate pages
-    debug!("mapping kernel ({LINKED_BASE:#x} - {kernel_end_pos:#x})");
+    let kernel_start = LINKED_BASE + 0x100000;
 
-    for addr in (LINKED_BASE..kernel_end_pos).step_by(PAGE_SIZE) {
+    // allocate pages
+    debug!("mapping kernel ({kernel_start:#x} - {kernel_end_pos:#x})");
+
+    for addr in (kernel_start..kernel_end_pos).step_by(PAGE_SIZE) {
         if !page_dir.has_page_table(addr.try_into().unwrap()) {
             debug!("allocating new page table");
             let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
@@ -138,6 +147,17 @@ pub fn kmain() {
 
     debug!("interrupt stack @ {int_stack_base_pos:#x} - {int_stack_end_pos:#x}");
     manager.free_frame(&mut page_dir, int_stack_base_pos - PAGE_SIZE).unwrap();
+
+    // set aside some memory for bootstrapping other CPUs
+    //let bootstrap_addr = manager.first_available_frame(&page_dir).unwrap();
+    let bootstrap_addr = 0x1000;
+    manager.set_frame_used(&page_dir, bootstrap_addr);
+
+    debug!("bootstrap code @ {bootstrap_addr:#x}");
+
+    unsafe {
+        BOOTSTRAP_ADDR = bootstrap_addr;
+    }
 
     let heap_init_end = KHEAP_START + HEAP_MIN_SIZE;
     debug!("mapping heap ({KHEAP_START:#x} - {heap_init_end:#x})");

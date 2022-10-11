@@ -22,34 +22,6 @@ pub const INV_PAGE_SIZE: usize = !(PAGE_SIZE - 1);
 
 pub const MAX_STACK_FRAMES: usize = 1024;
 
-/// gets the value of the eflags register in the cpu as an easy to use struct
-pub fn get_eflags() -> EFlags {
-    unsafe {
-        let mut flags: u32;
-
-        asm!(
-            "pushfd",
-            "pop {}",
-            out(reg) flags,
-        );
-
-        EFlags::from_bits(flags).unwrap()
-    }
-}
-
-/// sets the value of the eflags register in the cpu
-pub fn set_eflags(flags: EFlags) {
-    unsafe {
-        let flags: u32 = flags.bits();
-
-        asm!(
-            "push {}",
-            "popfd",
-            in(reg) flags,
-        );
-    }
-}
-
 fn cpuid_reader(leaf: u32, subleaf: u32) -> CpuIdResult {
     let eax: u32;
     let ebx: u32;
@@ -274,9 +246,77 @@ pub unsafe fn halt() -> ! {
 }
 
 /// halts the CPU until an interrupt occurs
+#[inline(always)]
 pub fn halt_until_interrupt() {
     unsafe {
         asm!("sti; hlt");
+    }
+}
+
+/// busy waits for a cycle
+#[inline(always)]
+pub fn spin() {
+    unsafe {
+        asm!("pause");
+    }
+}
+
+#[repr(transparent)]
+pub struct CPUFlags(pub u32);
+
+impl From<EFlags> for CPUFlags {
+    fn from(flags: EFlags) -> Self {
+        CPUFlags(flags.bits())
+    }
+}
+
+impl From<CPUFlags> for EFlags {
+    fn from(flags: CPUFlags) -> Self {
+        Self::from_bits(flags.0).unwrap()
+    }
+}
+
+/// gets the current CPU flags
+#[inline(always)]
+pub fn get_flags() -> CPUFlags {
+    unsafe {
+        let mut flags: u32;
+
+        asm!(
+            "pushfd",
+            "pop {}",
+            out(reg) flags,
+        );
+
+        CPUFlags(flags)
+    }
+}
+
+/// sets the current CPU flags to the provided flags
+#[inline(always)]
+pub fn set_flags(flags: CPUFlags) {
+    unsafe {
+        asm!(
+            "push {}",
+            "popfd",
+            in(reg) flags.0,
+        );
+    }
+}
+
+/// disables all interrupts for the current processor
+#[inline(always)]
+pub fn cli() {
+    unsafe {
+        asm!("cli");
+    }
+}
+
+/// enables all interrupts for the current processor
+#[inline(always)]
+pub fn sti() {
+    unsafe {
+        asm!("sti");
     }
 }
 
@@ -296,7 +336,7 @@ fn init_single_core_pit() {
     crate::task::wait_for_context_switch(ints::pit_timer_num(), ThreadID { core: 0, thread: 0 });
 }
 
-pub fn init(page_dir: &mut paging::PageDir, args: Option<BTreeMap<&str, &str>>) {
+pub fn init(page_dir: &mut paging::PageDir<'static>, args: Option<BTreeMap<&str, &str>>) {
     unsafe {
         ints::init_irqs();
     }
@@ -308,7 +348,7 @@ pub fn init(page_dir: &mut paging::PageDir, args: Option<BTreeMap<&str, &str>>) 
     } else {
         let cpuid = read_cpuid();
 
-        info!("{:?}", cpuid);
+        debug!("{:?}", cpuid);
 
         let model = if let Some(brand) = cpuid.get_processor_brand_string() {
             brand.as_str().to_string()

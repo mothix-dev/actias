@@ -39,7 +39,6 @@ mboot:
 
 .extern x86_prep_page_table
 /* === Code === */
-.code32
 .section .inittext, "ax"
 .globl start
 start:
@@ -65,16 +64,6 @@ start:
     /* Jump High and set CS */
     ljmp $0x08,$start_high
 
-.code16
-.section .inittext2, "ax"
-.globl other_cpu_start
-other_cpu_start:
-    mov %dx, 0x3f8
-    mov %al, 65
-    outb %al, %dx
-    jmp start /* hopefully this will be relative! */
-
-.code32
 .section .text
 .globl start_high
 .extern kmain
@@ -83,7 +72,7 @@ start_high:
     /* Clear identity mapping */
     movl $0, page_directory+0
 
-    /* Prep segment registers */    
+    /* Prep segment registers */
     mov $0x10, %ax
     mov %ax, %ss
     mov %ax, %ds
@@ -103,7 +92,6 @@ start_high:
 
 /* === Page-aligned data === */
 .section .padata
-.globl page_directory /* we need to access this in paging.rs! */
 page_directory:
     .long init_pt - LINKED_BASE + 3
     .rept 896-1

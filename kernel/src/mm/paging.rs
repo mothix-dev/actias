@@ -594,9 +594,33 @@ pub fn get_page_manager() -> MutexGuard<'static, PageManager<crate::arch::PageDi
 pub fn set_page_manager(manager: PageManager<crate::arch::PageDirectory<'static>>) {
     unsafe {
         if PAGE_MANAGER.is_some() {
-            panic!("cannot initialize pagemanager twice");
+            panic!("can't initialize pagemanager twice");
         } else {
             PAGE_MANAGER = Some(Mutex::new(manager));
+        }
+    }
+}
+
+static mut KERNEL_PAGE_DIR: Option<Mutex<crate::arch::PageDirectory<'static>>> = None;
+
+pub fn get_page_dir() -> MutexGuard<'static, crate::arch::PageDirectory<'static>> {
+    unsafe {
+        let dir = KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set");
+
+        if dir.is_locked() {
+            debug!("warning: kernel page directory is locked");
+        }
+
+        dir.lock()
+    }
+}
+
+pub fn set_page_dir(dir: crate::arch::PageDirectory<'static>) {
+    unsafe {
+        if KERNEL_PAGE_DIR.is_some() {
+            panic!("can't set kernel page directory twice");
+        } else {
+            KERNEL_PAGE_DIR = Some(Mutex::new(dir));
         }
     }
 }

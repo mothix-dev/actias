@@ -1,6 +1,6 @@
 //! x86 non-PAE paging
 
-use super::{get_eflags, PAGE_SIZE};
+use super::PAGE_SIZE;
 use crate::{
     mm::{
         bump_alloc::bump_alloc,
@@ -13,7 +13,6 @@ use alloc::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use bitmask_enum::bitmask;
 use core::{arch::asm, fmt, mem::size_of};
 use log::{error, trace};
-use x86::bits32::eflags::EFlags;
 use x86::tlb::flush;
 
 /// entry in a page table
@@ -648,8 +647,7 @@ impl<'a> PageDirectory for PageDir<'a> {
 
         trace!("switching to page table @ {:#x}", self.tables_physical_addr);
 
-        // FIXME: add global state for whether interrupts are enabled to avoid parsing eflags (which is slow)
-        let enable_interrupts = get_eflags().contains(EFlags::FLAGS_IF);
+        let flags = super::get_flags();
 
         asm!(
             "cli", // we CANNOT afford for this code to be interrupted
@@ -666,9 +664,7 @@ impl<'a> PageDirectory for PageDir<'a> {
         // this is horribly unsafe, however we do have checks in place to make sure this reference stays valid
         CURRENT_PAGE_DIR = Some(core::mem::transmute(self));
 
-        if enable_interrupts {
-            asm!("sti");
-        }
+        super::set_flags(flags);
     }
 
     fn page_size(&self) -> usize {
