@@ -27,17 +27,19 @@ use log::error;
 
 #[panic_handler]
 pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
+    let thread_id = arch::get_thread_id();
+
     let (file, line) = match info.location() {
         Some(loc) => (loc.file(), loc.line()),
         None => ("", 0),
     };
 
     if let Some(m) = info.message() {
-        error!("PANIC: {m} @ {file}:{line}");
+        error!("PANIC (CPU {thread_id}): {m} @ {file}:{line}");
     } else if let Some(m) = info.payload().downcast_ref::<&str>() {
-        error!("PANIC: {m} @ {file}:{line}");
+        error!("PANIC (CPU {thread_id}): {m} @ {file}:{line}");
     } else {
-        error!("PANIC @ {file}:{line}");
+        error!("PANIC (CPU {thread_id}) @ {file}:{line}");
     }
 
     unsafe {

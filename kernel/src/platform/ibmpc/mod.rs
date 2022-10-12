@@ -105,18 +105,21 @@ pub fn kmain() {
     }
 
     // initialize the pagemanager to manage our page allocations
-    set_page_manager(PageManager::new({
-        let layout = Layout::new::<u32>();
-        let ptr = unsafe {
-            bump_alloc::<u32>(Layout::from_size_align(mem_size_pages / 32 * layout.size(), layout.align()).unwrap())
-                .unwrap()
-                .pointer
-        };
-        let mut bitset = BitSet::place_at(ptr, mem_size_pages);
-        bitset.clear_all();
-        bootloader::reserve_pages(&mut bitset);
-        bitset
-    }));
+    set_page_manager(PageManager::new(
+        {
+            let layout = Layout::new::<u32>();
+            let ptr = unsafe {
+                bump_alloc::<u32>(Layout::from_size_align(mem_size_pages / 32 * layout.size(), layout.align()).unwrap())
+                    .unwrap()
+                    .pointer
+            };
+            let mut bitset = BitSet::place_at(ptr, mem_size_pages);
+            bitset.clear_all();
+            bootloader::reserve_pages(&mut bitset);
+            bitset
+        },
+        PAGE_SIZE,
+    ));
 
     // grab a reference to the page manager so we don't have to continuously lock and unlock it while we're doing initial memory allocations
     let mut manager = get_page_manager();
@@ -149,9 +152,9 @@ pub fn kmain() {
     manager.free_frame(&mut page_dir, int_stack_base_pos - PAGE_SIZE).unwrap();
 
     // set aside some memory for bootstrapping other CPUs
-    //let bootstrap_addr = manager.first_available_frame(&page_dir).unwrap();
+    //let bootstrap_addr = manager.first_available_frame().unwrap();
     let bootstrap_addr = 0x1000;
-    manager.set_frame_used(&page_dir, bootstrap_addr);
+    manager.set_frame_used(bootstrap_addr);
 
     debug!("bootstrap code @ {bootstrap_addr:#x}");
 

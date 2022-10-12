@@ -6,7 +6,7 @@ use alloc::{
     alloc::{alloc, dealloc, Layout},
     vec::Vec,
 };
-use core::{fmt, marker::PhantomData};
+use core::fmt;
 use log::{debug, error, trace};
 use spin::{Mutex, MutexGuard};
 
@@ -76,6 +76,8 @@ impl fmt::Debug for PageFrame {
 
 /// safe abstraction layer for page directories. allows a consistent interface to page directories of multiple architectures
 pub trait PageDirectory {
+    const PAGE_SIZE: usize;
+
     /* -= Required functions -= */
 
     /// given a virtual address, get the page that contains it from this directory in a hardware agnostic form
@@ -96,9 +98,6 @@ pub trait PageDirectory {
     /// this function is unsafe since whatever code is being run currently could be different or nonexistent when switching pages, thus causing undefined behavior
     unsafe fn switch_to(&self);
 
-    /// gets the page size that this page directory uses in bytes
-    fn page_size(&self) -> usize;
-
     /* -= Non required functions =- */
 
     /// given an address, checks whether the page that contains it is unused and can be freely remapped
@@ -114,8 +113,8 @@ pub trait PageDirectory {
     /// * `from` - the starting index in the page directory to be copied from (index here means an address divided by the system's page size, i.e. 4 KiB on x86)
     /// * `to` - the starting index in the page directory we're copying to
     /// * `num` - the number of pages to copy
-    fn copy_from(&mut self, dir: &mut Self, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        let page_size = self.page_size();
+    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        let page_size = Self::PAGE_SIZE;
 
         // just iterate over all pages in the range provided and copy them
         for i in (0..(num * page_size)).step_by(page_size) {
@@ -133,8 +132,8 @@ pub trait PageDirectory {
     /// * `from` - the starting index in the page directory to be copied from (index here means an address divided by the system's page size, i.e. 4 KiB on x86)
     /// * `to` - the starting index in the page directory we're copying to
     /// * `num` - the number of pages to copy
-    fn copy_on_write_from(&mut self, dir: &mut Self, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        let page_size = self.page_size();
+    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        let page_size = Self::PAGE_SIZE;
 
         for i in (0..(num * page_size)).step_by(page_size) {
             let mut page = dir.get_page(from + i);
@@ -159,7 +158,7 @@ pub trait PageDirectory {
 
     /// transforms the provided virtual address in this page directory into a physical address, if possible
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
-        let page_size = self.page_size() - 1;
+        let page_size = Self::PAGE_SIZE - 1;
         let page_addr = virt & !page_size;
         let offset = virt & page_size;
 
@@ -182,9 +181,9 @@ pub trait PageDirectory {
     ///
     /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
     /// page directory, and things can and will break if it's called on any other page directory
-    unsafe fn map_memory_from<O, R>(&mut self, from: &mut Self, addr: usize, len: usize, op: O) -> Result<R, PagingError>
+    unsafe fn map_memory_from<O, R>(&mut self, from: &mut impl PageDirectory, addr: usize, len: usize, op: O) -> Result<R, PagingError>
     where O: FnOnce(&mut [u8]) -> R {
-        let page_size = self.page_size();
+        let page_size = Self::PAGE_SIZE;
 
         // get starting and ending addresses
         let mut start = addr;
@@ -253,7 +252,7 @@ pub trait PageDirectory {
     /// page directory, and things can and will break if it's called on any other page directory
     unsafe fn map_memory<O, R>(&mut self, addresses: &[u64], op: O) -> Result<R, PagingError>
     where O: FnOnce(&mut [u8]) -> R {
-        let page_size = self.page_size();
+        let page_size = Self::PAGE_SIZE;
 
         let buf_len = addresses.len() * page_size;
 
@@ -306,7 +305,7 @@ pub trait PageDirectory {
             debug!("{virt:x} now @ phys addr: {phys_addr:x}");
 
             // todo: maybe change this to debug_assert at some point? its prolly hella slow
-            assert!(!existing_phys.contains(&phys_addr), "trampling on other page directory's memory");
+            assert!(!existing_phys.contains(phys_addr), "trampling on other page directory's memory");
 
             // remap memory
             self.set_page(
@@ -359,7 +358,7 @@ pub trait PageDirectory {
     /// * `end` - the highest address this hole can be located at. must be page aligned
     /// * `size` - the size of the hole (automatically rounded up to the nearest multiple of the page size of this page directory)
     fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        let page_size = self.page_size();
+        let page_size = Self::PAGE_SIZE;
 
         assert!(start % page_size == 0, "start address is not page aligned");
         assert!(end % page_size == 0, "end address is not page aligned");
@@ -390,7 +389,7 @@ pub trait PageDirectory {
 
 /// struct to make allocating physical memory for page directories easier
 #[repr(C)]
-pub struct PageManager<T: PageDirectory> {
+pub struct PageManager {
     /// bitset to speed up allocation of page frames
     ///
     /// every bit in this set represents an individual page in the directory
@@ -398,18 +397,18 @@ pub struct PageManager<T: PageDirectory> {
     /// the size of this bitset can be calculated by dividing the address of the top of available memory by the system's page size
     pub frame_set: BitSet,
 
-    /// phantom data used to restrict page managers to specific page directory types, otherwise rust complains about vtables
-    phantom: PhantomData<T>,
+    /// the page size of this page manager
+    pub page_size: usize,
 }
 
-impl<T: PageDirectory> PageManager<T> {
+impl PageManager {
     /// creates a new page manager with the provided bitset for available frames
     ///
     /// # Arguments
     ///
     /// * `frame_set` - a BitSet that stores which pages are available and which arent. should be created based on the system's memory map
-    pub fn new(frame_set: BitSet) -> Self {
-        Self { frame_set, phantom: PhantomData::<T> }
+    pub fn new(frame_set: BitSet, page_size: usize) -> Self {
+        Self { frame_set, page_size }
     }
 
     /// allocates a frame in the provided page directory
@@ -422,14 +421,14 @@ impl<T: PageDirectory> PageManager<T> {
     /// * `addr` - the virtual address to allocate the frame at. must be page aligned
     /// * `user_mode` - whether the allocated page will be accessible in user mode
     /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool) -> Result<u64, PagingError> {
-        let page_size = dir.page_size();
+    pub fn alloc_frame<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool) -> Result<u64, PagingError> {
+        assert!(T::PAGE_SIZE == self.page_size);
 
-        assert!(addr % page_size == 0, "frame address is not page aligned");
+        assert!(addr % self.page_size == 0, "frame address is not page aligned");
 
         if dir.is_unused(addr) {
             if let Some(idx) = self.frame_set.first_unset() {
-                let phys_addr = idx as u64 * page_size as u64;
+                let phys_addr = idx as u64 * self.page_size as u64;
 
                 let frame = PageFrame {
                     addr: phys_addr,
@@ -453,8 +452,8 @@ impl<T: PageDirectory> PageManager<T> {
         }
     }
 
-    pub fn first_available_frame(&self, dir: &T) -> Option<u64> {
-        self.frame_set.first_unset().map(|i| (i as u64) * (dir.page_size() as u64))
+    pub fn first_available_frame(&self) -> Option<u64> {
+        self.frame_set.first_unset().map(|i| (i as u64) * (self.page_size as u64))
     }
 
     /// allocates a frame in the provided page directory at the given physical address, if available
@@ -466,14 +465,14 @@ impl<T: PageDirectory> PageManager<T> {
     /// * `phys` - the physical address to map the frame to. must also be page aligned
     /// * `user_mode` - whether the allocated page will be accessible in user mode
     /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame_at(&mut self, dir: &mut T, addr: usize, phys: u64, user_mode: bool, writable: bool) -> Result<(), PagingError> {
-        let page_size = dir.page_size();
+    pub fn alloc_frame_at<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, phys: u64, user_mode: bool, writable: bool) -> Result<(), PagingError> {
+        assert!(T::PAGE_SIZE == self.page_size);
 
-        assert!(addr % page_size == 0, "frame address is not page aligned");
-        assert!(phys % page_size as u64 == 0, "physical address is not page aligned");
+        assert!(addr % self.page_size == 0, "frame address is not page aligned");
+        assert!(phys % self.page_size as u64 == 0, "physical address is not page aligned");
 
         if dir.is_unused(addr) {
-            let idx = phys / page_size as u64;
+            let idx = phys / self.page_size as u64;
 
             let frame = PageFrame {
                 addr: phys,
@@ -500,12 +499,10 @@ impl<T: PageDirectory> PageManager<T> {
     ///
     /// * `dir` - a page table, used to get page size
     /// * `addr` - the address of the frame
-    pub fn set_frame_used(&mut self, dir: &T, addr: u64) {
-        let page_size = dir.page_size() as u64;
+    pub fn set_frame_used(&mut self, addr: u64) {
+        assert!(addr % self.page_size as u64 == 0, "frame address is not page aligned");
 
-        assert!(addr % page_size == 0, "frame address is not page aligned");
-
-        let idx = (addr / page_size).try_into().unwrap();
+        let idx = (addr / self.page_size as u64).try_into().unwrap();
         debug!("setting {idx:#x} as used");
         self.frame_set.set(idx);
 
@@ -518,12 +515,10 @@ impl<T: PageDirectory> PageManager<T> {
     ///
     /// * `dir` - a page table, used to get page size
     /// * `addr` - the address of the frame
-    pub fn set_frame_free(&mut self, dir: &T, addr: u64) {
-        let page_size = dir.page_size() as u64;
+    pub fn set_frame_free(&mut self, addr: u64) {
+        assert!(addr % self.page_size as u64 == 0, "frame address is not page aligned");
 
-        assert!(addr % page_size == 0, "frame address is not page aligned");
-
-        self.frame_set.clear((addr / page_size).try_into().unwrap());
+        self.frame_set.clear((addr / self.page_size as u64).try_into().unwrap());
     }
 
     /// frees a frame in the provided page directory, allowing that region of memory to be used by other things
@@ -534,15 +529,15 @@ impl<T: PageDirectory> PageManager<T> {
     ///
     /// * `dir` - the page directory to free the frame in
     /// * `addr` - the virtual address to free the frame at. must be page aligned
-    pub fn free_frame(&mut self, dir: &mut T, addr: usize) -> Result<u64, PagingError> {
-        let page_size = dir.page_size();
+    pub fn free_frame<T: PageDirectory>(&mut self, dir: &mut T, addr: usize) -> Result<u64, PagingError> {
+        assert!(T::PAGE_SIZE == self.page_size);
 
-        assert!(addr % page_size == 0, "frame address is not page aligned");
+        assert!(addr % self.page_size == 0, "frame address is not page aligned");
 
         if let Some(page) = dir.get_page(addr) {
             trace!("freeing phys {:#x}", page.addr);
 
-            self.frame_set.clear((page.addr / page_size as u64) as usize);
+            self.frame_set.clear((page.addr / self.page_size as u64) as usize);
             dir.set_page(addr, None)?;
 
             Ok(page.addr)
@@ -561,24 +556,24 @@ impl<T: PageDirectory> PageManager<T> {
     /// sets all the pages mapped in the given page directory to used in this PageManager, so that no future allocations use the same memory
     ///
     /// note: this is slow! very slow! this should be done as infrequently as possible
-    pub fn sync_from_dir(&mut self, dir: &T) {
-        let page_size = dir.page_size();
+    pub fn sync_from_dir<T: PageDirectory>(&mut self, dir: &T) {
+        assert!(T::PAGE_SIZE == self.page_size);
 
         // iterate over all virtual addresses
-        for i in (0..=usize::MAX).step_by(page_size) {
+        for i in (0..=usize::MAX).step_by(self.page_size) {
             if dir.get_page(i).is_some() {
                 //info!("got page @ {:#x}", i);
-                self.frame_set.set(i / page_size);
+                self.frame_set.set(i / self.page_size);
             }
         }
     }
 }
 
 /// our kernel-wide page manager instance
-static mut PAGE_MANAGER: Option<Mutex<PageManager<crate::arch::PageDirectory>>> = None;
+static mut PAGE_MANAGER: Option<Mutex<PageManager>> = None;
 
 /// gets the global page manager, locked with a spinlock
-pub fn get_page_manager() -> MutexGuard<'static, PageManager<crate::arch::PageDirectory<'static>>> {
+pub fn get_page_manager() -> MutexGuard<'static, PageManager> {
     unsafe {
         let manager = PAGE_MANAGER.as_ref().expect("page manager not initialized");
 
@@ -591,7 +586,7 @@ pub fn get_page_manager() -> MutexGuard<'static, PageManager<crate::arch::PageDi
 }
 
 /// sets the global page manager. can only be called once
-pub fn set_page_manager(manager: PageManager<crate::arch::PageDirectory<'static>>) {
+pub fn set_page_manager(manager: PageManager) {
     unsafe {
         if PAGE_MANAGER.is_some() {
             panic!("can't initialize pagemanager twice");

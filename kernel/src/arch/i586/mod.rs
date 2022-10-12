@@ -230,14 +230,15 @@ pub struct ThreadInfo {
 ///
 /// yeah
 pub unsafe fn halt() -> ! {
-    warn!("halting CPU");
+    //warn!("halting CPU");
+    warn!("halting CPU {}", get_thread_id());
 
     // exit qemu
-    x86::io::outb(0x501, 0x31);
+    //x86::io::outb(0x501, 0x31);
 
     // exit bochs
-    x86::io::outw(0x8a00, 0x8a00);
-    x86::io::outw(0x8a00, 0x8ae0);
+    //x86::io::outw(0x8a00, 0x8a00);
+    //x86::io::outw(0x8a00, 0x8ae0);
 
     // halt cpu
     loop {
@@ -320,6 +321,22 @@ pub fn sti() {
     }
 }
 
+static mut HAS_APIC: bool = false;
+static mut APIC_TO_CPU: Option<APICToCPU> = None;
+
+pub fn get_thread_id() -> ThreadID {
+    unsafe {
+        if HAS_APIC  {
+            APIC_TO_CPU.as_ref().unwrap().apic_to_cpu(apic::get_local_apic().id().into())
+        } else {
+            ThreadID {
+                core: 0,
+                thread: 0,
+            }
+        }
+    }
+}
+
 fn init_single_core_pit() {
     // set up CPUs
     let mut cpus = CPU::new();
@@ -375,8 +392,17 @@ pub fn init(page_dir: &mut paging::PageDir<'static>, args: Option<BTreeMap<&str,
             let topology = res.map(|(t, _)| t);
             let mapping = res.map(|(_, m)| m);
 
+            if let Some(t) = topology.as_ref() {
+                info!("detected {} CPUs ({} cores, {} threads per core)", t.logical_processors, t.num_cores, t.threads_per_core);
+            }
+
             debug!("cpu topology: {topology:#?}");
             debug!("apic id to cpu id mapping: {mapping:#?}");
+
+            unsafe {
+                HAS_APIC = true;
+                APIC_TO_CPU = Some(mapping.unwrap_or_default());
+            }
 
             acpi::init_apic(page_dir, topology, mapping);
         } else {

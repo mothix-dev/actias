@@ -157,6 +157,7 @@ impl TimerState {
     }
 
     /// waits the given amount of ticks before returning
+    #[allow(clippy::while_immutable_condition)]
     pub fn wait(&self, length: u64) {
         let expires = self.jiffies + length;
 

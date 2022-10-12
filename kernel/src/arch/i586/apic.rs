@@ -179,12 +179,7 @@ impl LocalAPIC {
         let timer = crate::timer::get_timer(timer_id).unwrap();
 
         // assert INIT
-        self.write_interrupt_command(
-            InterruptCommandBuilder::new()
-                .dest_mode(InterruptDestMode::INIT)
-                .physical_destination(id)
-                .finish()
-        );
+        self.write_interrupt_command(InterruptCommandBuilder::new().dest_mode(InterruptDestMode::INIT).physical_destination(id).finish());
 
         // not sure if this is required or not, works on QEMU but doesn't on bochs
         //self.wait_for_interrupt_accepted();
@@ -213,7 +208,7 @@ impl LocalAPIC {
             );
 
             // wait 1 ms
-            timer.wait(timer.millis() * 1);
+            timer.wait(timer.millis());
 
             //self.wait_for_interrupt_accepted();
         }
@@ -225,6 +220,11 @@ impl LocalAPIC {
     /// gets the ID of this APIC
     pub fn id(&self) -> u8 {
         (self.local_apic_id.read() >> 24) as u8
+    }
+
+    /// gets the version of this APIC
+    pub fn version(&self) -> u16 {
+        (self.local_apic_version.read() >> 16) as u16
     }
 }
 
@@ -334,6 +334,12 @@ impl InterruptCommandBuilder {
     }
 }
 
+impl Default for InterruptCommandBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn map_local_apic(page_dir: &mut PageDir<'static>, addr: u64) {
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
 
@@ -361,6 +367,8 @@ pub fn map_local_apic(page_dir: &mut PageDir<'static>, addr: u64) {
     unsafe {
         LOCAL_APIC = Some(LocalAPIC::from_raw_pointer(buf as *mut u32));
     }
+
+    debug!("local APIC version {}", get_local_apic().version());
 }
 
 static mut LOCAL_APIC: Option<LocalAPIC> = None;
@@ -391,7 +399,7 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
 
     let bootstrap_area = unsafe { &mut *(bootstrap_addr as *mut [u8; PAGE_SIZE]) };
 
-    (&mut bootstrap_area[0..bootstrap_bytes.len()]).copy_from_slice(bootstrap_bytes);
+    bootstrap_area[0..bootstrap_bytes.len()].copy_from_slice(bootstrap_bytes);
 
     // specify stack pointer
     unsafe {
@@ -426,6 +434,14 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
 
 unsafe extern "C" fn cpu_entry_point() {
     use log::info;
+    use core::arch::asm;
 
-    info!("CPU with APIC {} is alive!", get_local_apic().id());
+    super::ints::load();
+    super::gdt::init_other_cpu(0x1000 * 4);
+
+    info!("CPU {} is alive!", super::get_thread_id());
+
+    loop {
+        asm!("cli; hlt");
+    }
 }

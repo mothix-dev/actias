@@ -562,6 +562,8 @@ impl<'a> Default for PageDir<'a> {
 }
 
 impl<'a> PageDirectory for PageDir<'a> {
+    const PAGE_SIZE: usize = PAGE_SIZE;
+
     fn get_page(&self, mut addr: usize) -> Option<PageFrame> {
         addr /= PAGE_SIZE;
 
@@ -665,10 +667,6 @@ impl<'a> PageDirectory for PageDir<'a> {
         CURRENT_PAGE_DIR = Some(core::mem::transmute(self));
 
         super::set_flags(flags);
-    }
-
-    fn page_size(&self) -> usize {
-        PAGE_SIZE
     }
 }
 

@@ -255,10 +255,12 @@ impl fmt::Debug for InterruptRegisters {
 }
 
 unsafe fn generic_exception(name: &str, regs: &InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+
     if regs.error_code == 0 {
-        error!("PANIC: {} @ {:#x}, no error code", name, regs.eip);
+        error!("PANIC (CPU {thread_id}): {name} @ {:#x}, no error code", regs.eip);
     } else {
-        error!("PANIC: {} @ {:#x}, error code {:#x}", name, regs.eip, regs.error_code);
+        error!("PANIC (CPU {thread_id}): {name} @ {:#x}, error code {:#x}", regs.eip, regs.error_code);
     }
 
     info!("{:#?}", regs);
@@ -275,13 +277,13 @@ unsafe fn divide_by_zero_handler(regs: &InterruptRegisters) {
 /// exception handler for breakpoint
 #[interrupt(x86)]
 unsafe fn breakpoint_handler(regs: &InterruptRegisters) {
-    info!("breakpoint @ {:#x}", regs.eip);
+    info!("(CPU {}) breakpoint @ {:#x}", super::get_thread_id(), regs.eip);
 }
 
 /// exception handler for overflow
 #[interrupt(x86)]
 unsafe fn overflow_handler(regs: &InterruptRegisters) {
-    info!("overflow @ {:#x}", regs.eip);
+    info!("(CPU {}) overflow @ {:#x}", super::get_thread_id(), regs.eip);
 }
 
 /// exception handler for bound range exceeded
@@ -403,7 +405,9 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &InterruptRegisters) {
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
-    error!("PANIC: page fault @ {:#x} (accessed {:#x}), error code {:#x}", regs.eip, address, regs.error_code);
+    let thread_id = super::get_thread_id();
+
+    error!("PANIC (CPU {thread_id}): page fault @ {:#x} (accessed {:#x}), error code {:#x}", regs.eip, address, regs.error_code);
     info!("{:#?}", regs);
     halt();
     /*}
@@ -703,8 +707,14 @@ pub unsafe fn init() {
 
     //IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
 
-    // load interrupt handler table
-    lidt(&DescriptorTablePointer::new(&IDT));
+    load();
+}
+
+pub fn load() {
+    unsafe {
+        // load interrupt handler table
+        lidt(&DescriptorTablePointer::new(&IDT));
+    }
 }
 
 pub fn init_pit(hz: usize) {

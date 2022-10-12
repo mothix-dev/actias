@@ -136,7 +136,7 @@ impl MultibootModuleCopy {
         self.string
     }
 
-    pub fn map_data<T: PageDirectory>(&mut self, manager: &mut PageManager<T>, dir: &mut T) {
+    pub fn map_data(&mut self, manager: &mut PageManager, dir: &mut impl PageDirectory) {
         if self.data.is_none() {
             let buf_size = (self.data_end - self.data_start) as usize;
 
@@ -827,7 +827,7 @@ pub fn init() -> u64 {
     (upper_mem as u64 + 1024) * 1024 // upper memory + 1 mb
 }
 
-pub fn init_after_heap<T: PageDirectory>(manager: &mut PageManager<T>, dir: &mut T) {
+pub fn init_after_heap(manager: &mut PageManager, dir: &mut impl PageDirectory) {
     debug!("mapping modules");
 
     if let Some(mods) = get_multiboot_info_mut().mods.as_mut() {

@@ -83,12 +83,12 @@ pub unsafe fn init_bump_alloc(offset: usize) {
 /// # Safety
 ///
 /// this function is unsafe because it accesses global mutable state without locking (tho the bump allocator really shouldn't be used before interrupts or bringup of other CPUs)
-pub unsafe fn free_unused_bump_alloc<D: PageDirectory>(manager: &mut PageManager<D>, dir: &mut D) {
+pub unsafe fn free_unused_bump_alloc(manager: &mut PageManager, dir: &mut impl PageDirectory) {
     if !CAN_BUMP_ALLOC {
         return;
     }
 
-    let page_size = dir.page_size();
+    let page_size = manager.page_size;
     let start = ((ALLOC_ADDR + ALLOC_OFFSET + page_size - 1) / page_size) * page_size;
     let end = ((ALLOC_ADDR_INITIAL + BUMP_ALLOC_SIZE + ALLOC_OFFSET) / page_size) * page_size;
     CAN_BUMP_ALLOC = false;

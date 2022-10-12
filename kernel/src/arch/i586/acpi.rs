@@ -197,7 +197,7 @@ fn find_rsdp(page_dir: &mut PageDir) -> Option<u64> {
                 .map_memory(&[page], |s| {
                     // signature is always aligned to 16 bytes
                     for i in (0..PAGE_SIZE).step_by(16) {
-                        if &s[i..i + 8] == &(b"RSD PTR ")[0..8] {
+                        if s[i..i + 8] == (b"RSD PTR ")[0..8] {
                             return Some(page + i as u64);
                         }
                     }
@@ -516,7 +516,7 @@ pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTop
     super::apic::map_local_apic(page_dir, local_apic_addr);
 
     // sanity check
-    assert!((local_apic_addr % page_dir.page_size() as u64) == 0, "local APIC address isn't page aligned");
+    assert!((local_apic_addr % PageDir::PAGE_SIZE as u64) == 0, "local APIC address isn't page aligned");
 
     // set up CPUs
     let mut cpus = CPU::new();
