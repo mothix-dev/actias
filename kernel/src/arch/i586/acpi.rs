@@ -1,12 +1,12 @@
 //! acpi and acpi accessories
 
-use super::{paging::PageDir, PAGE_SIZE};
+use super::{paging::PageDir, APICToCPU, PAGE_SIZE};
 use crate::{
     mm::paging::PageDirectory,
     task::cpu::{ThreadID, CPU},
     util::debug::{DebugHexArray, FormatHex},
 };
-use alloc::{format, vec::Vec};
+use alloc::{format, vec, vec::Vec};
 use core::{fmt, mem::size_of, slice, str};
 use log::{debug, error, warn};
 
@@ -473,7 +473,9 @@ pub fn find_madt(page_dir: &mut PageDir, sdt_pointers: &[u64]) -> Option<MADT> {
     None
 }
 
-pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTopology>, mapping: Option<super::APICToCPU>) {
+pub fn detect_cpus(page_dir: &mut PageDir<'static>, topology: Option<&super::CPUTopology>, mapping: Option<&APICToCPU>) -> Option<(super::APICToCPU, CPU)> {
+    let mut mapping = mapping.cloned();
+
     let sdt_pointers = find_sdts(page_dir).unwrap();
     let madt = find_madt(page_dir, &sdt_pointers).unwrap();
 
@@ -485,7 +487,7 @@ pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTop
         match record {
             MADTRecord::LocalAPIC { processor_id, apic_id, flags } => {
                 if (flags & 0x3) > 0 {
-                    let thread_id = if let Some(m) = mapping {
+                    let thread_id = if let Some(m) = mapping.as_ref() {
                         m.apic_to_cpu(*apic_id as usize)
                     } else {
                         ThreadID {
@@ -498,7 +500,7 @@ pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTop
             }
             MADTRecord::LocalX2APIC { processor_id, flags, acpi_id } => {
                 if (flags & 0x3) > 0 {
-                    let thread_id = if let Some(m) = mapping {
+                    let thread_id = if let Some(m) = mapping.as_ref() {
                         m.apic_to_cpu(*processor_id as usize)
                     } else {
                         ThreadID { core: *acpi_id as usize, thread: 0 }
@@ -513,10 +515,10 @@ pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTop
 
     debug!("local APIC is mapped @ {local_apic_addr:#x}");
 
-    super::apic::map_local_apic(page_dir, local_apic_addr);
-
     // sanity check
     assert!((local_apic_addr % PageDir::PAGE_SIZE as u64) == 0, "local APIC address isn't page aligned");
+
+    super::apic::map_local_apic(page_dir, local_apic_addr);
 
     // set up CPUs
     let mut cpus = CPU::new();
@@ -532,11 +534,19 @@ pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTop
     };
 
     // populate cores
-    for i in 0..num_cores {
+    for core_idx in 0..num_cores {
         cpus.add_core();
 
-        for _j in 0..threads_per_core {
-            cpus.cores.get_mut(i).unwrap().add_thread(super::ThreadInfo { apic_id: None, processor_id: 0 }, None);
+        for thread_idx in 0..threads_per_core {
+            cpus.cores.get_mut(core_idx).unwrap().add_thread(
+                super::ThreadInfo {
+                    apic_id: None,
+                    processor_id: 0,
+                    stack: None,
+                },
+                crate::timer::register_timer(Some(ThreadID { core: core_idx, thread: thread_idx }), 0)
+                    .unwrap_or_else(|err| panic!("failed to register timer for CPU {core_idx}:{thread_idx}: {err:?}")),
+            );
         }
     }
 
@@ -550,10 +560,42 @@ pub fn init_apic(page_dir: &mut PageDir<'static>, topology: Option<super::CPUTop
         thread.info.processor_id = *processor_id;
     }
 
-    // set global cpu topology, queues, etc
-    crate::task::set_cpus(cpus);
+    if mapping.is_none() {
+        // check if all APIC IDs are contiguous, if not assemble an arbitrary mapping
+        let mut is_contiguous = true;
+        let mut last_id = None;
+        let mut highest_id = 0;
 
-    // bring up CPUs
-    let apic_ids: Vec<u8> = local_apics.iter().map(|(id, _, _)| *id as u8).collect();
-    super::apic::bring_up_cpus(page_dir, &apic_ids);
+        for (apic_id, _, _) in local_apics.iter() {
+            let apic_id = *apic_id;
+
+            if is_contiguous {
+                if let Some(last) = last_id {
+                    if apic_id != last + 1 {
+                        is_contiguous = false;
+                    }
+                }
+
+                last_id = Some(apic_id);
+            }
+
+            if apic_id > highest_id {
+                highest_id = apic_id;
+            }
+        }
+
+        if is_contiguous {
+            mapping = Some(APICToCPU::OneToOne);
+        } else {
+            let mut translation = vec![ThreadID { core: 0, thread: 0 }; highest_id + 1];
+
+            for (apic_id, _, thread_id) in local_apics.iter() {
+                translation[*apic_id] = *thread_id;
+            }
+
+            mapping = Some(APICToCPU::Arbitrary { translation })
+        }
+    }
+
+    Some((mapping.unwrap_or_default(), cpus))
 }

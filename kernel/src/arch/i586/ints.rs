@@ -14,7 +14,7 @@ use interrupt_macro::*;
 use log::{debug, error, info};
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
-    io::outb,
+    io::{inb, outb},
 };
 
 /// IDT flags
@@ -31,7 +31,7 @@ pub enum IDTFlags {
     Present = Self(0x80),
 
     Exception = Self(Self::X32Interrupt.0 | Self::Present.0),            // exception
-    External = Self(Self::X32Interrupt.0 | Self::Present.0),             // external interrupt
+    Interrupt = Self(Self::X32Interrupt.0 | Self::Present.0),            // (usually) external interrupt
     Call = Self(Self::X32Interrupt.0 | Self::Present.0 | Self::Ring3.0), // system call
 }
 
@@ -278,6 +278,11 @@ unsafe fn divide_by_zero_handler(regs: &InterruptRegisters) {
 #[interrupt(x86)]
 unsafe fn breakpoint_handler(regs: &InterruptRegisters) {
     info!("(CPU {}) breakpoint @ {:#x}", super::get_thread_id(), regs.eip);
+}
+
+#[interrupt(x86)]
+unsafe fn nmi_handler(_regs: &InterruptRegisters) {
+    error!("nmi");
 }
 
 /// exception handler for overflow
@@ -643,6 +648,34 @@ unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
     outb(0x20, 0x20);
 }
 
+#[interrupt(x86)]
+unsafe fn apic_timer_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+
+    let timer = crate::task::get_cpus().get_thread(thread_id).unwrap().timer;
+
+    let should_halt = match crate::timer::get_timer(timer) {
+        Some(timer) => !timer.try_tick(regs),
+        None => false,
+    };
+
+    super::apic::get_local_apic().eoi.write(0);
+
+    // is it not safe to return?
+    if should_halt {
+        // sets the instruction pointer to set_interrupts_and_halt so the stack is properly cleaned up
+        // failing to do this would cause the system to triple fault presumably due to stack overflow
+        regs.eip = set_interrups_and_halt as *const u8 as u32;
+    }
+}
+
+#[interrupt(x86)]
+unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
+    debug!("apic spurious interrupt");
+
+    super::apic::get_local_apic().eoi.write(0);
+}
+
 /// how many entries do we want in our IDT
 pub const IDT_ENTRIES: usize = 256;
 
@@ -651,15 +684,23 @@ pub static mut IDT: Aligned<A16, [IDTEntry; IDT_ENTRIES]> = Aligned([IDTEntry::n
 
 /// set up and load IDT
 pub unsafe fn init() {
-    // set up PIT, basically just some magic incantation
+    // reset PICs
     outb(0x20, 0x11);
     outb(0xa0, 0x11);
+
+    // map primary PIC to interrupt 0x20-0x27
     outb(0x21, 0x20);
+
+    // map secondary PIC to interrupt 0x28-0x2f
     outb(0xa1, 0x28);
+
+    // set up cascading
     outb(0x21, 0x04);
     outb(0xa1, 0x02);
+
     outb(0x21, 0x01);
     outb(0xa1, 0x01);
+
     outb(0x21, 0x0);
     outb(0xa1, 0x0);
 
@@ -668,6 +709,7 @@ pub unsafe fn init() {
     // set up exception handlers
     IDT[Exceptions::DivideByZero as usize] = IDTEntry::new(divide_by_zero_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Breakpoint as usize] = IDTEntry::new(breakpoint_handler as *const (), IDTFlags::Exception);
+    IDT[Exceptions::NonMaskableInterrupt as usize] = IDTEntry::new(nmi_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Overflow as usize] = IDTEntry::new(overflow_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::BoundRangeExceeded as usize] = IDTEntry::new(bound_range_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::InvalidOpcode as usize] = IDTEntry::new(invalid_opcode_handler as *const (), IDTFlags::Exception);
@@ -688,22 +730,28 @@ pub unsafe fn init() {
     IDT[Exceptions::Security as usize] = IDTEntry::new(security_exception_handler as *const (), IDTFlags::Exception);
 
     // PIT IRQs
-    IDT[0x20] = IDTEntry::new(irq0_handler as *const (), IDTFlags::External);
-    IDT[0x21] = IDTEntry::new(irq1_handler as *const (), IDTFlags::External);
-    //IDT[0x22] = IDTEntry::new(irq2_handler as *const (), IDTFlags::External);
-    IDT[0x23] = IDTEntry::new(irq3_handler as *const (), IDTFlags::External);
-    IDT[0x24] = IDTEntry::new(irq4_handler as *const (), IDTFlags::External);
-    IDT[0x25] = IDTEntry::new(irq5_handler as *const (), IDTFlags::External);
-    IDT[0x26] = IDTEntry::new(irq6_handler as *const (), IDTFlags::External);
-    IDT[0x27] = IDTEntry::new(irq7_handler as *const (), IDTFlags::External);
-    IDT[0x28] = IDTEntry::new(irq8_handler as *const (), IDTFlags::External);
-    IDT[0x29] = IDTEntry::new(irq9_handler as *const (), IDTFlags::External);
-    IDT[0x2a] = IDTEntry::new(irq10_handler as *const (), IDTFlags::External);
-    IDT[0x2b] = IDTEntry::new(irq11_handler as *const (), IDTFlags::External);
-    IDT[0x2c] = IDTEntry::new(irq12_handler as *const (), IDTFlags::External);
-    IDT[0x2d] = IDTEntry::new(irq13_handler as *const (), IDTFlags::External);
-    IDT[0x2e] = IDTEntry::new(irq14_handler as *const (), IDTFlags::External);
-    IDT[0x2f] = IDTEntry::new(irq15_handler as *const (), IDTFlags::External);
+    IDT[0x20] = IDTEntry::new(irq0_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x21] = IDTEntry::new(irq1_handler as *const (), IDTFlags::Interrupt);
+    //IDT[0x22] = IDTEntry::new(irq2_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x23] = IDTEntry::new(irq3_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x24] = IDTEntry::new(irq4_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x25] = IDTEntry::new(irq5_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x26] = IDTEntry::new(irq6_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x27] = IDTEntry::new(irq7_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x28] = IDTEntry::new(irq8_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x29] = IDTEntry::new(irq9_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x2a] = IDTEntry::new(irq10_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x2b] = IDTEntry::new(irq11_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x2c] = IDTEntry::new(irq12_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x2d] = IDTEntry::new(irq13_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x2e] = IDTEntry::new(irq14_handler as *const (), IDTFlags::Interrupt);
+    IDT[0x2f] = IDTEntry::new(irq15_handler as *const (), IDTFlags::Interrupt);
+
+    // APIC timer
+    IDT[0x30] = IDTEntry::new(apic_timer_handler as *const (), IDTFlags::Interrupt);
+
+    // APIC spurious interrupt
+    IDT[0xf0] = IDTEntry::new(apic_spurious_handler as *const (), IDTFlags::Interrupt);
 
     //IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
 
@@ -714,6 +762,16 @@ pub fn load() {
     unsafe {
         // load interrupt handler table
         lidt(&DescriptorTablePointer::new(&IDT));
+    }
+}
+
+pub fn disable_pic() {
+    unsafe {
+        // mask all interrupts on primary PIC
+        outb(0x21, 0xff);
+
+        // mask all interrupts on secondary PIC
+        outb(0xa1, 0xff);
     }
 }
 
@@ -736,13 +794,24 @@ pub fn init_pit(hz: usize) {
     }
 }
 
+pub fn disable_pit() {
+    unsafe {
+        outb(0x43, 0x36);
+        outb(0x40, 0xff);
+        outb(0x40, 0xff);
+
+        // mask timer irq
+        outb(0x21, inb(0x21) | 1);
+    }
+}
+
 pub fn pit_timer_num() -> usize {
     unsafe { PIT_TIMER_NUM }
 }
 
 /// set up IRQ handler list, separate from init() since this requires the heap to be initialized
 pub unsafe fn init_irqs() {
-    init_pit(1000);
+    init_pit(10000);
 }
 
 #[derive(Debug)]

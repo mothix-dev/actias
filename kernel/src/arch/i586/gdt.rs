@@ -1,7 +1,7 @@
 //! i586 global descriptor table (GDT) and task state segment (TSS)
 
 use aligned::{Aligned, A4};
-use alloc::alloc::{Layout, alloc};
+use alloc::alloc::{alloc, Layout};
 use core::mem::size_of;
 use log::debug;
 use x86::{
@@ -58,7 +58,7 @@ fn populate_gdt(gdt: &mut [Descriptor; GDT_ENTRIES], tss: &TaskStateSegment) {
         .limit_granularity_4kb()
         .db()
         .finish();
-    
+
     let base = (tss as *const _) as u32;
     debug!("tss @ {:#x}, size {:#x}", base, size_of::<TaskStateSegment>() as u32);
 

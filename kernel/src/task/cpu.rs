@@ -72,7 +72,7 @@ pub struct CPUCore {
 
 impl CPUCore {
     /// adds a new thread to this core
-    pub fn add_thread(&mut self, info: ThreadInfo, timer: Option<usize>) {
+    pub fn add_thread(&mut self, info: ThreadInfo, timer: usize) {
         self.threads.push(CPUThread::new(info, timer));
     }
 
@@ -112,12 +112,12 @@ impl CPUCore {
 #[derive(Debug)]
 pub struct CPUThread {
     pub queue: Mutex<TaskQueue>,
-    pub timer: Option<usize>,
+    pub timer: usize,
     pub info: ThreadInfo,
 }
 
 impl CPUThread {
-    pub fn new(info: ThreadInfo, timer: Option<usize>) -> Self {
+    pub fn new(info: ThreadInfo, timer: usize) -> Self {
         Self {
             queue: Mutex::new(TaskQueue::new()),
             timer,

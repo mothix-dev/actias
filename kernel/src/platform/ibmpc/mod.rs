@@ -317,28 +317,6 @@ pub fn kmain() {
         discover_module(&mut modules, module.string().to_string(), module.data());
     }
 
-    // === add special modules ===
-
-    // add cmdline module and parse cmdline at the same time
-    let cmdline = bootloader::get_multiboot_info().cmdline.filter(|s| !s.is_empty()).map(|cmdline| {
-        modules.insert("*cmdline".to_string(), cmdline.as_bytes());
-
-        info!("kernel command line: {:?}", cmdline);
-
-        let mut map = BTreeMap::new();
-
-        for arg in cmdline.split(' ') {
-            if !arg.is_empty() {
-                let arg = arg.split('=').collect::<Vec<_>>();
-                map.insert(arg[0], arg.get(1).copied().unwrap_or(""));
-            }
-        }
-
-        map
-    });
-
-    debug!("{:?}", cmdline);
-
     // === print module info ===
 
     let mut num_modules = 0;
@@ -369,19 +347,26 @@ pub fn kmain() {
 
     get_page_manager().print_free();
 
-    crate::arch::init(unsafe { PAGE_DIR.as_mut().unwrap() }, cmdline);
+    // === parse command line ===
+    let cmdline = bootloader::get_multiboot_info().cmdline.filter(|s| !s.is_empty()).map(|cmdline| {
+        let mut map = BTreeMap::new();
 
-    /*let timer = crate::timer::get_timer(0).unwrap();
-    timer.add_timer_in(timer.hz(), test_timer_callback).unwrap();
+        for arg in cmdline.split(' ') {
+            if !arg.is_empty() {
+                let arg = arg.split('=').collect::<Vec<_>>();
+                map.insert(arg[0], arg.get(1).copied().unwrap_or(""));
+            }
+        }
+
+        map
+    });
+
+    debug!("{:?}", cmdline);
+
+    // arch code takes over here
+    crate::arch::init(unsafe { PAGE_DIR.as_mut().unwrap() }, cmdline);
 
     loop {
         crate::arch::halt_until_interrupt();
-    }*/
+    }
 }
-
-/*fn test_timer_callback(_num: usize, _cpu: Option<crate::task::cpu::ThreadID>, _regs: &mut crate::arch::Registers) {
-    info!("timed out!");
-
-    let timer = crate::timer::get_timer(0).unwrap();
-    timer.add_timer_in(timer.hz(), test_timer_callback).unwrap();
-}*/

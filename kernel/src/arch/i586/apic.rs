@@ -1,11 +1,16 @@
 use super::{paging::PageDir, PAGE_SIZE};
 use crate::mm::paging::{get_page_manager, PageDirectory, PageFrame};
-use alloc::alloc::{alloc, Layout};
-use log::debug;
+use alloc::{
+    alloc::{alloc, Layout},
+    vec::Vec,
+};
+use core::fmt;
+use log::{debug, info};
 use volatile::{
     access::{ReadOnly, ReadWrite, WriteOnly},
     Volatile, // fluid
 };
+use x86::apic::{DeliveryMode, DestinationMode, DestinationShorthand, Level};
 
 #[repr(usize)]
 pub enum APICRegisters {
@@ -60,20 +65,20 @@ pub enum APICRegisters {
 
 #[derive(Debug)]
 pub struct LocalAPIC {
-    pub local_apic_id: Volatile<&'static mut u32, ReadWrite>,
+    pub local_apic_id: Volatile<&'static mut u32, ReadOnly>,
     pub local_apic_version: Volatile<&'static mut u32, ReadOnly>,
     pub task_priority: Volatile<&'static mut u32, ReadWrite>,
     pub arbitration_priority: Volatile<&'static mut u32, ReadOnly>,
     pub processor_priority: Volatile<&'static mut u32, ReadOnly>,
     pub eoi: Volatile<&'static mut u32, WriteOnly>,
     pub remote_read: Volatile<&'static mut u32, ReadOnly>,
-    pub logical_destination: Volatile<&'static mut u32, ReadWrite>,
+    pub destination_mode: Volatile<&'static mut u32, ReadWrite>,
     pub destination_format: Volatile<&'static mut u32, ReadWrite>,
     pub spurious_interrupt_vector: Volatile<&'static mut u32, ReadWrite>,
     pub in_service: [Volatile<&'static mut u32, ReadOnly>; 8],
     pub trigger_mode: [Volatile<&'static mut u32, ReadOnly>; 8],
     pub interrupt_request: [Volatile<&'static mut u32, ReadOnly>; 8],
-    pub error_status: Volatile<&'static mut u32, ReadWrite>,
+    pub error_status: Volatile<&'static mut u32, ReadOnly>,
     pub corrected_machine_check_interrupt: Volatile<&'static mut u32, ReadWrite>,
     pub interrupt_command: [Volatile<&'static mut u32, ReadWrite>; 2],
     pub lvt_timer: Volatile<&'static mut u32, ReadWrite>,
@@ -89,14 +94,14 @@ pub struct LocalAPIC {
 impl LocalAPIC {
     pub unsafe fn from_raw_pointer(mapped: *mut u32) -> Self {
         Self {
-            local_apic_id: Volatile::new(&mut *(mapped.add(APICRegisters::LocalAPICID as usize))),
+            local_apic_id: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::LocalAPICID as usize))),
             local_apic_version: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::LocalAPICVersion as usize))),
             task_priority: Volatile::new(&mut *(mapped.add(APICRegisters::TaskPriority as usize))),
             arbitration_priority: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::ArbitrationPriority as usize))),
             processor_priority: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::ProcessorPriority as usize))),
             eoi: Volatile::new_write_only(&mut *(mapped.add(APICRegisters::EOI as usize))),
             remote_read: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::RemoteRead as usize))),
-            logical_destination: Volatile::new(&mut *(mapped.add(APICRegisters::LogicalDestination as usize))),
+            destination_mode: Volatile::new(&mut *(mapped.add(APICRegisters::LogicalDestination as usize))),
             destination_format: Volatile::new(&mut *(mapped.add(APICRegisters::DestinationFormat as usize))),
             spurious_interrupt_vector: Volatile::new(&mut *(mapped.add(APICRegisters::SpuriousInterruptVector as usize))),
             in_service: [
@@ -129,7 +134,7 @@ impl LocalAPIC {
                 Volatile::new_read_only(&mut *(mapped.add(APICRegisters::InterruptRequest6 as usize))),
                 Volatile::new_read_only(&mut *(mapped.add(APICRegisters::InterruptRequest7 as usize))),
             ],
-            error_status: Volatile::new(&mut *(mapped.add(APICRegisters::ErrorStatus as usize))),
+            error_status: Volatile::new_read_only(&mut *(mapped.add(APICRegisters::ErrorStatus as usize))),
             corrected_machine_check_interrupt: Volatile::new(&mut *(mapped.add(APICRegisters::CorrectedMachineCheckInterrupt as usize))),
             interrupt_command: [
                 Volatile::new(&mut *(mapped.add(APICRegisters::InterruptCommand0 as usize))),
@@ -179,7 +184,7 @@ impl LocalAPIC {
         let timer = crate::timer::get_timer(timer_id).unwrap();
 
         // assert INIT
-        self.write_interrupt_command(InterruptCommandBuilder::new().dest_mode(InterruptDestMode::INIT).physical_destination(id).finish());
+        self.write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::Init).level(Level::Assert).physical_destination(id).finish());
 
         // not sure if this is required or not, works on QEMU but doesn't on bochs
         //self.wait_for_interrupt_accepted();
@@ -187,8 +192,8 @@ impl LocalAPIC {
         // de-assert INIT
         self.write_interrupt_command(
             InterruptCommandBuilder::new()
-                .dest_mode(InterruptDestMode::INIT)
-                .init_level_deassert()
+                .delivery_mode(DeliveryMode::Init)
+                .level(Level::Deassert)
                 .physical_destination(id)
                 .finish(),
         );
@@ -201,14 +206,14 @@ impl LocalAPIC {
         for _i in 0..2 {
             self.write_interrupt_command(
                 InterruptCommandBuilder::new()
-                    .dest_mode(InterruptDestMode::SIPI)
+                    .delivery_mode(DeliveryMode::StartUp)
                     .starting_page_number(starting_page)
                     .physical_destination(id)
                     .finish(),
             );
 
-            // wait 1 ms
-            timer.wait(timer.millis());
+            // wait as little time as we can
+            timer.wait(1);
 
             //self.wait_for_interrupt_accepted();
         }
@@ -223,37 +228,170 @@ impl LocalAPIC {
     }
 
     /// gets the version of this APIC
-    pub fn version(&self) -> u16 {
-        (self.local_apic_version.read() >> 16) as u16
+    pub fn version(&self) -> u8 {
+        (self.local_apic_version.read() & 0xff) as u8
+    }
+
+    /// gets how many local vector table entries this APIC supports
+    pub fn max_lvt_entries(&self) -> u8 {
+        ((self.local_apic_version.read() >> 16) & 0xff) as u8
+    }
+
+    pub fn set_cmci_interrupt(&mut self, entry: LVTEntry) {
+        self.corrected_machine_check_interrupt.write(entry.0);
+    }
+
+    pub fn set_timer_interrupt(&mut self, entry: LVTEntry) {
+        self.lvt_timer.write(entry.0);
+    }
+
+    pub fn set_thermal_interrupt(&mut self, entry: LVTEntry) {
+        self.lvt_thermal_sensor.write(entry.0);
+    }
+
+    pub fn set_perf_count_interrupt(&mut self, entry: LVTEntry) {
+        self.lvt_perf_monitoring_counters.write(entry.0);
+    }
+
+    pub fn set_lint0_interrupt(&mut self, entry: LVTEntry) {
+        self.lvt_lint[0].write(entry.0);
+    }
+
+    pub fn set_lint1_interrupt(&mut self, entry: LVTEntry) {
+        self.lvt_lint[1].write(entry.0);
+    }
+
+    pub fn set_error_interrupt(&mut self, entry: LVTEntry) {
+        self.lvt_error.write(entry.0);
+    }
+
+    pub fn set_spurious_interrupt(&mut self, vector: SpuriousInterruptVector) {
+        self.spurious_interrupt_vector.write(vector.0);
+    }
+
+    pub fn check_error(&mut self) -> Result<(), APICError> {
+        let code = self.error_status.read();
+
+        if code > 0 {
+            Err(APICError(code))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct LVTEntry(u32);
+
+#[repr(u32)]
+pub enum IntDeliveryMode {
+    Fixed = 0,
+    SMI = 2,
+    NMI = 4,
+    INIT = 5,
+    External = 7,
+}
+
+#[repr(u32)]
+pub enum InputPinPolarity {
+    ActiveHigh = 0,
+    ActiveLow = 1,
+}
+
+#[repr(u32)]
+pub enum TriggerMode {
+    Edge = 0,
+    Level = 1,
+}
+
+#[repr(u32)]
+pub enum TimerMode {
+    OneShot = 0,
+    Periodic = 1,
+    TSCDeadline = 2,
+}
+
+pub struct LVTEntryBuilder {
+    vector: u8,
+    delivery_mode: IntDeliveryMode,
+    input_pin_polarity: InputPinPolarity,
+    trigger_mode: TriggerMode,
+    is_masked: bool,
+    timer_mode: TimerMode,
+}
+
+impl LVTEntryBuilder {
+    pub fn new() -> Self {
+        Self {
+            vector: 0,
+            delivery_mode: IntDeliveryMode::Fixed,
+            input_pin_polarity: InputPinPolarity::ActiveHigh,
+            trigger_mode: TriggerMode::Edge,
+            is_masked: false,
+            timer_mode: TimerMode::OneShot,
+        }
+    }
+
+    pub fn vector(mut self, vector: u8) -> Self {
+        self.vector = vector;
+        self
+    }
+
+    pub fn delivery_mode(mut self, delivery_mode: IntDeliveryMode) -> Self {
+        self.delivery_mode = delivery_mode;
+        self
+    }
+
+    pub fn input_pin_polarity(mut self, input_pin_polarity: InputPinPolarity) -> Self {
+        self.input_pin_polarity = input_pin_polarity;
+        self
+    }
+
+    pub fn trigger_mode(mut self, trigger_mode: TriggerMode) -> Self {
+        self.trigger_mode = trigger_mode;
+        self
+    }
+
+    pub fn mask(mut self) -> Self {
+        self.is_masked = true;
+        self
+    }
+
+    pub fn timer_mode(mut self, timer_mode: TimerMode) -> Self {
+        self.timer_mode = timer_mode;
+        self
+    }
+
+    pub fn finish(self) -> LVTEntry {
+        let mut res = 0;
+
+        res |= self.vector as u32;
+        res |= (self.delivery_mode as u32) << 8;
+        res |= (self.input_pin_polarity as u32) << 13;
+        res |= (self.trigger_mode as u32) << 15;
+        if self.is_masked {
+            res |= 1 << 16;
+        }
+        res |= (self.timer_mode as u32) << 17;
+
+        LVTEntry(res)
+    }
+}
+
+impl Default for LVTEntryBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 pub struct InterruptCommand(pub u32, pub u32);
 
-#[repr(u32)]
-pub enum InterruptDestMode {
-    Normal = 0,
-    LowestPriority = 1,
-    SMI = 2,
-    NMI = 4,
-    INIT = 5,
-    SIPI = 6,
-}
-
-#[repr(u32)]
-pub enum InterruptDestKind {
-    Normal = 0,
-    Local = 1,
-    AllCPUs = 2,
-    AllCPUsButCurrent = 3,
-}
-
 pub struct InterruptCommandBuilder {
     vector_number: u8,
-    dest_mode: InterruptDestMode,
-    logical_destination: bool,
-    init_level_deassert: bool,
-    dest_kind: InterruptDestKind,
+    delivery_mode: DeliveryMode,
+    destination_mode: DestinationMode,
+    level: Level,
+    dest_kind: DestinationShorthand,
     physical_destination: u8,
 }
 
@@ -262,10 +400,10 @@ impl InterruptCommandBuilder {
     pub fn new() -> Self {
         Self {
             vector_number: 0,
-            dest_mode: InterruptDestMode::Normal,
-            logical_destination: false,
-            init_level_deassert: false,
-            dest_kind: InterruptDestKind::Normal,
+            delivery_mode: DeliveryMode::Fixed,
+            destination_mode: DestinationMode::Physical,
+            level: Level::Assert,
+            dest_kind: DestinationShorthand::NoShorthand,
             physical_destination: 0,
         }
     }
@@ -283,25 +421,25 @@ impl InterruptCommandBuilder {
     }
 
     /// sets the destination mode of this interrupt command
-    pub fn dest_mode(mut self, dest_mode: InterruptDestMode) -> Self {
-        self.dest_mode = dest_mode;
+    pub fn delivery_mode(mut self, delivery_mode: DeliveryMode) -> Self {
+        self.delivery_mode = delivery_mode;
         self
     }
 
     /// sets whether this interrupt command should have a logical destination
-    pub fn logical_destination(mut self) -> Self {
-        self.logical_destination = true;
+    pub fn destination_mode(mut self, destination_mode: DestinationMode) -> Self {
+        self.destination_mode = destination_mode;
         self
     }
 
-    /// set if
-    pub fn init_level_deassert(mut self) -> Self {
-        self.init_level_deassert = true;
+    /// sets the IPI level of this interrupt command
+    pub fn level(mut self, level: Level) -> Self {
+        self.level = level;
         self
     }
 
     /// sets the destination type of this interrupt command
-    pub fn dest_kind(mut self, dest_kind: InterruptDestKind) -> Self {
+    pub fn destination_shorthand(mut self, dest_kind: DestinationShorthand) -> Self {
         self.dest_kind = dest_kind;
         self
     }
@@ -316,12 +454,10 @@ impl InterruptCommandBuilder {
         let mut command = InterruptCommand(0, 0);
 
         command.0 |= self.vector_number as u32;
-        command.0 |= (self.dest_mode as u32) << 8;
-        if self.logical_destination {
-            command.0 |= 1 << 11;
-        }
+        command.0 |= (self.delivery_mode as u32) << 8;
+        command.0 |= (self.destination_mode as u32) << 11;
         command.0 |= 1 << 12; // set delivery status to 1, will be cleared when the interrupt is accepted
-        if self.init_level_deassert {
+        if self.level == Level::Assert {
             command.0 |= 1 << 15;
         } else {
             command.0 |= 1 << 14;
@@ -337,6 +473,104 @@ impl InterruptCommandBuilder {
 impl Default for InterruptCommandBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct SpuriousInterruptVector(u32);
+
+pub struct SpuriousIntVectorBuilder {
+    eoi_broadcast_suppression: bool,
+    focus_processor_checking: bool,
+    apic_disable: bool,
+    vector: u8,
+}
+
+impl SpuriousIntVectorBuilder {
+    pub fn new() -> Self {
+        Self {
+            eoi_broadcast_suppression: false,
+            focus_processor_checking: true,
+            apic_disable: false,
+            vector: 0,
+        }
+    }
+
+    pub fn vector(mut self, vector: u8) -> Self {
+        self.vector = vector;
+        self
+    }
+
+    pub fn disable_apic(mut self) -> Self {
+        self.apic_disable = true;
+        self
+    }
+
+    pub fn disable_focus_processor_checking(mut self) -> Self {
+        self.focus_processor_checking = false;
+        self
+    }
+
+    pub fn eoi_broadcast_suppression(mut self) -> Self {
+        self.eoi_broadcast_suppression = true;
+        self
+    }
+
+    pub fn finish(self) -> SpuriousInterruptVector {
+        let mut res = 0;
+
+        res |= self.vector as u32;
+        if !self.apic_disable {
+            res |= 1 << 8;
+        }
+        if self.focus_processor_checking {
+            res |= 1 << 9;
+        }
+        if self.eoi_broadcast_suppression {
+            res |= 1 << 12;
+        }
+
+        SpuriousInterruptVector(res)
+    }
+}
+
+impl Default for SpuriousIntVectorBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct APICError(u32);
+
+impl fmt::Debug for APICError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut reasons: Vec<&str> = Vec::new();
+
+        if (self.0 & (1 << 0)) > 0 {
+            reasons.push("Send Checksum Error");
+        }
+        if (self.0 & (1 << 1)) > 0 {
+            reasons.push("Receive Checksum Error");
+        }
+        if (self.0 & (1 << 2)) > 0 {
+            reasons.push("Send Accept Error");
+        }
+        if (self.0 & (1 << 3)) > 0 {
+            reasons.push("Receive Accept Error");
+        }
+        if (self.0 & (1 << 4)) > 0 {
+            reasons.push("Redirectable IPI");
+        }
+        if (self.0 & (1 << 5)) > 0 {
+            reasons.push("Sent Illegal Vector");
+        }
+        if (self.0 & (1 << 6)) > 0 {
+            reasons.push("Received Illegal Vector");
+        }
+        if (self.0 & (1 << 7)) > 0 {
+            reasons.push("Illegal Register Address");
+        }
+
+        write!(f, "APICError({})", reasons.join(", "))
     }
 }
 
@@ -379,6 +613,11 @@ pub fn get_local_apic() -> &'static mut LocalAPIC {
 }
 
 pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &[u8]) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().get_thread(thread_id).unwrap();
+
+    let timer_num = thread.timer;
+
     // populate cpu bootstrap memory region
     let bootstrap_bytes = include_bytes!("../../../../target/cpu_bootstrap.bin");
     let bootstrap_addr = crate::platform::get_cpu_bootstrap_addr();
@@ -401,11 +640,6 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
 
     bootstrap_area[0..bootstrap_bytes.len()].copy_from_slice(bootstrap_bytes);
 
-    // specify stack pointer
-    unsafe {
-        *(&mut bootstrap_area[bootstrap_area.len() - 4] as *mut u8 as *mut u32) = 0x2000 - 12;
-    }
-
     // specify protected mode entry point
     unsafe {
         *(&mut bootstrap_area[bootstrap_area.len() - 8] as *mut u8 as *mut u32) = cpu_entry_point as *const u8 as u32;
@@ -424,7 +658,21 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
     // start up other CPUs
     for &id in apic_ids {
         if id != local_apic_id {
-            local_apic.send_sipi(super::ints::pit_timer_num(), id, (crate::platform::get_cpu_bootstrap_addr() / 0x1000).try_into().unwrap());
+            // allocate stack
+            let stack_layout = Layout::from_size_align(super::STACK_SIZE + super::PAGE_SIZE, super::PAGE_SIZE).unwrap();
+            let stack = unsafe { alloc(stack_layout) };
+
+            // free bottom page of stack to prevent the stack from corrupting other memory without anyone knowing
+            get_page_manager().free_frame(page_dir, stack as usize).unwrap();
+
+            let stack_end = stack as usize + stack_layout.size() - 1;
+
+            // specify stack pointer
+            unsafe {
+                *(&mut bootstrap_area[bootstrap_area.len() - 4] as *mut u8 as *mut u32) = stack_end.try_into().unwrap();
+            }
+
+            local_apic.send_sipi(timer_num, id, (crate::platform::get_cpu_bootstrap_addr() / 0x1000).try_into().unwrap());
         }
     }
 
@@ -433,15 +681,88 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
 }
 
 unsafe extern "C" fn cpu_entry_point() {
-    use log::info;
-    use core::arch::asm;
-
     super::ints::load();
-    super::gdt::init_other_cpu(0x1000 * 4);
+    super::gdt::init_other_cpu(super::STACK_SIZE);
+
+    let local_apic = get_local_apic();
+
+    local_apic.set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
+    local_apic.eoi.write(0);
+
+    local_apic.check_error().unwrap();
 
     info!("CPU {} is alive!", super::get_thread_id());
 
-    loop {
-        asm!("cli; hlt");
+    super::sti(); // i spent HOURS debugging to find that i forgot this
+
+    // FIXME: should probably store BSP's ID somewhere
+    calibrate_apic_timer_from(crate::task::get_cpus().get_thread(crate::task::cpu::ThreadID { core: 0, thread: 0 }).unwrap().timer);
+
+    local_apic.check_error().unwrap();
+
+    super::start_context_switching();
+}
+
+const CALIBRATING_HZ_DIVIDE: usize = 8; // 1 second / 8 = 125 ms
+const INIT_TIMER_DIV: usize = 16384; // 8192 is spot-on with bochs but is twice as fast on qemu, not sure if it's a problem or not
+const TARGET_NS_PER_TICK: u64 = 100_000; // 10 kHz
+
+fn calibrate_timer(calibrate_from: usize, calibrating: usize) -> u64 {
+    let calibrate_from = crate::timer::get_timer(calibrate_from).unwrap();
+    let calibrating = crate::timer::get_timer(calibrating).unwrap();
+
+    let expire_time = calibrate_from.jiffies() + (calibrate_from.hz() / CALIBRATING_HZ_DIVIDE as u64);
+    let starting_jiffies = calibrating.jiffies();
+
+    while calibrate_from.jiffies() < expire_time {
+        super::spin();
     }
+
+    let ending_jiffies = calibrating.jiffies();
+
+    (ending_jiffies - starting_jiffies) * CALIBRATING_HZ_DIVIDE as u64
+}
+
+/// very roughly calibrates the local APIC timer to 100k ns/t (10 kHz) from the provided timer source
+pub fn calibrate_apic_timer_from(timer_num: usize) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().get_thread(thread_id).unwrap();
+
+    let calibrating = thread.timer;
+
+    let local_apic = get_local_apic();
+
+    debug!("calibrating APIC {} (CPU {thread_id})", local_apic.id());
+
+    local_apic.set_timer_interrupt(LVTEntryBuilder::new().vector(0x30).timer_mode(TimerMode::Periodic).finish());
+    local_apic.timer_divide_configuration.write(0b1011); // divide by 1
+
+    // first calibration pass (roughly detect the timer's ticks per second value)
+    local_apic.timer_initial_count.write(INIT_TIMER_DIV.try_into().unwrap());
+    let hz = calibrate_timer(timer_num, calibrating);
+
+    assert!(hz != 0, "timer didn't tick");
+
+    let count_down = (INIT_TIMER_DIV as u64 * TARGET_NS_PER_TICK) / (1_000_000_000 / hz);
+
+    // second calibration pass (timer may not be 10 kHz, so double check its frequency)
+    local_apic.timer_initial_count.write(count_down.try_into().unwrap());
+    let hz = calibrate_timer(timer_num, calibrating);
+
+    crate::timer::get_timer(calibrating).unwrap().set_hz(hz);
+
+    let ns_per_tick = 1_000_000_000 / hz;
+
+    info!("calibrated APIC timer for CPU {thread_id} to {}.{} kHz ({ns_per_tick} ns/t)", hz / 1000, (hz % 1000) / 100);
+}
+
+pub fn init_bsp_apic() {
+    // set spurious timer interrupt
+    get_local_apic().set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
+
+    // calibrate BSP's APIC timer
+    calibrate_apic_timer_from(super::ints::pit_timer_num());
+
+    // disable PIT timer
+    super::ints::disable_pit();
 }

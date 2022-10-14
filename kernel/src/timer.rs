@@ -156,6 +156,13 @@ impl TimerState {
         self.release_lock();
     }
 
+    /// sets the ticks per second value of this timer to the provided value, if it hasn't been set already
+    pub fn set_hz(&mut self, hz: u64) {
+        if self.hz == 0 {
+            self.hz = hz;
+        }
+    }
+
     /// waits the given amount of ticks before returning
     #[allow(clippy::while_immutable_condition)]
     pub fn wait(&self, length: u64) {
@@ -205,4 +212,10 @@ pub fn register_timer(cpu: Option<ThreadID>, hz: u64) -> Result<usize, TimerRegi
 pub fn get_timer(index: usize) -> Option<&'static mut TimerState> {
     // no need to lock here since timer states handle their own locking
     unsafe { TIMER_STATES.get_mut(index) }
+}
+
+pub fn get_local_timer() -> Option<&'static mut TimerState> {
+    let thread_id = crate::arch::get_thread_id();
+    let thread = crate::task::get_cpus().get_thread(thread_id)?;
+    get_timer(thread.timer)
 }
