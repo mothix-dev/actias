@@ -1,8 +1,12 @@
-use super::queue::TaskQueue;
+use super::queue::{TaskQueue, PageUpdateQueue};
 use crate::arch::ThreadInfo;
 use alloc::vec::Vec;
-use core::fmt;
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    fmt,
+};
 use spin::Mutex;
+use log::trace;
 
 /// describes a CPU and its layout of cores and threads
 ///
@@ -56,6 +60,38 @@ impl CPU {
         // no tasks?
         None
     }
+
+    /// searches through cores and threads in this CPU to find the one with the least amount of tasks
+    pub fn find_thread_to_add_to(&self) -> Option<ThreadID> {
+        let mut possible_threads = Vec::new();
+
+        for (core_id, core) in self.cores.iter().enumerate() {
+            if let Some((thread_num, num_tasks)) = core.find_emptiest_thread() {
+                let id = ThreadID {
+                    core: core_id,
+                    thread: thread_num,
+                };
+
+                if num_tasks == 0 {
+                    return Some(id);
+                } else {
+                    possible_threads.push((id, num_tasks));
+                }
+            }
+        }
+
+        let mut thread_id = None;
+        let mut num_tasks = usize::MAX;
+
+        for (id, cur_num_tasks) in possible_threads.iter() {
+            if *cur_num_tasks < num_tasks {
+                thread_id = Some(*id);
+                num_tasks = *cur_num_tasks;
+            }
+        }
+
+        thread_id
+    }
 }
 
 impl Default for CPU {
@@ -82,7 +118,7 @@ impl CPUCore {
         let mut num_tasks = 0;
 
         for (id, thread) in self.threads.iter().enumerate() {
-            let cur_num_tasks = thread.queue.lock().len();
+            let cur_num_tasks = thread.task_queue.lock().len();
             if cur_num_tasks > num_tasks {
                 thread_id = Some(id);
                 num_tasks = cur_num_tasks;
@@ -93,41 +129,69 @@ impl CPUCore {
     }
 
     /// finds the thread in this core with the least tasks waiting in its queue
-    pub fn find_emptiest_thread(&self) -> Option<usize> {
+    /// 
+    /// when successful, returns the ID of the thread and how many tasks it has
+    pub fn find_emptiest_thread(&self) -> Option<(usize, usize)> {
         let mut thread_id = None;
         let mut num_tasks = usize::MAX;
 
         for (id, thread) in self.threads.iter().enumerate() {
-            let cur_num_tasks = thread.queue.lock().len();
+            let cur_num_tasks = thread.task_queue.lock().len();
             if cur_num_tasks < num_tasks {
                 thread_id = Some(id);
                 num_tasks = cur_num_tasks;
             }
         }
 
-        thread_id
+        thread_id.map(|i| (i, num_tasks))
     }
 }
 
 #[derive(Debug)]
 pub struct CPUThread {
-    pub queue: Mutex<TaskQueue>,
+    pub task_queue: Mutex<TaskQueue>,
+    pub page_update_queue: Mutex<PageUpdateQueue>,
     pub timer: usize,
     pub info: ThreadInfo,
+    pub in_kernel: AtomicBool,
 }
 
 impl CPUThread {
     pub fn new(info: ThreadInfo, timer: usize) -> Self {
         Self {
-            queue: Mutex::new(TaskQueue::new()),
+            task_queue: Mutex::new(TaskQueue::new()),
+            page_update_queue: Mutex::new(PageUpdateQueue::new()),
             timer,
             info,
+            in_kernel: AtomicBool::new(true),
         }
+    }
+
+    pub fn process_page_updates(&self) {
+        if let Some(current) = self.task_queue.lock().current() {
+            self.page_update_queue.lock().process(current.id());
+        }
+    }
+
+    pub fn check_enter_kernel(&self) {
+        if self.enter_kernel() {
+            panic!("already in kernel");
+        }
+    }
+
+    pub fn enter_kernel(&self) -> bool {
+        trace!("entering kernel");
+        self.in_kernel.swap(true, Ordering::Acquire)
+    }
+
+    pub fn leave_kernel(&self) {
+        trace!("leaving kernel");
+        self.in_kernel.store(false, Ordering::Release);
     }
 }
 
 /// an ID of a CPU thread
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ThreadID {
     pub core: usize,
     pub thread: usize,

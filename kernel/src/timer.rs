@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
 
 /// if any timer callback returns false, the interrupt handler should just send EOI and wait for the next interrupt without iret
-pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers) -> bool;
+pub type TimerCallback = fn(usize, Option<ThreadID>, &mut Registers);
 
 struct Timer {
     expires_at: u64,
@@ -49,12 +49,10 @@ impl TimerState {
     }
 
     /// ticks the timer, incrementing its jiffies counter and calling any callbacks that are due
-    pub fn tick(&mut self, registers: &mut Registers) -> bool {
+    pub fn tick(&mut self, registers: &mut Registers) {
         self.tick_no_callbacks();
 
         // run callbacks for all expired timers
-
-        let mut res = true;
 
         self.take_lock();
 
@@ -67,7 +65,7 @@ impl TimerState {
 
                 self.release_lock();
 
-                res = res && (callback)(self.num, self.cpu, registers);
+                (callback)(self.num, self.cpu, registers);
 
                 self.take_lock();
             } else {
@@ -77,8 +75,6 @@ impl TimerState {
         }
 
         self.release_lock();
-
-        res
     }
 
     /// ticks the timer without running any callbacks (may be useful if things are locked? idk)
@@ -87,13 +83,11 @@ impl TimerState {
     }
 
     /// ticks the timer, calling callbacks if it's not locked
-    pub fn try_tick(&mut self, registers: &mut Registers) -> bool {
+    pub fn try_tick(&mut self, registers: &mut Registers) {
         if self.lock.load(Ordering::Relaxed) {
             self.tick_no_callbacks();
-
-            true
         } else {
-            self.tick(registers)
+            self.tick(registers);
         }
     }
 

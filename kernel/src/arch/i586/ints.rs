@@ -6,7 +6,7 @@ use super::halt;
     platform::debug::exit_failure,
 };
 use crate::tasks::{get_current_task, get_current_task_mut, remove_page_reference, IN_TASK};*/
-use crate::util::debug::FormatHex;
+use crate::{util::debug::FormatHex, task::cancel_context_switch_timer};
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
 use core::{arch::asm, fmt};
@@ -232,6 +232,32 @@ pub struct InterruptRegisters {
     pub ss: u32,
 }
 
+pub enum TaskSanityError {
+    StackInKernel(u32),
+}
+
+impl fmt::Debug for TaskSanityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StackInKernel(addr) => write!(f, "task stack in kernel memory ({addr:#x})")
+        }
+    }
+}
+
+impl InterruptRegisters {
+    pub fn task_sanity_check(&self) -> Result<(), TaskSanityError> {
+        if self.useresp > super::KERNEL_PAGE_DIR_SPLIT as u32 {
+            return Err(TaskSanityError::StackInKernel(self.useresp));
+        }
+
+        Ok(())
+    }
+
+    pub fn transfer(&mut self, other: &Self) {
+        *self = *other;
+    }
+}
+
 impl fmt::Debug for InterruptRegisters {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("InterruptRegisters")
@@ -254,94 +280,126 @@ impl fmt::Debug for InterruptRegisters {
     }
 }
 
-unsafe fn generic_exception(name: &str, regs: &InterruptRegisters) {
-    let thread_id = super::get_thread_id();
+unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
+    let flags = super::get_flags();
+    super::cli();
 
-    if regs.error_code == 0 {
-        error!("PANIC (CPU {thread_id}): {name} @ {:#x}, no error code", regs.eip);
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().get_thread(thread_id).expect("couldn't get CPU thread object");
+
+    let task_id = thread.task_queue.lock().current().map(|c| c.id());
+
+    if thread.enter_kernel() || task_id.is_none() {
+        // we're in the kernel already, shit's bad
+        if regs.error_code == 0 {
+            error!("PANIC (CPU {thread_id}): {name} @ {:#x}, no error code", regs.eip);
+        } else {
+            error!("PANIC (CPU {thread_id}): {name} @ {:#x}, error code {:#x}", regs.eip, regs.error_code);
+        }
+
+        info!("{:#?}", regs);
+
+        crate::task::nmi_all_other_cpus();
+        halt();
     } else {
-        error!("PANIC (CPU {thread_id}): {name} @ {:#x}, error code {:#x}", regs.eip, regs.error_code);
+        // we're not in the kernel
+        cancel_context_switch_timer(None);
+
+        if regs.error_code == 0 {
+            error!("{name} in process {} @ {:#x}, no error code", task_id.unwrap(), regs.eip);
+        } else {
+            error!("P{name} in process {} @ {:#x}, error code {:#x}", task_id.unwrap(), regs.eip, regs.error_code);
+        }
+
+        info!("{:#?}", regs);
+
+        crate::task::manual_context_switch(thread.timer, Some(thread_id), regs, crate::task::ContextSwitchMode::Remove);
     }
 
-    info!("{:#?}", regs);
-
-    halt();
+    super::set_flags(flags);
 }
 
 /// exception handler for divide by zero
 #[interrupt(x86)]
-unsafe fn divide_by_zero_handler(regs: &InterruptRegisters) {
+unsafe fn divide_by_zero_handler(regs: &mut InterruptRegisters) {
     generic_exception("divide by zero", regs);
 }
 
 /// exception handler for breakpoint
 #[interrupt(x86)]
-unsafe fn breakpoint_handler(regs: &InterruptRegisters) {
+unsafe fn breakpoint_handler(regs: &mut InterruptRegisters) {
     info!("(CPU {}) breakpoint @ {:#x}", super::get_thread_id(), regs.eip);
 }
 
 #[interrupt(x86)]
 unsafe fn nmi_handler(_regs: &InterruptRegisters) {
-    error!("nmi");
+    use log::warn;
+    warn!("CPU {} got NMI", super::get_thread_id());
+    loop {
+        asm!("cli; hlt");
+    }
 }
 
 /// exception handler for overflow
 #[interrupt(x86)]
-unsafe fn overflow_handler(regs: &InterruptRegisters) {
+unsafe fn overflow_handler(regs: &mut InterruptRegisters) {
     info!("(CPU {}) overflow @ {:#x}", super::get_thread_id(), regs.eip);
 }
 
 /// exception handler for bound range exceeded
 #[interrupt(x86)]
-unsafe fn bound_range_handler(regs: &InterruptRegisters) {
+unsafe fn bound_range_handler(regs: &mut InterruptRegisters) {
     generic_exception("bound range exceeded", regs);
 }
 
 /// exception handler for invalid opcode
 #[interrupt(x86)]
-unsafe fn invalid_opcode_handler(regs: &InterruptRegisters) {
+unsafe fn invalid_opcode_handler(regs: &mut InterruptRegisters) {
     generic_exception("invalid opcode", regs);
 }
 
 /// exception handler for device not available
 #[interrupt(x86)]
-unsafe fn device_not_available_handler(regs: &InterruptRegisters) {
+unsafe fn device_not_available_handler(regs: &mut InterruptRegisters) {
     generic_exception("device not available", regs);
 }
 
 /// exception handler for double fault
 #[interrupt(x86_error_code)]
-unsafe fn double_fault_handler(regs: &InterruptRegisters) {
+unsafe fn double_fault_handler(regs: &mut InterruptRegisters) {
     generic_exception("double fault", regs);
 }
 
 /// exception handler for invalid tss
 #[interrupt(x86_error_code)]
-unsafe fn invalid_tss_handler(regs: &InterruptRegisters) {
+unsafe fn invalid_tss_handler(regs: &mut InterruptRegisters) {
     generic_exception("invalid TSS", regs);
 }
 
 /// exception handler for segment not present
 #[interrupt(x86_error_code)]
-unsafe fn segment_not_present_handler(regs: &InterruptRegisters) {
+unsafe fn segment_not_present_handler(regs: &mut InterruptRegisters) {
     generic_exception("segment not present", regs);
 }
 
 /// exception handler for stack-segment fault
 #[interrupt(x86_error_code)]
-unsafe fn stack_segment_handler(regs: &InterruptRegisters) {
+unsafe fn stack_segment_handler(regs: &mut InterruptRegisters) {
     generic_exception("stack-segment fault", regs);
 }
 
 /// exception handler for general protection fault
 #[interrupt(x86_error_code)]
-unsafe fn general_protection_fault_handler(regs: &InterruptRegisters) {
+unsafe fn general_protection_fault_handler(regs: &mut InterruptRegisters) {
     generic_exception("general protection fault", regs);
 }
 
 /// exception handler for page fault
 #[interrupt(x86_error_code)]
-unsafe extern "x86-interrupt" fn page_fault_handler(regs: &InterruptRegisters) {
+unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegisters) {
+    let flags = super::get_flags();
+    super::cli();
+
     /*let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);*/
 
@@ -404,67 +462,82 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &InterruptRegisters) {
             }
         } else {
             true // panic
-        }
-    {*/
-    //IN_TASK = was_in_task; // make sure generic handler knows whether we were in a task or not
+        }*/
+
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().get_thread(thread_id).expect("couldn't get CPU thread object");
+
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
-    let thread_id = super::get_thread_id();
+    let task_id = thread.task_queue.lock().current().map(|c| c.id());
 
-    error!("PANIC (CPU {thread_id}): page fault @ {:#x} (accessed {:#x}), error code {:#x}", regs.eip, address, regs.error_code);
-    info!("{:#?}", regs);
-    halt();
-    /*}
+    if thread.enter_kernel() || task_id.is_none() {
+        error!("PANIC (CPU {thread_id}): page fault @ {:#x} (accessed {:#x}), error code {:#x}", regs.eip, address, regs.error_code);
 
-    IN_TASK = was_in_task;*/
+        info!("{:#?}", regs);
+
+        crate::task::nmi_all_other_cpus();
+        halt();
+    } else {
+        // we're not in the kernel
+        cancel_context_switch_timer(None);
+
+        error!("page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}", task_id.unwrap(), regs.eip, address, regs.error_code);
+
+        info!("{:#?}", regs);
+
+        crate::task::manual_context_switch(thread.timer, Some(thread_id), regs, crate::task::ContextSwitchMode::Remove);
+    }
+
+    super::set_flags(flags);
 }
 
 /// exception handler for x87 floating point exception
 #[interrupt(x86)]
-unsafe fn x87_fpu_exception_handler(regs: &InterruptRegisters) {
+unsafe fn x87_fpu_exception_handler(regs: &mut InterruptRegisters) {
     generic_exception("x87 FPU exception", regs);
 }
 
 /// exception handler for alignment check
 #[interrupt(x86_error_code)]
-unsafe fn alignment_check_handler(regs: &InterruptRegisters) {
+unsafe fn alignment_check_handler(regs: &mut InterruptRegisters) {
     generic_exception("alignment check", regs);
 }
 
 /// exception handler for SIMD floating point exception
 #[interrupt(x86)]
-unsafe fn simd_fpu_exception_handler(regs: &InterruptRegisters) {
+unsafe fn simd_fpu_exception_handler(regs: &mut InterruptRegisters) {
     generic_exception("SIMD FPU exception", regs);
 }
 
 /// exception handler for virtualization exception
 #[interrupt(x86)]
-unsafe fn virtualization_exception_handler(regs: &InterruptRegisters) {
+unsafe fn virtualization_exception_handler(regs: &mut InterruptRegisters) {
     generic_exception("virtualization exception", regs);
 }
 
 /// exception handler for control protection exception
 #[interrupt(x86_error_code)]
-unsafe fn control_protection_handler(regs: &InterruptRegisters) {
+unsafe fn control_protection_handler(regs: &mut InterruptRegisters) {
     generic_exception("control protection exception", regs);
 }
 
 /// exception handler for hypervisor injection exception
 #[interrupt(x86)]
-unsafe fn hypervisor_injection_handler(regs: &InterruptRegisters) {
+unsafe fn hypervisor_injection_handler(regs: &mut InterruptRegisters) {
     generic_exception("hypervisor injection exception", regs);
 }
 
 /// exception handler for VMM communication exception
 #[interrupt(x86_error_code)]
-unsafe fn vmm_exception_handler(regs: &InterruptRegisters) {
+unsafe fn vmm_exception_handler(regs: &mut InterruptRegisters) {
     generic_exception("VMM commuication exception", regs);
 }
 
 /// exception handler for security exception
 #[interrupt(x86_error_code)]
-unsafe fn security_exception_handler(regs: &InterruptRegisters) {
+unsafe fn security_exception_handler(regs: &mut InterruptRegisters) {
     generic_exception("security exception", regs);
 }
 
@@ -474,34 +547,14 @@ const IRQ_HANDLER_INIT: Option<InterruptHandler> = None;
 static mut IRQ_HANDLERS: [Option<InterruptHandler>; 16] = [IRQ_HANDLER_INIT; 16];
 static mut PIT_TIMER_NUM: usize = 0;
 
-// basically just halts and waits for an interrupt
-#[naked]
-unsafe extern "C" fn set_interrups_and_halt() {
-    asm!(
-        "2:", // 0 and 1 don't work lmao
-        "sti",
-        "hlt",
-        "jmp 2b", // jump backwards to nearest label 2
-        options(noreturn),
-    );
-}
-
 #[interrupt(x86)]
 unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
     // irq0 is always timer
-    let should_halt = match crate::timer::get_timer(PIT_TIMER_NUM) {
-        Some(timer) => !timer.try_tick(regs),
-        None => false,
-    };
+    if let Some(timer) = crate::timer::get_timer(PIT_TIMER_NUM) {
+        timer.try_tick(regs);
+    }
 
     outb(0x20, 0x20); // reset primary interrupt controller
-
-    // is it not safe to return?
-    if should_halt {
-        // sets the instruction pointer to set_interrupts_and_halt so the stack is properly cleaned up
-        // failing to do this would cause the system to triple fault presumably due to stack overflow
-        regs.eip = set_interrups_and_halt as *const u8 as u32;
-    }
 }
 
 // this is a terrible and inefficient way of doing things but i don't really care
@@ -654,24 +707,23 @@ unsafe fn apic_timer_handler(regs: &mut InterruptRegisters) {
 
     let timer = crate::task::get_cpus().get_thread(thread_id).unwrap().timer;
 
-    let should_halt = match crate::timer::get_timer(timer) {
-        Some(timer) => !timer.try_tick(regs),
-        None => false,
-    };
+    if let Some(timer) = crate::timer::get_timer(timer) {
+        timer.try_tick(regs);
+    }
 
     super::apic::get_local_apic().eoi.write(0);
-
-    // is it not safe to return?
-    if should_halt {
-        // sets the instruction pointer to set_interrupts_and_halt so the stack is properly cleaned up
-        // failing to do this would cause the system to triple fault presumably due to stack overflow
-        regs.eip = set_interrups_and_halt as *const u8 as u32;
-    }
 }
 
 #[interrupt(x86)]
 unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
     debug!("apic spurious interrupt");
+
+    super::apic::get_local_apic().eoi.write(0);
+}
+
+#[interrupt(x86)]
+unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
+    crate::task::process_page_updates();
 
     super::apic::get_local_apic().eoi.write(0);
 }
@@ -753,6 +805,9 @@ pub unsafe fn init() {
     // APIC spurious interrupt
     IDT[0xf0] = IDTEntry::new(apic_spurious_handler as *const (), IDTFlags::Interrupt);
 
+    // page refresh interrupt
+    IDT[super::PAGE_REFRESH_INT] = IDTEntry::new(page_refresh_handler as *const (), IDTFlags::Interrupt);
+
     //IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
 
     load();
@@ -809,7 +864,6 @@ pub fn pit_timer_num() -> usize {
     unsafe { PIT_TIMER_NUM }
 }
 
-/// set up IRQ handler list, separate from init() since this requires the heap to be initialized
 pub unsafe fn init_irqs() {
     init_pit(10000);
 }

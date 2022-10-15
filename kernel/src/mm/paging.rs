@@ -1,6 +1,7 @@
 //! paging abstraction layer
 
 use crate::util::{array::BitSet, debug::FormatHex};
+use super::sync::PageDirTracker;
 //use common::types::errno::Errno;
 use alloc::{
     alloc::{alloc, dealloc, Layout},
@@ -452,6 +453,38 @@ impl PageManager {
         }
     }
 
+    /// exactly the same as alloc_frame but takes a mutex guard becaus the stupid fucking mutex guards don't preserve traits
+    pub fn alloc_frame_mutex<T: PageDirectory>(&mut self, dir: &mut spin::MutexGuard<T>, addr: usize, user_mode: bool, writable: bool) -> Result<u64, PagingError> {
+        assert!(T::PAGE_SIZE == self.page_size);
+
+        assert!(addr % self.page_size == 0, "frame address is not page aligned");
+
+        if dir.is_unused(addr) {
+            if let Some(idx) = self.frame_set.first_unset() {
+                let phys_addr = idx as u64 * self.page_size as u64;
+
+                let frame = PageFrame {
+                    addr: phys_addr,
+                    present: true,
+                    user_mode,
+                    writable,
+                    copy_on_write: false,
+                };
+
+                trace!("allocating frame {:?} @ virt {:#x}", frame, addr);
+
+                self.frame_set.set(idx);
+                dir.set_page(addr, Some(frame))?;
+
+                Ok(phys_addr)
+            } else {
+                Err(PagingError::NoAvailableFrames)
+            }
+        } else {
+            Err(PagingError::FrameInUse)
+        }
+    }
+
     pub fn first_available_frame(&self) -> Option<u64> {
         self.frame_set.first_unset().map(|i| (i as u64) * (self.page_size as u64))
     }
@@ -596,9 +629,9 @@ pub fn set_page_manager(manager: PageManager) {
     }
 }
 
-static mut KERNEL_PAGE_DIR: Option<Mutex<crate::arch::PageDirectory<'static>>> = None;
+static mut KERNEL_PAGE_DIR: Option<Mutex<PageDirTracker<crate::arch::PageDirectory<'static>>>> = None;
 
-pub fn get_page_dir() -> MutexGuard<'static, crate::arch::PageDirectory<'static>> {
+pub fn get_page_dir() -> MutexGuard<'static, PageDirTracker<crate::arch::PageDirectory<'static>>> {
     unsafe {
         let dir = KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set");
 
@@ -610,12 +643,24 @@ pub fn get_page_dir() -> MutexGuard<'static, crate::arch::PageDirectory<'static>
     }
 }
 
+pub fn get_page_dir_mut() -> &'static mut PageDirTracker<crate::arch::PageDirectory<'static>> {
+    unsafe {
+        KERNEL_PAGE_DIR.as_mut().expect("kernel page directory not set").get_mut()
+    }
+}
+
 pub fn set_page_dir(dir: crate::arch::PageDirectory<'static>) {
     unsafe {
         if KERNEL_PAGE_DIR.is_some() {
             panic!("can't set kernel page directory twice");
         } else {
-            KERNEL_PAGE_DIR = Some(Mutex::new(dir));
+            KERNEL_PAGE_DIR = Some(Mutex::new(PageDirTracker::new(dir)));
         }
+    }
+}
+
+pub fn get_page_dir_mutex() -> &'static Mutex<PageDirTracker<crate::arch::PageDirectory<'static>>> {
+    unsafe {
+        KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set")
     }
 }

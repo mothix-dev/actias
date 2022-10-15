@@ -2,7 +2,7 @@
 
 use super::{paging::PageDir, APICToCPU, PAGE_SIZE};
 use crate::{
-    mm::paging::PageDirectory,
+    mm::paging::{get_page_dir, PageDirectory},
     task::cpu::{ThreadID, CPU},
     util::debug::{DebugHexArray, FormatHex},
 };
@@ -29,15 +29,15 @@ pub fn calculate_checksum_bytes(bytes: &[u8]) -> usize {
 }
 
 /// gets the header of an acpi table at the provided physical address
-fn read_header(page_dir: &mut PageDir, phys_addr: u64) -> Option<ACPIHeader> {
+fn read_header(phys_addr: u64) -> Option<ACPIHeader> {
     let page = (phys_addr / PAGE_SIZE as u64) * PAGE_SIZE as u64;
     let offset = (phys_addr % PAGE_SIZE as u64) as usize;
 
-    unsafe { page_dir.map_memory(&[page, page + 1], |s| *(&s[offset] as *const u8 as *const ACPIHeader)).ok() }
+    unsafe { get_page_dir().map_memory(&[page, page + 1], |s| *(&s[offset] as *const u8 as *const ACPIHeader)).ok() }
 }
 
 /// gets the data of an acpi table at the provided physical address
-fn read_data(page_dir: &mut PageDir, phys_addr: u64, len: u32) -> Option<Vec<u8>> {
+fn read_data(phys_addr: u64, len: u32) -> Option<Vec<u8>> {
     let page = (phys_addr / PAGE_SIZE as u64) * PAGE_SIZE as u64;
     let offset = (phys_addr % PAGE_SIZE as u64) as usize + size_of::<ACPIHeader>();
     let len = len as usize - size_of::<ACPIHeader>();
@@ -48,7 +48,7 @@ fn read_data(page_dir: &mut PageDir, phys_addr: u64, len: u32) -> Option<Vec<u8>
         addresses.push(addr);
     }
 
-    unsafe { page_dir.map_memory(&addresses, |s| s[offset..offset + len].to_vec()).ok() }
+    unsafe { get_page_dir().map_memory(&addresses, |s| s[offset..offset + len].to_vec()).ok() }
 }
 
 #[repr(C)]
@@ -121,11 +121,11 @@ impl<S: SDTPointer + Clone + fmt::Debug> fmt::Debug for SDT<S> {
 }
 
 /// given a physical address, reads the (R|X)SDT located at that address
-fn read_sdt<S: SDTPointer + Clone>(page_dir: &mut PageDir, phys_addr: u64) -> Option<SDT<S>> {
+fn read_sdt<S: SDTPointer + Clone>(phys_addr: u64) -> Option<SDT<S>> {
     let page = (phys_addr / PAGE_SIZE as u64) * PAGE_SIZE as u64;
     let offset = (phys_addr % PAGE_SIZE as u64) as usize;
 
-    unsafe { page_dir.map_memory(&[page, page + 1], |s| SDT::from_raw_pointer(&s[offset] as *const u8)).ok() }
+    unsafe { get_page_dir().map_memory(&[page, page + 1], |s| SDT::from_raw_pointer(&s[offset] as *const u8)).ok() }
 }
 
 #[repr(C)]
@@ -189,11 +189,11 @@ pub union RSDP {
 }
 
 /// scans the BIOS reserved data area for a valid RSDP signature
-fn find_rsdp(page_dir: &mut PageDir) -> Option<u64> {
+fn find_rsdp() -> Option<u64> {
     // map pages one at a time to avoid exhausting memory on low memory systems
     for page in (0x000e0000..0x00100000).step_by(PAGE_SIZE) {
         unsafe {
-            if let Some(addr) = page_dir
+            if let Some(addr) = get_page_dir()
                 .map_memory(&[page], |s| {
                     // signature is always aligned to 16 bytes
                     for i in (0..PAGE_SIZE).step_by(16) {
@@ -215,12 +215,12 @@ fn find_rsdp(page_dir: &mut PageDir) -> Option<u64> {
 }
 
 /// given a physical address, reads the RSDP located at that address
-fn read_rsdp(page_dir: &mut PageDir, phys_addr: u64) -> Option<RSDP> {
+fn read_rsdp(phys_addr: u64) -> Option<RSDP> {
     let page = (phys_addr / PAGE_SIZE as u64) * PAGE_SIZE as u64;
     let offset = (phys_addr % PAGE_SIZE as u64) as usize;
 
     unsafe {
-        page_dir
+        get_page_dir()
             .map_memory(&[page, page + 1], |s| {
                 // always read extended rsdp regardless of the revision
                 RSDP {
@@ -388,11 +388,11 @@ impl MADT {
 }
 
 /// finds ACPI system descriptor table pointers from the global RSDP and (R|X)SDT
-pub fn find_sdts(page_dir: &mut PageDir) -> Option<Vec<u64>> {
-    if let Some(addr) = find_rsdp(page_dir) {
+pub fn find_sdts() -> Option<Vec<u64>> {
+    if let Some(addr) = find_rsdp() {
         debug!("rsdp @ {addr:#x}");
 
-        let rsdp = read_rsdp(page_dir, addr).expect("failed to read RSDP");
+        let rsdp = read_rsdp(addr).expect("failed to read RSDP");
 
         // accessing these union fields is perfectly safe
         if unsafe { rsdp.original.revision } > 0 {
@@ -408,7 +408,7 @@ pub fn find_sdts(page_dir: &mut PageDir) -> Option<Vec<u64>> {
 
             debug!("rsdp is {rsdp:#?}");
 
-            let sdt = read_sdt::<u64>(page_dir, rsdp.xsdt_address).expect("failed to read XSDT");
+            let sdt = read_sdt::<u64>(rsdp.xsdt_address).expect("failed to read XSDT");
 
             if !sdt.verify_checksum() {
                 error!("XSDT checksum invalid");
@@ -429,7 +429,7 @@ pub fn find_sdts(page_dir: &mut PageDir) -> Option<Vec<u64>> {
 
             debug!("rsdp is {rsdp:#?}");
 
-            let sdt = read_sdt::<u32>(page_dir, rsdp.rsdt_address as u64).expect("failed to read RSDT");
+            let sdt = read_sdt::<u32>(rsdp.rsdt_address as u64).expect("failed to read RSDT");
 
             if !sdt.verify_checksum() {
                 error!("RSDT checksum invalid");
@@ -446,16 +446,16 @@ pub fn find_sdts(page_dir: &mut PageDir) -> Option<Vec<u64>> {
     }
 }
 
-pub fn find_madt(page_dir: &mut PageDir, sdt_pointers: &[u64]) -> Option<MADT> {
+pub fn find_madt(sdt_pointers: &[u64]) -> Option<MADT> {
     // find the MADT
     for &ptr in sdt_pointers.iter() {
-        if let Some(header) = read_header(page_dir, ptr) {
+        if let Some(header) = read_header(ptr) {
             debug!("found header {:?}", header);
 
             // check for MADT signature ("APIC")
             if header.signature == [b'A', b'P', b'I', b'C'] {
                 // read MADT data
-                if let Some(data) = read_data(page_dir, ptr, header.length) {
+                if let Some(data) = read_data(ptr, header.length) {
                     if (calculate_checksum(&header) + calculate_checksum_bytes(&data)) & 0xff != 0 {
                         error!("MADT checksum invalid");
                     } else {
@@ -473,11 +473,11 @@ pub fn find_madt(page_dir: &mut PageDir, sdt_pointers: &[u64]) -> Option<MADT> {
     None
 }
 
-pub fn detect_cpus(page_dir: &mut PageDir<'static>, topology: Option<&super::CPUTopology>, mapping: Option<&APICToCPU>) -> Option<(super::APICToCPU, CPU)> {
+pub fn detect_cpus(topology: Option<&super::CPUTopology>, mapping: Option<&APICToCPU>) -> Option<(super::APICToCPU, CPU)> {
     let mut mapping = mapping.cloned();
 
-    let sdt_pointers = find_sdts(page_dir).unwrap();
-    let madt = find_madt(page_dir, &sdt_pointers).unwrap();
+    let sdt_pointers = find_sdts().unwrap();
+    let madt = find_madt(&sdt_pointers).unwrap();
 
     let mut local_apic_addr: u64 = madt.header.local_apic_addr as u64;
     let mut local_apics: Vec<(usize, usize, ThreadID)> = Vec::new();
@@ -518,7 +518,7 @@ pub fn detect_cpus(page_dir: &mut PageDir<'static>, topology: Option<&super::CPU
     // sanity check
     assert!((local_apic_addr % PageDir::PAGE_SIZE as u64) == 0, "local APIC address isn't page aligned");
 
-    super::apic::map_local_apic(page_dir, local_apic_addr);
+    super::apic::map_local_apic(local_apic_addr);
 
     // set up CPUs
     let mut cpus = CPU::new();

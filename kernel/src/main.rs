@@ -5,6 +5,7 @@
 #![feature(panic_info_message)]
 #![feature(abi_x86_interrupt)]
 #![feature(naked_functions)]
+#![feature(let_chains)]
 
 extern crate alloc;
 
@@ -41,6 +42,9 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
     } else {
         error!("PANIC (CPU {thread_id}) @ {file}:{line}");
     }
+
+    // send NMI to all other CPUs, which should halt them
+    task::nmi_all_other_cpus();
 
     unsafe {
         arch::halt();

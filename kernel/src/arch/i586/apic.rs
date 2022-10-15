@@ -1,5 +1,8 @@
-use super::{paging::PageDir, PAGE_SIZE};
-use crate::mm::paging::{get_page_manager, PageDirectory, PageFrame};
+use super::PAGE_SIZE;
+use crate::{
+    mm::paging::{get_page_manager, get_page_dir, PageDirectory, PageFrame},
+    task::cpu::ThreadID,
+};
 use alloc::{
     alloc::{alloc, Layout},
     vec::Vec,
@@ -574,16 +577,16 @@ impl fmt::Debug for APICError {
     }
 }
 
-pub fn map_local_apic(page_dir: &mut PageDir<'static>, addr: u64) {
+pub fn map_local_apic(addr: u64) {
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
 
     let buf = unsafe { alloc(layout) };
 
     assert!(!buf.is_null(), "failed to allocate memory for mapping local APIC");
 
-    get_page_manager().free_frame(page_dir, buf as usize).expect("couldn't free page");
+    get_page_manager().free_frame(crate::mm::paging::get_page_dir_mut(), buf as usize).expect("couldn't free page");
 
-    page_dir
+    get_page_dir()
         .set_page(
             buf as usize,
             Some(PageFrame {
@@ -612,7 +615,7 @@ pub fn get_local_apic() -> &'static mut LocalAPIC {
     unsafe { LOCAL_APIC.as_mut().expect("local APIC not mapped yet") }
 }
 
-pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &[u8]) {
+pub fn bring_up_cpus(apic_ids: &[u8]) {
     let thread_id = super::get_thread_id();
     let thread = crate::task::get_cpus().get_thread(thread_id).unwrap();
 
@@ -623,7 +626,7 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
     let bootstrap_addr = crate::platform::get_cpu_bootstrap_addr();
 
     // map bootstrap area into memory temporarily
-    page_dir
+    get_page_dir()
         .set_page(
             bootstrap_addr.try_into().unwrap(),
             Some(crate::mm::paging::PageFrame {
@@ -645,11 +648,9 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
         *(&mut bootstrap_area[bootstrap_area.len() - 8] as *mut u8 as *mut u32) = cpu_entry_point as *const u8 as u32;
     }
 
-    debug!("page dir @ {:#x}", page_dir.tables_physical_addr);
-
     // specify page table physical address
     unsafe {
-        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = page_dir.tables_physical_addr;
+        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_page_dir().inner().tables_physical_addr;
     }
 
     let local_apic = get_local_apic();
@@ -663,7 +664,7 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
             let stack = unsafe { alloc(stack_layout) };
 
             // free bottom page of stack to prevent the stack from corrupting other memory without anyone knowing
-            get_page_manager().free_frame(page_dir, stack as usize).unwrap();
+            get_page_manager().free_frame(crate::mm::paging::get_page_dir_mut(), stack as usize).unwrap();
 
             let stack_end = stack as usize + stack_layout.size() - 1;
 
@@ -677,7 +678,7 @@ pub fn bring_up_cpus(page_dir: &mut super::paging::PageDir<'static>, apic_ids: &
     }
 
     // unmap the bootstrap area from memory
-    page_dir.set_page(bootstrap_addr.try_into().unwrap(), None).unwrap();
+    get_page_dir().set_page(bootstrap_addr.try_into().unwrap(), None).unwrap();
 }
 
 unsafe extern "C" fn cpu_entry_point() {
@@ -696,7 +697,7 @@ unsafe extern "C" fn cpu_entry_point() {
     super::sti(); // i spent HOURS debugging to find that i forgot this
 
     // FIXME: should probably store BSP's ID somewhere
-    calibrate_apic_timer_from(crate::task::get_cpus().get_thread(crate::task::cpu::ThreadID { core: 0, thread: 0 }).unwrap().timer);
+    calibrate_apic_timer_from(crate::task::get_cpus().get_thread(ThreadID { core: 0, thread: 0 }).unwrap().timer);
 
     local_apic.check_error().unwrap();
 
@@ -765,4 +766,22 @@ pub fn init_bsp_apic() {
 
     // disable PIT timer
     super::ints::disable_pit();
+}
+
+/// sends a non-maskable interrupt to the given CPU
+pub fn send_nmi_to_cpu(id: ThreadID) {
+    if let Some(thread) = crate::task::get_cpus().get_thread(id) {
+        if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
+            get_local_apic().write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::NMI).physical_destination(apic_id).finish());
+        }
+    }
+}
+
+/// sends a normal interrupt to the given CPU
+pub fn send_interrupt_to_cpu(id: ThreadID, int: usize) {
+    if let Some(thread) = crate::task::get_cpus().get_thread(id) {
+        if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
+            get_local_apic().write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::Fixed).vector_number(int.try_into().unwrap()).physical_destination(apic_id).finish());
+        }
+    }
 }

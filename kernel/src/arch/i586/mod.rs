@@ -4,15 +4,15 @@ pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use crate::task::{
+use crate::{task::{
     cpu::{ThreadID, CPU},
     set_cpus,
-};
-use alloc::{collections::BTreeMap, format, string::ToString, vec::Vec};
+}, mm::paging::get_page_manager};
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::arch::asm;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use raw_cpuid::{CpuId, CpuIdResult, TopologyType};
-use x86::{bits32::eflags::EFlags, cpuid};
+use x86::{bits32::eflags::EFlags, segmentation::SegmentSelector, Ring, cpuid};
 
 // various useful constants
 pub const MEM_TOP: usize = 0xffffffff;
@@ -130,10 +130,8 @@ fn bits_required_for(num: usize) -> usize {
 }
 
 /// attempts to find the CPU topology based on CPUID calls
-fn get_cpu_topology() -> Option<(CPUTopology, APICToCPU)> {
+fn get_cpu_topology(cpuid: &CpuId) -> Option<(CPUTopology, APICToCPU)> {
     // TODO: figure out more ways to detect CPU topology with CPUID, this current method is a bit lacking
-
-    let cpuid = read_cpuid();
 
     let has_htt = match cpuid.get_feature_info() {
         Some(feature_info) => feature_info.has_htt(),
@@ -233,6 +231,8 @@ pub type Registers = ints::InterruptRegisters;
 /// page directory type
 pub type PageDirectory<'a> = paging::PageDir<'a>;
 
+pub const KERNEL_PAGE_DIR_SPLIT: usize = 0xe0000000;
+
 #[derive(Copy, Clone, Debug)]
 pub struct ThreadInfo {
     /// the ID of this thread's APIC
@@ -250,15 +250,12 @@ pub struct ThreadInfo {
 ///
 /// yeah
 pub unsafe fn halt() -> ! {
-    //warn!("halting CPU");
-    warn!("halting CPU {}", get_thread_id());
-
     // exit qemu
-    //x86::io::outb(0x501, 0x31);
+    x86::io::outb(0x501, 0x31);
 
     // exit bochs
-    //x86::io::outw(0x8a00, 0x8a00);
-    //x86::io::outw(0x8a00, 0x8ae0);
+    x86::io::outw(0x8a00, 0x8a00);
+    x86::io::outw(0x8a00, 0x8ae0);
 
     // halt cpu
     loop {
@@ -347,6 +344,39 @@ pub fn get_thread_id() -> ThreadID {
     unsafe { APIC_TO_CPU.apic_to_cpu(apic::get_local_apic().id().into()) }
 }
 
+pub use apic::{send_nmi_to_cpu, send_interrupt_to_cpu};
+
+/// refreshes the page at the provided address in the TLB
+pub fn refresh_page(addr: usize) {
+    trace!("flushing {:#x} in tlb", addr);
+    unsafe {
+        x86::tlb::flush(addr);
+    }
+}
+
+pub const PAGE_REFRESH_INT: usize = 0x31;
+
+pub fn safely_halt_cpu(regs: &mut Registers) {
+    // sets the instruction pointer to set_interrupts_and_halt so the stack is properly cleaned up
+    // failing to do this would cause the system to triple fault presumably due to stack overflow
+    regs.cs = SegmentSelector::new(1, Ring::Ring0).bits().into();
+    regs.ds = SegmentSelector::new(2, Ring::Ring0).bits().into();
+    regs.ss = SegmentSelector::new(2, Ring::Ring0).bits().into();
+    regs.eip = set_interrups_and_halt as *const u8 as u32;
+}
+
+// basically just halts and waits for an interrupt
+#[naked]
+unsafe extern "C" fn set_interrups_and_halt() {
+    asm!(
+        "2:", // 0 and 1 don't work lmao
+        "sti",
+        "hlt",
+        "jmp 2b", // jump backwards to nearest label 2
+        options(noreturn),
+    );
+}
+
 fn init_single_core(timer: usize) {
     // set up CPUs
     let mut cpus = CPU::new();
@@ -367,98 +397,161 @@ fn init_single_core(timer: usize) {
     set_cpus(cpus);
 }
 
-pub fn init(page_dir: &mut paging::PageDir<'static>, args: Option<BTreeMap<&str, &str>>) {
+pub fn init(args: Option<BTreeMap<&str, &str>>) {
     unsafe {
         ints::init_irqs();
     }
 
-    if args.and_then(|a| a.get("acpi").cloned()).unwrap_or("yes") == "no" {
-        warn!("ACPI disabled, ignoring APIC and other CPUs");
+    let cpuid = read_cpuid();
 
-        init_single_core(ints::pit_timer_num());
-    } else {
-        let cpuid = read_cpuid();
+    // try to get cpu topology from cpuid
+    let res = get_cpu_topology(&cpuid);
+    let topology = res.as_ref().map(|(t, _)| t);
+    let mapping = res.as_ref().map(|(_, m)| m);
 
-        debug!("{:?}", cpuid);
-
-        let model = if let Some(brand) = cpuid.get_processor_brand_string() {
-            brand.as_str().to_string()
-        } else if let Some(feature_info) = cpuid.get_feature_info() {
-            let vendor = cpuid.get_vendor_info().map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
-            let family = feature_info.family_id();
-            let model = feature_info.model_id();
-            let stepping = feature_info.stepping_id();
-            format!("{vendor} family {family} model {model} stepping {stepping}")
-        } else {
-            "unknown".to_string()
-        };
-
-        debug!("cpu model is {model:?}");
-
-        // try to get cpu topology from cpuid
-        let res = get_cpu_topology();
-        let topology = res.as_ref().map(|(t, _)| t);
-        let mapping = res.as_ref().map(|(_, m)| m);
-
-        if let Some(t) = topology.as_ref() {
-            info!("detected {} CPUs ({} cores, {} threads per core)", t.logical_processors, t.num_cores, t.threads_per_core);
-        }
-
-        if let Some((final_mapping, cpus)) = acpi::detect_cpus(page_dir, topology, mapping) {
-            // we have ACPI, so we for sure have an APIC
-
-            unsafe {
-                APIC_TO_CPU = final_mapping;
-            }
-
-            if topology.is_none() {
-                info!("detected {} CPUs, unknown topology", cpus.cores.len());
-            }
-
-            // set global cpu topology, queues, etc
-            crate::task::set_cpus(cpus);
-
-            apic::init_bsp_apic();
-
-            // get APIC IDs from CPU list
-            let mut apic_ids: Vec<u8> = Vec::new();
-
-            for core in crate::task::get_cpus().cores.iter() {
-                for thread in core.threads.iter() {
-                    if let Some(id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
-                        apic_ids.push(id);
-                    }
-                }
-            }
-
-            // bring up CPUs
-            apic::bring_up_cpus(page_dir, &apic_ids);
-        } else if cpuid.get_feature_info().map(|i| i.has_apic()).unwrap_or(false) {
-            // we don't have ACPI but CPUID reports an APIC
-
-            match crate::timer::register_timer(Some(ThreadID { core: 0, thread: 0 }), 0) {
-                Ok(timer) => {
-                    init_single_core(timer);
-
-                    apic::init_bsp_apic();
-                }
-                Err(err) => {
-                    error!("error registering timer: {err:?}");
-
-                    init_single_core(ints::pit_timer_num());
-                }
-            }
-        } else {
-            // no APIC?
-            info!("no APIC detected, falling back on PIT for timer");
-
-            init_single_core(ints::pit_timer_num());
-        }
-
-        // TODO: maybe intel MP support?
+    if let Some(t) = topology.as_ref() {
+        info!("detected {} CPUs ({} cores, {} threads per core)", t.logical_processors, t.num_cores, t.threads_per_core);
     }
 
+    let can_use_acpi = args.and_then(|a| a.get("acpi").cloned()).unwrap_or("yes") == "yes";
+
+    if can_use_acpi && let Some((final_mapping, cpus)) = acpi::detect_cpus(topology, mapping) {
+        // we have ACPI, so we for sure have an APIC
+
+        unsafe {
+            APIC_TO_CPU = final_mapping;
+        }
+
+        if topology.is_none() {
+            info!("detected {} CPUs, unknown topology", cpus.cores.len());
+        }
+
+        // set global cpu topology, queues, etc
+        crate::task::set_cpus(cpus);
+
+        // init BSP's APIC, calibrate timer, disable PIT
+        apic::init_bsp_apic();
+
+        // get APIC IDs from CPU list
+        let mut apic_ids: Vec<u8> = Vec::new();
+
+        for core in crate::task::get_cpus().cores.iter() {
+            for thread in core.threads.iter() {
+                if let Some(id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
+                    apic_ids.push(id);
+                }
+            }
+        }
+
+        // bring up CPUs
+        if apic_ids.len() > 1 {
+            apic::bring_up_cpus(&apic_ids);
+        }
+    } else if cpuid.get_feature_info().map(|i| i.has_apic()).unwrap_or(false) {
+        // we don't have ACPI but CPUID reports an APIC
+
+        match crate::timer::register_timer(Some(ThreadID { core: 0, thread: 0 }), 0) {
+            Ok(timer) => {
+                apic::map_local_apic(0xfee00000);
+
+                init_single_core(timer);
+
+                apic::init_bsp_apic();
+            }
+            Err(err) => {
+                error!("error registering timer: {err:?}");
+
+                init_single_core(ints::pit_timer_num());
+            }
+        }
+    } else {
+        // no APIC?
+        info!("no APIC detected, falling back on PIT for timer");
+
+        init_single_core(ints::pit_timer_num());
+    }
+
+    // TODO: maybe intel MP support?
+
+    test_create_thread(test_thread_1);
+    test_create_thread(test_thread_2);
+
     start_context_switching();
+}
+
+unsafe extern "C" fn test_thread_1() {
+    loop {
+        info!("UwU");
+
+        for _i in 0..16384 {
+            spin();
+        }
+    }
+}
+
+unsafe extern "C" fn test_thread_2() {
+    loop {
+        /*for _i in 0..8192 {
+            spin();
+        }*/
+
+        info!("OwO");
+
+        for _i in 0..8192 {
+            spin();
+        }
+    }
+}
+
+fn test_create_thread(entry_point: unsafe extern "C" fn()) {
+    let mut process_list = crate::task::get_process_list();
+
+    use crate::mm::paging::PageDirectory;
+
+    let mut page_dir = paging::PageDir::new();
+
+    for addr in (KERNEL_PAGE_DIR_SPLIT - STACK_SIZE..KERNEL_PAGE_DIR_SPLIT).step_by(PAGE_SIZE) {
+        // make sure there's actually something here so we don't deadlock if we need to allocate something and the page manager is busy
+        page_dir.set_page(addr, None).unwrap();
+    
+        get_page_manager().alloc_frame(&mut page_dir, addr, true, true).unwrap();
+    }
+
+    let stack_end = KERNEL_PAGE_DIR_SPLIT - 4096;
+
+    let process = process_list.create_process(page_dir).unwrap();
+    process_list.get_process_mut(process).unwrap().threads.push(crate::task::Thread {
+        registers: Registers {
+            cs: SegmentSelector::new(1, Ring::Ring0).bits().into(),
+            ds: SegmentSelector::new(2, Ring::Ring0).bits().into(),
+            ss: SegmentSelector::new(2, Ring::Ring0).bits().into(),
+            /*cs: SegmentSelector::new(3, Ring::Ring3).bits().into(),
+            ds: SegmentSelector::new(4, Ring::Ring3).bits().into(),
+            ss: SegmentSelector::new(4, Ring::Ring3).bits().into(),*/
+
+            edi: 0,
+            esi: 0,
+            ebp: stack_end as u32,
+            esp: stack_end as u32,
+            ebx: 0,
+            edx: 0,
+            ecx: 0,
+            eax: 0,
+            error_code: 0, // lol, lmao
+            eip: entry_point as *const u8 as u32,
+            eflags: get_flags().0,
+            useresp: stack_end as u32,
+        },
+        priority: 0,
+        cpu: None,
+        is_blocked: false,
+    });
+
+    let thread_id = crate::task::get_cpus().find_thread_to_add_to().unwrap();
+
+    crate::task::get_cpus().get_thread(thread_id).unwrap().task_queue.lock().insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
+
+    drop(process_list);
 }
 
 fn start_context_switching() {

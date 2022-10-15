@@ -107,3 +107,51 @@ impl TaskQueueEntry {
         self.id
     }
 }
+
+#[derive(Debug)]
+pub struct PageUpdateQueue {
+    queue: VecDeque<PageUpdateEntry>,
+}
+
+impl PageUpdateQueue {
+    pub fn new() -> Self {
+        Self { queue: VecDeque::new() }
+    }
+
+    pub fn process(&mut self, process_id: super::ProcessID) {
+        while let Some(entry) = self.queue.pop_front() {
+            entry.process(process_id);
+        }
+    }
+
+    pub fn insert(&mut self, entry: PageUpdateEntry) {
+        self.queue.push_back(entry);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
+
+impl Default for PageUpdateQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum PageUpdateEntry {
+    Task { process_id: usize, addr: usize },
+    Kernel { addr: usize },
+}
+
+impl PageUpdateEntry {
+    pub fn process(&self, process_id: super::ProcessID) {
+        match self {
+            Self::Task { process_id: id, addr } => if *id == process_id.process {
+                crate::arch::refresh_page(*addr);
+            },
+            Self::Kernel { addr } => crate::arch::refresh_page(*addr),
+        }
+    }
+}

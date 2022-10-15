@@ -1,36 +1,30 @@
 //! smooth brain scheduler
 
-/*
-each logical CPU has its own task queue
-if a CPU's task queue is empty, it will search thru other CPU task queues (in order of distance, SMT threads first, then other cores, then other CPUs?) to find a task to run (todo: do we want to steal tasks from other physical processors? will that fuck up cache?)
-if no task can be found, the CPU will enter a power-saving state until the next task switch
-hopefully this behavior can be done independently, with CPU task queues being locked with a spinlock (or maybe a more advanced mutex could be possible? halt the CPU, then resume it with an interrupt when the lock is released)
-
-context switch would go something like
- - save state of process
- - lock task queue
-    - get next task
-    - insert process back into queue if it's been forcefully preempted (i.e. didn't voluntarily block)
- - release lock
- - load state of process
-*/
-
 pub mod cpu;
 pub mod queue;
 
-use crate::{arch::Registers, mm::paging::PageDirectory};
+use crate::{
+    arch::{Registers, get_thread_id},
+    mm::{
+        paging::PageDirectory,
+        sync::PageDirSync,
+    },
+    util::array::VecBitSet,
+};
 use alloc::vec::Vec;
-use log::{debug, error};
+use core::fmt;
+use log::{debug, error, trace, warn};
 use spin::Mutex;
 
-use self::queue::TaskQueueEntry;
+use queue::TaskQueueEntry;
+use queue::PageUpdateEntry;
 
 /// how much time each process gets before it's forcefully preempted
 pub const CPU_TIME_SLICE: u64 = 200; // 5 ms quantum
 
 pub struct Process {
     /// the page directory of this process
-    pub page_directory: crate::arch::PageDirectory<'static>,
+    pub page_directory: PageDirSync<'static, crate::arch::PageDirectory<'static>>,
 
     /// all the threads of this process
     pub threads: Vec<Thread>,
@@ -44,27 +38,34 @@ pub struct Thread {
     pub priority: i8,
 
     /// the CPU this thread was last on
-    pub cpu: cpu::ThreadID,
+    pub cpu: Option<cpu::ThreadID>,
 
     /// whether this thread is blocked or not
     pub is_blocked: bool,
 }
 
+#[derive(Debug)]
+pub struct CreateProcessError;
+
 pub struct ProcessList {
     pub processes: Vec<Option<Process>>,
+    pub process_bitset: VecBitSet,
 }
 
 impl ProcessList {
     pub const fn new() -> Self {
-        Self { processes: Vec::new() }
+        Self {
+            processes: Vec::new(),
+            process_bitset: VecBitSet::new(),
+        }
     }
 
-    pub fn get_process(&self, id: ProcessID) -> Option<&Process> {
-        self.processes.get(id.process)?.as_ref()
+    pub fn get_process(&self, id: usize) -> Option<&Process> {
+        self.processes.get(id)?.as_ref()
     }
 
-    pub fn get_process_mut(&mut self, id: ProcessID) -> Option<&mut Process> {
-        self.processes.get_mut(id.process)?.as_mut()
+    pub fn get_process_mut(&mut self, id: usize) -> Option<&mut Process> {
+        self.processes.get_mut(id)?.as_mut()
     }
 
     pub fn get_thread(&self, id: ProcessID) -> Option<&Thread> {
@@ -74,6 +75,35 @@ impl ProcessList {
     pub fn get_thread_mut(&mut self, id: ProcessID) -> Option<&mut Thread> {
         self.processes.get_mut(id.process)?.as_mut()?.threads.get_mut(id.thread)
     }
+
+    pub fn create_process(&mut self, page_dir: crate::arch::PageDirectory<'static>) -> Result<usize, CreateProcessError> {
+        let id = self.process_bitset.first_unset();
+
+        if id >= self.processes.len() {
+            self.processes.try_reserve(id - self.processes.len() + 1).map_err(|_| CreateProcessError)?;
+
+            while self.processes.len() <= id + 1 {
+                self.processes.push(None);
+            }
+        }
+
+        let mut page_directory = PageDirSync {
+            kernel: crate::mm::paging::get_page_dir_mutex(),
+            task: page_dir,
+            process_id: id,
+            kernel_space_updates: 0,
+        };
+
+        page_directory.force_sync();
+
+        self.processes[id] = Some(Process {
+            page_directory,
+            threads: Vec::new(),
+        });
+        self.process_bitset.set(id);
+
+        Ok(id)
+    }
 }
 
 impl Default for ProcessList {
@@ -82,13 +112,23 @@ impl Default for ProcessList {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ProcessID {
     pub process: usize,
     pub thread: usize,
 }
 
+impl fmt::Display for ProcessID {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.process, self.thread)
+    }
+}
+
 static PROCESSES: Mutex<ProcessList> = Mutex::new(ProcessList::new());
+
+pub fn get_process_list() -> spin::MutexGuard<'static, ProcessList> {
+    PROCESSES.lock()
+}
 
 static mut CPUS: Option<cpu::CPU> = None;
 
@@ -108,18 +148,97 @@ pub fn set_cpus(cpus: cpu::CPU) {
     }
 }
 
+pub fn process_page_updates() {
+    let thread_id = crate::arch::get_thread_id();
+
+    get_cpus().get_thread(thread_id).unwrap().process_page_updates();
+}
+
+pub fn update_page(entry: PageUpdateEntry) {
+    match entry {
+        // send to all cpus, wait for all cpus
+        PageUpdateEntry::Kernel { addr: _ } => {
+            for core in get_cpus().cores.iter() {
+                for thread in core.threads.iter() {
+                    thread.page_update_queue.lock().insert(entry);
+
+                    // inefficient and slow :(
+                    while !thread.page_update_queue.lock().is_empty() {
+                        crate::arch::spin();
+                    }
+                }
+            }
+        },
+
+        // only send to and wait for cpus with the same process
+        PageUpdateEntry::Task { process_id, addr: _ } => {
+            for core in get_cpus().cores.iter() {
+                for thread in core.threads.iter() {
+                    if let Some(current_id) = thread.task_queue.lock().current().map(|c| c.id()) && current_id.process == process_id {
+                        thread.page_update_queue.lock().insert(entry);
+
+                        // there should really be a way to do this without locking
+                        while !thread.page_update_queue.lock().is_empty() {
+                            crate::arch::spin();
+                        }
+                    }
+                }
+            }
+        },
+    }
+}
+
+/// sends a non-maskable interrupt to all known CPUs
+pub fn nmi_all_other_cpus() {
+    warn!("sending NMI to all other CPUs");
+
+    let local_id = crate::arch::get_thread_id();
+
+    if let Some(cpus) = unsafe { CPUS.as_ref() } {
+        for (core_id, core) in cpus.cores.iter().enumerate() {
+            for thread_id in 0..core.threads.len() {
+                let remote_id = cpu::ThreadID { core: core_id, thread: thread_id };
+
+                if remote_id != local_id {
+                    crate::arch::send_nmi_to_cpu(remote_id);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ContextSwitchMode {
+    /// normal context switch, places the current task back onto the queue
+    Normal,
+
+    /// blocks the current task and doesn't place it back on the queue
+    Block,
+
+    /// removes the current task and obviously doesn't place it back on the queue
+    Remove,
+}
+
 /// performs a context switch
-fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, manual: bool, block_thread: bool) -> bool {
-    let cpu = cpu.unwrap_or(cpu::ThreadID { core: 0, thread: 0 });
+fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, manual: bool, mode: ContextSwitchMode) {
+    let cpu = cpu.unwrap_or(get_thread_id());
+
+    let thread = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object");
+
+    if !manual {
+        thread.check_enter_kernel();
+    }
 
     // get the task queue for this CPU
-    let mut queue = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object").queue.lock();
+    let mut queue = thread.task_queue.lock();
 
     if manual {
         // remove the pending timer if there is one
         if let Some(expires) = queue.timer {
             let timer_state = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
             timer_state.remove_timer(expires);
+
+            queue.timer = None;
         }
     }
 
@@ -129,18 +248,27 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
         let mut processes = PROCESSES.lock();
 
         if let Some(thread) = processes.get_thread_mut(current.id()) {
-            thread.registers = *regs;
+            regs.task_sanity_check().expect("registers failed sanity check");
+
+            thread.registers.transfer(regs);
 
             // todo: saving of other registers (x87, MMX, SSE, etc.)
 
-            if block_thread {
-                thread.is_blocked = true;
-
-                None
-            } else if thread.is_blocked {
+            if thread.is_blocked {
                 None
             } else {
-                Some((current.id(), thread.priority))
+                match mode {
+                    ContextSwitchMode::Normal => Some((current.id(), thread.priority)),
+                    ContextSwitchMode::Block => {
+                        thread.is_blocked = true;
+                        None
+                    },
+                    ContextSwitchMode::Remove => {
+                        // TODO: this
+                        thread.is_blocked = true;
+                        None
+                    },
+                }
             }
         } else {
             error!("couldn't get thread {:?} for saving in context switch", current.id());
@@ -156,26 +284,37 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
 
     while let Some(next) = queue.consume() {
         // yes, save task state
-        let processes = PROCESSES.lock();
+        let mut processes = PROCESSES.lock();
 
-        if let Some(process) = processes.get_process(next.id()) {
+        if let Some(process) = processes.get_process_mut(next.id().process) {
             if let Some(thread) = process.threads.get(next.id().thread) {
                 if thread.is_blocked {
                     continue;
                 }
 
-                *regs = thread.registers;
+                thread.registers.task_sanity_check().expect("thread registers failed sanity check");
+
+                regs.transfer(&thread.registers);
 
                 // todo: loading of other registers (x87, MMX, SSE, etc.)
 
-                // todo: keeping page directory up to date
+                trace!("syncing");
+                process.page_directory.sync();
+
                 if let Some((id, _)) = last_id.as_ref() {
                     // is the process different? (i.e. not the same thread)
                     if id.process != next.id().process {
                         // yes, switch the page directory
+                        trace!("switching page directory");
                         unsafe {
                             process.page_directory.switch_to();
                         }
+                    }
+                } else {
+                    // switch the page directory no matter what since we weren't in a task before
+                    trace!("switching page directory");
+                    unsafe {
+                        process.page_directory.switch_to();
                     }
                 }
 
@@ -189,14 +328,23 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
         }
     }
 
+    if !has_task {
+        // this'll set the registers into a safe state so the cpu will return from the interrupt handler and just wait for an interrupt there,
+        // since for whatever reason just waiting here really messes things up
+        crate::arch::safely_halt_cpu(regs);
+    }
+
     // put previous task back into queue if necessary
-    if !block_thread {
+    if mode == ContextSwitchMode::Normal {
+        trace!("re-inserting thread");
+
         if let Some((id, priority)) = last_id {
             queue.insert(TaskQueueEntry::new(id, priority));
         }
     }
 
     // requeue timer
+    trace!("re-queueing timer");
     let timer = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
     let expires = timer
         .add_timer_in(timer.hz() / CPU_TIME_SLICE, context_switch_timer)
@@ -206,27 +354,26 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
     // release lock on queue
     drop(queue);
 
-    has_task
+    trace!("finished context switch");
+
+    thread.leave_kernel();
 }
 
 /// timer callback run every time we want to perform a context switch
-pub fn context_switch_timer(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) -> bool {
-    _context_switch(timer_num, cpu, regs, false, false)
+pub fn context_switch_timer(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
+    _context_switch(timer_num, cpu, regs, false, ContextSwitchMode::Normal);
 }
 
-/// blocks the current thread and switches to the next thread
-pub fn block_thread_and_context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
-    _context_switch(timer_num, cpu, regs, true, true);
-}
-
-/// manually switches to the next thread
-pub fn context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers) {
-    _context_switch(timer_num, cpu, regs, true, false);
+/// manually performs a context switch
+pub fn manual_context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, mode: ContextSwitchMode) {
+    _context_switch(timer_num, cpu, regs, true, mode);
 }
 
 pub fn wait_for_context_switch(timer_num: usize, cpu: cpu::ThreadID) {
+    let thread = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object");
+
     // get the task queue for this CPU
-    let mut queue = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object").queue.lock();
+    let mut queue = thread.task_queue.lock();
 
     // queue timer
     let timer = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
@@ -238,7 +385,26 @@ pub fn wait_for_context_switch(timer_num: usize, cpu: cpu::ThreadID) {
     // release lock on queue
     drop(queue);
 
+    thread.leave_kernel();
+
     loop {
         crate::arch::halt_until_interrupt();
+    }
+}
+
+pub fn cancel_context_switch_timer(cpu: Option<cpu::ThreadID>) {
+    let cpu = cpu.unwrap_or(get_thread_id());
+
+    let thread = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object");
+
+    // get the task queue for this CPU
+    let mut queue = thread.task_queue.lock();
+
+    // remove the pending timer if there is one
+    if let Some(expires) = queue.timer {
+        let timer_state = crate::timer::get_timer(thread.timer).expect("unable to get timer for next context switch");
+        timer_state.remove_timer(expires);
+
+        queue.timer = None;
     }
 }

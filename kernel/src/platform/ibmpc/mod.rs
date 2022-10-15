@@ -202,10 +202,10 @@ pub fn kmain() {
             let old_top = (old_top / PAGE_SIZE) * PAGE_SIZE;
             debug!("old_top now @ {old_top:#x}");
 
-            let dir = unsafe { PAGE_DIR.as_mut().unwrap() };
+            let mut dir = crate::mm::paging::get_page_dir();
 
             for addr in (old_top..new_top).step_by(PAGE_SIZE) {
-                if !dir.has_page_table(addr.try_into().unwrap()) {
+                if !dir.inner().has_page_table(addr.try_into().unwrap()) {
                     trace!("allocating new page table");
 
                     let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
@@ -214,10 +214,12 @@ pub fn kmain() {
                     };
                     let phys = dir.virt_to_phys(virt as usize).ok_or(())?;
 
-                    dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *(virt as *mut PageTable) }, phys.try_into().unwrap(), true);
+                    unsafe {
+                        dir.inner_mut().add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                    }
                 }
 
-                get_page_manager().alloc_frame(dir, addr, false, true).map_err(|err| {
+                get_page_manager().alloc_frame_mutex(&mut dir, addr, false, true).map_err(|err| {
                     error!("error allocating page for heap: {err:?}");
                 })?;
             }
@@ -363,8 +365,11 @@ pub fn kmain() {
 
     debug!("{:?}", cmdline);
 
+    // set the global kernel page directory
+    crate::mm::paging::set_page_dir(unsafe { PAGE_DIR.take().unwrap() });
+
     // arch code takes over here
-    crate::arch::init(unsafe { PAGE_DIR.as_mut().unwrap() }, cmdline);
+    crate::arch::init(cmdline);
 
     loop {
         crate::arch::halt_until_interrupt();
