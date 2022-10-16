@@ -20,6 +20,7 @@ compression = { version = "0.1", default_features = false, features = [ "gzip", 
 raw-cpuid = "10.6"
 spin = "0.9"
 volatile = "0.4"
+goblin = { version = "0.5", default-features = false, features = [ "elf32", "elf64", "endian_fd" ] }
 
 [build-dependencies]
 cc = "1.0"

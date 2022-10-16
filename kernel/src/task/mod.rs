@@ -1,6 +1,7 @@
 //! smooth brain scheduler
 
 pub mod cpu;
+pub mod exec;
 pub mod queue;
 
 use crate::{
@@ -28,6 +29,13 @@ pub struct Process {
 
     /// all the threads of this process
     pub threads: Vec<Thread>,
+}
+
+impl Process {
+    pub fn set_page_directory(&mut self, page_dir: crate::arch::PageDirectory<'static>) {
+        self.page_directory.task = page_dir;
+        self.page_directory.force_sync();
+    }
 }
 
 pub struct Thread {
@@ -132,8 +140,8 @@ pub fn get_process_list() -> spin::MutexGuard<'static, ProcessList> {
 
 static mut CPUS: Option<cpu::CPU> = None;
 
-pub fn get_cpus() -> &'static cpu::CPU {
-    unsafe { CPUS.as_mut().expect("CPUs not initialized") }
+pub fn get_cpus() -> Option<&'static cpu::CPU> {
+    unsafe { CPUS.as_ref() }
 }
 
 pub fn set_cpus(cpus: cpu::CPU) {
@@ -151,40 +159,60 @@ pub fn set_cpus(cpus: cpu::CPU) {
 pub fn process_page_updates() {
     let thread_id = crate::arch::get_thread_id();
 
-    get_cpus().get_thread(thread_id).unwrap().process_page_updates();
+    get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap().process_page_updates();
 }
 
 pub fn update_page(entry: PageUpdateEntry) {
-    match entry {
-        // send to all cpus, wait for all cpus
-        PageUpdateEntry::Kernel { addr: _ } => {
-            for core in get_cpus().cores.iter() {
-                for thread in core.threads.iter() {
-                    thread.page_update_queue.lock().insert(entry);
+    trace!("updating page {entry:?}");
 
-                    // inefficient and slow :(
-                    while !thread.page_update_queue.lock().is_empty() {
-                        crate::arch::spin();
-                    }
-                }
-            }
-        },
+    let thread_id = crate::arch::get_thread_id();
 
-        // only send to and wait for cpus with the same process
-        PageUpdateEntry::Task { process_id, addr: _ } => {
-            for core in get_cpus().cores.iter() {
-                for thread in core.threads.iter() {
-                    if let Some(current_id) = thread.task_queue.lock().current().map(|c| c.id()) && current_id.process == process_id {
-                        thread.page_update_queue.lock().insert(entry);
+    if let Some(cpus) = get_cpus() {
+        match entry {
+            // send to all cpus, wait for all cpus
+            PageUpdateEntry::Kernel { addr: _ } => {
+                for (core_num, core) in cpus.cores.iter().enumerate() {
+                    for (thread_num, thread) in core.threads.iter().enumerate() {
+                        if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started() {
+                            thread.page_update_queue.lock().insert(entry);
 
-                        // there should really be a way to do this without locking
-                        while !thread.page_update_queue.lock().is_empty() {
-                            crate::arch::spin();
+                            let id = cpu::ThreadID { core: core_num, thread: thread_num };
+
+                            assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::PAGE_REFRESH_INT), "failed to send interrupt");
+
+                            // inefficient and slow :(
+                            trace!("waiting for {id}");
+                            while !thread.page_update_queue.lock().is_empty() {
+                                crate::arch::spin();
+                            }
                         }
                     }
                 }
-            }
-        },
+            },
+
+            // only send to and wait for cpus with the same process
+            PageUpdateEntry::Task { process_id, addr: _ } => {
+                for (core_num, core) in cpus.cores.iter().enumerate() {
+                    for (thread_num, thread) in core.threads.iter().enumerate() {
+                        if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started() {
+                            if let Some(current_id) = thread.task_queue.lock().current().map(|c| c.id()) && current_id.process == process_id {
+                                thread.page_update_queue.lock().insert(entry);
+
+                                let id = cpu::ThreadID { core: core_num, thread: thread_num };
+
+                                assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::PAGE_REFRESH_INT), "failed to send interrupt");
+
+                                // inefficient and slow :(
+                                trace!("waiting for {id}");
+                                while !thread.page_update_queue.lock().is_empty() {
+                                    crate::arch::spin();
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
     }
 }
 
@@ -221,9 +249,9 @@ pub enum ContextSwitchMode {
 
 /// performs a context switch
 fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Registers, manual: bool, mode: ContextSwitchMode) {
-    let cpu = cpu.unwrap_or(get_thread_id());
+    let cpu = cpu.unwrap_or_else(get_thread_id);
 
-    let thread = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object");
+    let thread = get_cpus().expect("CPUs not initialized").get_thread(cpu).expect("couldn't get CPU thread object");
 
     if !manual {
         thread.check_enter_kernel();
@@ -370,7 +398,7 @@ pub fn manual_context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs:
 }
 
 pub fn wait_for_context_switch(timer_num: usize, cpu: cpu::ThreadID) {
-    let thread = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object");
+    let thread = get_cpus().expect("CPUs not initialized").get_thread(cpu).expect("couldn't get CPU thread object");
 
     // get the task queue for this CPU
     let mut queue = thread.task_queue.lock();
@@ -393,9 +421,9 @@ pub fn wait_for_context_switch(timer_num: usize, cpu: cpu::ThreadID) {
 }
 
 pub fn cancel_context_switch_timer(cpu: Option<cpu::ThreadID>) {
-    let cpu = cpu.unwrap_or(get_thread_id());
+    let cpu = cpu.unwrap_or_else(get_thread_id);
 
-    let thread = get_cpus().get_thread(cpu).expect("couldn't get CPU thread object");
+    let thread = get_cpus().expect("CPUs not initialized").get_thread(cpu).expect("couldn't get CPU thread object");
 
     // get the task queue for this CPU
     let mut queue = thread.task_queue.lock();

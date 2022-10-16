@@ -210,6 +210,6 @@ pub fn get_timer(index: usize) -> Option<&'static mut TimerState> {
 
 pub fn get_local_timer() -> Option<&'static mut TimerState> {
     let thread_id = crate::arch::get_thread_id();
-    let thread = crate::task::get_cpus().get_thread(thread_id)?;
+    let thread = crate::task::get_cpus()?.get_thread(thread_id)?;
     get_timer(thread.timer)
 }

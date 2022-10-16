@@ -15,6 +15,8 @@ use log::{debug, error, info};
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
     io::{inb, outb},
+    segmentation::SegmentSelector,
+    Ring,
 };
 
 /// IDT flags
@@ -245,6 +247,27 @@ impl fmt::Debug for TaskSanityError {
 }
 
 impl InterruptRegisters {
+    pub fn new_task(entry_point: usize, stack_end: usize) -> Self {
+        Self {
+            cs: SegmentSelector::new(3, Ring::Ring3).bits().into(),
+            ds: SegmentSelector::new(4, Ring::Ring3).bits().into(),
+            ss: SegmentSelector::new(4, Ring::Ring3).bits().into(),
+
+            edi: 0,
+            esi: 0,
+            ebp: stack_end as u32,
+            esp: 0,
+            ebx: 0,
+            edx: 0,
+            ecx: 0,
+            eax: 0,
+            error_code: 0, // lol, lmao
+            eip: entry_point as u32,
+            eflags: super::get_flags().0,
+            useresp: stack_end as u32,
+        }
+    }
+
     pub fn task_sanity_check(&self) -> Result<(), TaskSanityError> {
         if self.useresp > super::KERNEL_PAGE_DIR_SPLIT as u32 {
             return Err(TaskSanityError::StackInKernel(self.useresp));
@@ -285,7 +308,7 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
     super::cli();
 
     let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().get_thread(thread_id).expect("couldn't get CPU thread object");
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
 
     let task_id = thread.task_queue.lock().current().map(|c| c.id());
 
@@ -367,7 +390,15 @@ unsafe fn device_not_available_handler(regs: &mut InterruptRegisters) {
 /// exception handler for double fault
 #[interrupt(x86_error_code)]
 unsafe fn double_fault_handler(regs: &mut InterruptRegisters) {
-    generic_exception("double fault", regs);
+    super::cli();
+
+    let thread_id = super::get_thread_id();
+
+    error!("PANIC (CPU {thread_id}): double fault @ {:#x}", regs.eip);
+
+    info!("{:#?}", regs);
+
+    crate::task::nmi_all_other_cpus();
 }
 
 /// exception handler for invalid tss
@@ -465,7 +496,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
         }*/
 
     let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().get_thread(thread_id).expect("couldn't get CPU thread object");
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
 
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
@@ -502,7 +533,15 @@ unsafe fn x87_fpu_exception_handler(regs: &mut InterruptRegisters) {
 /// exception handler for alignment check
 #[interrupt(x86_error_code)]
 unsafe fn alignment_check_handler(regs: &mut InterruptRegisters) {
-    generic_exception("alignment check", regs);
+    super::cli();
+
+    let thread_id = super::get_thread_id();
+
+    error!("PANIC (CPU {thread_id}): machine check @ {:#x}", regs.eip);
+
+    info!("{:#?}", regs);
+
+    crate::task::nmi_all_other_cpus();
 }
 
 /// exception handler for SIMD floating point exception
@@ -705,27 +744,32 @@ unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
 unsafe fn apic_timer_handler(regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
 
-    let timer = crate::task::get_cpus().get_thread(thread_id).unwrap().timer;
+    let timer = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap().timer;
 
     if let Some(timer) = crate::timer::get_timer(timer) {
         timer.try_tick(regs);
     }
 
-    super::apic::get_local_apic().eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
 }
 
 #[interrupt(x86)]
 unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
     debug!("apic spurious interrupt");
 
-    super::apic::get_local_apic().eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
 }
 
 #[interrupt(x86)]
 unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
     crate::task::process_page_updates();
 
-    super::apic::get_local_apic().eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
+}
+
+#[interrupt(x86)]
+unsafe fn syscall_handler(_regs: &mut InterruptRegisters) {
+    info!("syscall");
 }
 
 /// how many entries do we want in our IDT
@@ -808,7 +852,7 @@ pub unsafe fn init() {
     // page refresh interrupt
     IDT[super::PAGE_REFRESH_INT] = IDTEntry::new(page_refresh_handler as *const (), IDTFlags::Interrupt);
 
-    //IDT[0x80] = IDTEntry::new(syscall_handler_wrapper as *const (), IDTFlags::Call);
+    IDT[super::SYSCALL_INT] = IDTEntry::new(syscall_handler as *const (), IDTFlags::Call);
 
     load();
 }

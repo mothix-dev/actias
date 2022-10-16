@@ -1,4 +1,5 @@
 use alloc::collections::VecDeque;
+use log::trace;
 
 /// a per-CPU task queue
 #[derive(Debug)]
@@ -118,7 +119,7 @@ impl PageUpdateQueue {
         Self { queue: VecDeque::new() }
     }
 
-    pub fn process(&mut self, process_id: super::ProcessID) {
+    pub fn process(&mut self, process_id: Option<super::ProcessID>) {
         while let Some(entry) = self.queue.pop_front() {
             entry.process(process_id);
         }
@@ -146,9 +147,10 @@ pub enum PageUpdateEntry {
 }
 
 impl PageUpdateEntry {
-    pub fn process(&self, process_id: super::ProcessID) {
+    pub fn process(&self, process_id: Option<super::ProcessID>) {
+        trace!("processing {self:?}");
         match self {
-            Self::Task { process_id: id, addr } => if *id == process_id.process {
+            Self::Task { process_id: id, addr } => if let Some(pid) = process_id && *id == pid.process {
                 crate::arch::refresh_page(*addr);
             },
             Self::Kernel { addr } => crate::arch::refresh_page(*addr),

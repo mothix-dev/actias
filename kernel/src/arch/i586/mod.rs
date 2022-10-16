@@ -4,11 +4,13 @@ pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use crate::{task::{
-    cpu::{ThreadID, CPU},
-    set_cpus,
-}, mm::paging::get_page_manager};
-use alloc::{collections::BTreeMap, vec::Vec};
+use crate::{
+    task::{
+        cpu::{ThreadID, CPU},
+        set_cpus,
+    },
+};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::arch::asm;
 use log::{debug, error, info, trace, warn};
 use raw_cpuid::{CpuId, CpuIdResult, TopologyType};
@@ -341,7 +343,7 @@ pub fn sti() {
 static mut APIC_TO_CPU: APICToCPU = APICToCPU::OneToOne;
 
 pub fn get_thread_id() -> ThreadID {
-    unsafe { APIC_TO_CPU.apic_to_cpu(apic::get_local_apic().id().into()) }
+    unsafe { apic::get_local_apic().map(|apic| APIC_TO_CPU.apic_to_cpu(apic.id().into())).unwrap_or_default() }
 }
 
 pub use apic::{send_nmi_to_cpu, send_interrupt_to_cpu};
@@ -355,6 +357,7 @@ pub fn refresh_page(addr: usize) {
 }
 
 pub const PAGE_REFRESH_INT: usize = 0x31;
+pub const SYSCALL_INT: usize = 0x80;
 
 pub fn safely_halt_cpu(regs: &mut Registers) {
     // sets the instruction pointer to set_interrupts_and_halt so the stack is properly cleaned up
@@ -397,7 +400,7 @@ fn init_single_core(timer: usize) {
     set_cpus(cpus);
 }
 
-pub fn init(args: Option<BTreeMap<&str, &str>>) {
+pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'static [u8]>) {
     unsafe {
         ints::init_irqs();
     }
@@ -413,7 +416,7 @@ pub fn init(args: Option<BTreeMap<&str, &str>>) {
         info!("detected {} CPUs ({} cores, {} threads per core)", t.logical_processors, t.num_cores, t.threads_per_core);
     }
 
-    let can_use_acpi = args.and_then(|a| a.get("acpi").cloned()).unwrap_or("yes") == "yes";
+    let can_use_acpi = args.as_ref().and_then(|a| a.get("acpi").cloned()).unwrap_or("yes") == "yes";
 
     if can_use_acpi && let Some((final_mapping, cpus)) = acpi::detect_cpus(topology, mapping) {
         // we have ACPI, so we for sure have an APIC
@@ -435,7 +438,7 @@ pub fn init(args: Option<BTreeMap<&str, &str>>) {
         // get APIC IDs from CPU list
         let mut apic_ids: Vec<u8> = Vec::new();
 
-        for core in crate::task::get_cpus().cores.iter() {
+        for core in crate::task::get_cpus().expect("CPUs not initialized").cores.iter() {
             for thread in core.threads.iter() {
                 if let Some(id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
                     apic_ids.push(id);
@@ -473,13 +476,27 @@ pub fn init(args: Option<BTreeMap<&str, &str>>) {
 
     // TODO: maybe intel MP support?
 
-    test_create_thread(test_thread_1);
-    test_create_thread(test_thread_2);
+    const DEFAULT_INIT: &str = "init";
+    let init_name = args.as_ref().and_then(|a| a.get("init").cloned()).unwrap_or(DEFAULT_INIT);
+    let init_data = modules.get(init_name).unwrap_or_else(|| modules.get(DEFAULT_INIT).expect("couldn't find init in modules"));
+
+    let mut process_list = crate::task::get_process_list();
+
+    let process = process_list.create_process(paging::PageDir::new()).unwrap();
+    crate::task::exec::exec_as::<paging::PageDir>(None, process_list.get_process_mut(process).unwrap(), init_data).expect("failed to exec init");
+
+    let cpus = crate::task::get_cpus().expect("CPUs not initialized");
+
+    let thread_id = cpus.find_thread_to_add_to().unwrap();
+
+    cpus.get_thread(thread_id).unwrap().task_queue.lock().insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
+
+    drop(process_list);
 
     start_context_switching();
 }
 
-unsafe extern "C" fn test_thread_1() {
+/*unsafe extern "C" fn test_thread_1() {
     loop {
         info!("UwU");
 
@@ -552,12 +569,12 @@ fn test_create_thread(entry_point: unsafe extern "C" fn()) {
     crate::task::get_cpus().get_thread(thread_id).unwrap().task_queue.lock().insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
 
     drop(process_list);
-}
+}*/
 
 fn start_context_switching() {
     // set timer and wait for it to expire to kick off context switching
     let thread_id = get_thread_id();
-    let thread = crate::task::get_cpus().get_thread(thread_id).unwrap();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
 
     info!("CPU {thread_id} starting context switching");
 

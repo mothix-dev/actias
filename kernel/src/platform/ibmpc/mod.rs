@@ -9,7 +9,7 @@ use crate::{
     mm::{
         bump_alloc::{bump_alloc, init_bump_alloc},
         heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
-        paging::{get_page_manager, set_page_manager, PageDirectory, PageManager},
+        paging::{get_page_manager, set_page_manager, get_page_dir, PageDirectory, PageManager},
     },
     util::{
         array::BitSet,
@@ -202,24 +202,23 @@ pub fn kmain() {
             let old_top = (old_top / PAGE_SIZE) * PAGE_SIZE;
             debug!("old_top now @ {old_top:#x}");
 
-            let mut dir = crate::mm::paging::get_page_dir();
-
             for addr in (old_top..new_top).step_by(PAGE_SIZE) {
-                if !dir.inner().has_page_table(addr.try_into().unwrap()) {
+
+                if !get_page_dir().0.inner().has_page_table(addr.try_into().unwrap()) {
                     trace!("allocating new page table");
 
                     let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
                         Ok(ptr) => ptr,
                         Err(()) => return Ok(addr), // fail gracefully if we can't allocate
                     };
-                    let phys = dir.virt_to_phys(virt as usize).ok_or(())?;
+                    let phys = get_page_dir().virt_to_phys(virt as usize).ok_or(())?;
 
                     unsafe {
-                        dir.inner_mut().add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                        get_page_dir().0.inner_mut().add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
                     }
                 }
 
-                get_page_manager().alloc_frame_mutex(&mut dir, addr, false, true).map_err(|err| {
+                get_page_manager().alloc_frame(&mut get_page_dir(), addr, false, true).map_err(|err| {
                     error!("error allocating page for heap: {err:?}");
                 })?;
             }
@@ -369,7 +368,7 @@ pub fn kmain() {
     crate::mm::paging::set_page_dir(unsafe { PAGE_DIR.take().unwrap() });
 
     // arch code takes over here
-    crate::arch::init(cmdline);
+    crate::arch::init(cmdline, modules);
 
     loop {
         crate::arch::halt_until_interrupt();

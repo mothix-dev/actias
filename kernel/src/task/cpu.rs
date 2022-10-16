@@ -153,7 +153,8 @@ pub struct CPUThread {
     pub page_update_queue: Mutex<PageUpdateQueue>,
     pub timer: usize,
     pub info: ThreadInfo,
-    pub in_kernel: AtomicBool,
+    in_kernel: AtomicBool,
+    has_started: AtomicBool,
 }
 
 impl CPUThread {
@@ -164,13 +165,12 @@ impl CPUThread {
             timer,
             info,
             in_kernel: AtomicBool::new(true),
+            has_started: AtomicBool::new(false),
         }
     }
 
     pub fn process_page_updates(&self) {
-        if let Some(current) = self.task_queue.lock().current() {
-            self.page_update_queue.lock().process(current.id());
-        }
+        self.page_update_queue.lock().process(self.task_queue.lock().current().map(|c| c.id()));
     }
 
     pub fn check_enter_kernel(&self) {
@@ -188,10 +188,20 @@ impl CPUThread {
         trace!("leaving kernel");
         self.in_kernel.store(false, Ordering::Release);
     }
+
+    pub fn start(&self) {
+        if self.has_started.swap(true, Ordering::Acquire) {
+            panic!("CPU already started");
+        }
+    }
+
+    pub fn has_started(&self) -> bool {
+        self.has_started.load(Ordering::Relaxed)
+    }
 }
 
 /// an ID of a CPU thread
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ThreadID {
     pub core: usize,
     pub thread: usize,

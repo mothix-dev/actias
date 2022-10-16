@@ -159,6 +159,8 @@ impl LocalAPIC {
 
     /// writes an interrupt command to the interrupt command registers
     pub fn write_interrupt_command(&mut self, command: InterruptCommand) {
+        debug!("writing interrupt command {command:?}");
+
         let flags = super::get_flags();
         super::cli();
 
@@ -387,6 +389,7 @@ impl Default for LVTEntryBuilder {
     }
 }
 
+#[derive(Debug)]
 pub struct InterruptCommand(pub u32, pub u32);
 
 pub struct InterruptCommandBuilder {
@@ -584,7 +587,7 @@ pub fn map_local_apic(addr: u64) {
 
     assert!(!buf.is_null(), "failed to allocate memory for mapping local APIC");
 
-    get_page_manager().free_frame(crate::mm::paging::get_page_dir_mut(), buf as usize).expect("couldn't free page");
+    get_page_manager().free_frame(&mut get_page_dir(), buf as usize).expect("couldn't free page");
 
     get_page_dir()
         .set_page(
@@ -605,19 +608,19 @@ pub fn map_local_apic(addr: u64) {
         LOCAL_APIC = Some(LocalAPIC::from_raw_pointer(buf as *mut u32));
     }
 
-    debug!("local APIC version {}", get_local_apic().version());
+    debug!("local APIC version {}", get_local_apic().unwrap().version());
 }
 
 static mut LOCAL_APIC: Option<LocalAPIC> = None;
 
-pub fn get_local_apic() -> &'static mut LocalAPIC {
+pub fn get_local_apic() -> Option<&'static mut LocalAPIC> {
     // distributing mutable references is fine here since it's MMIO local to the current processor
-    unsafe { LOCAL_APIC.as_mut().expect("local APIC not mapped yet") }
+    unsafe { LOCAL_APIC.as_mut() }
 }
 
 pub fn bring_up_cpus(apic_ids: &[u8]) {
     let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().get_thread(thread_id).unwrap();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
 
     let timer_num = thread.timer;
 
@@ -650,10 +653,10 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
 
     // specify page table physical address
     unsafe {
-        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_page_dir().inner().tables_physical_addr;
+        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_page_dir().0.inner().tables_physical_addr;
     }
 
-    let local_apic = get_local_apic();
+    let local_apic = get_local_apic().expect("local APIC not mapped");
     let local_apic_id = local_apic.id();
 
     // start up other CPUs
@@ -664,7 +667,7 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
             let stack = unsafe { alloc(stack_layout) };
 
             // free bottom page of stack to prevent the stack from corrupting other memory without anyone knowing
-            get_page_manager().free_frame(crate::mm::paging::get_page_dir_mut(), stack as usize).unwrap();
+            get_page_manager().free_frame(&mut get_page_dir(), stack as usize).unwrap();
 
             let stack_end = stack as usize + stack_layout.size() - 1;
 
@@ -683,21 +686,32 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
 
 unsafe extern "C" fn cpu_entry_point() {
     super::ints::load();
+
+    // make sure we're on the latest page directory
+    get_page_dir().switch_to();
+
     super::gdt::init_other_cpu(super::STACK_SIZE);
 
-    let local_apic = get_local_apic();
+    let local_apic = get_local_apic().expect("local APIC not mapped");
 
     local_apic.set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
     local_apic.eoi.write(0);
 
     local_apic.check_error().unwrap();
 
+    let cpus = crate::task::get_cpus().expect("CPUs not initialized");
+
     info!("CPU {} is alive!", super::get_thread_id());
 
     super::sti(); // i spent HOURS debugging to find that i forgot this
 
+    // signal that this CPU has started
+    cpus.get_thread(super::get_thread_id()).unwrap().start();
+
+    get_page_dir().switch_to();
+
     // FIXME: should probably store BSP's ID somewhere
-    calibrate_apic_timer_from(crate::task::get_cpus().get_thread(ThreadID { core: 0, thread: 0 }).unwrap().timer);
+    calibrate_apic_timer_from(cpus.get_thread(ThreadID { core: 0, thread: 0 }).unwrap().timer);
 
     local_apic.check_error().unwrap();
 
@@ -727,11 +741,11 @@ fn calibrate_timer(calibrate_from: usize, calibrating: usize) -> u64 {
 /// very roughly calibrates the local APIC timer to 100k ns/t (10 kHz) from the provided timer source
 pub fn calibrate_apic_timer_from(timer_num: usize) {
     let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().get_thread(thread_id).unwrap();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
 
     let calibrating = thread.timer;
 
-    let local_apic = get_local_apic();
+    let local_apic = get_local_apic().expect("local APIC not mapped");
 
     debug!("calibrating APIC {} (CPU {thread_id})", local_apic.id());
 
@@ -759,7 +773,7 @@ pub fn calibrate_apic_timer_from(timer_num: usize) {
 
 pub fn init_bsp_apic() {
     // set spurious timer interrupt
-    get_local_apic().set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
+    get_local_apic().expect("local APIC not mapped").set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
 
     // calibrate BSP's APIC timer
     calibrate_apic_timer_from(super::ints::pit_timer_num());
@@ -769,19 +783,36 @@ pub fn init_bsp_apic() {
 }
 
 /// sends a non-maskable interrupt to the given CPU
-pub fn send_nmi_to_cpu(id: ThreadID) {
-    if let Some(thread) = crate::task::get_cpus().get_thread(id) {
+pub fn send_nmi_to_cpu(id: ThreadID) -> bool {
+    debug!("sending NMI to CPU {id}");
+
+    if let Some(thread) = crate::task::get_cpus().and_then(|cpus| cpus.get_thread(id)) {
         if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
-            get_local_apic().write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::NMI).physical_destination(apic_id).finish());
+            debug!("APIC ID is {apic_id}");
+            let local_apic = get_local_apic().expect("local APIC not mapped");
+            local_apic.write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::NMI).physical_destination(apic_id).finish());
+            local_apic.check_error().unwrap();
+            return true;
         }
     }
+
+    false
 }
 
 /// sends a normal interrupt to the given CPU
-pub fn send_interrupt_to_cpu(id: ThreadID, int: usize) {
-    if let Some(thread) = crate::task::get_cpus().get_thread(id) {
+pub fn send_interrupt_to_cpu(id: ThreadID, int: usize) -> bool {
+    debug!("sending interrupt {int} to CPU {id}");
+
+    if let Some(thread) = crate::task::get_cpus().and_then(|cpus| cpus.get_thread(id)) {
         if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
-            get_local_apic().write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::Fixed).vector_number(int.try_into().unwrap()).physical_destination(apic_id).finish());
+            if let Ok(int) = int.try_into() {
+                let local_apic = get_local_apic().expect("local APIC not mapped");
+                local_apic.write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::Fixed).vector_number(int).physical_destination(apic_id).finish());
+                local_apic.check_error().unwrap();
+                return true;
+            }
         }
     }
+
+    false
 }
