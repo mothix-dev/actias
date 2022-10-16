@@ -5,11 +5,8 @@ pub mod exec;
 pub mod queue;
 
 use crate::{
-    arch::{Registers, get_thread_id},
-    mm::{
-        paging::PageDirectory,
-        sync::PageDirSync,
-    },
+    arch::{get_thread_id, Registers},
+    mm::{paging::PageDirectory, sync::PageDirSync},
     util::array::VecBitSet,
 };
 use alloc::vec::Vec;
@@ -17,8 +14,8 @@ use core::fmt;
 use log::{debug, error, trace, warn};
 use spin::Mutex;
 
-use queue::TaskQueueEntry;
 use queue::PageUpdateEntry;
+use queue::TaskQueueEntry;
 
 /// how much time each process gets before it's forcefully preempted
 pub const CPU_TIME_SLICE: u64 = 200; // 5 ms quantum
@@ -96,7 +93,7 @@ impl ProcessList {
         }
 
         let mut page_directory = PageDirSync {
-            kernel: crate::mm::paging::get_page_dir_mutex(),
+            kernel: crate::mm::paging::get_page_dir().0,
             task: page_dir,
             process_id: id,
             kernel_space_updates: 0,
@@ -104,10 +101,7 @@ impl ProcessList {
 
         page_directory.force_sync();
 
-        self.processes[id] = Some(Process {
-            page_directory,
-            threads: Vec::new(),
-        });
+        self.processes[id] = Some(Process { page_directory, threads: Vec::new() });
         self.process_bitset.set(id);
 
         Ok(id)
@@ -188,30 +182,29 @@ pub fn update_page(entry: PageUpdateEntry) {
                         }
                     }
                 }
-            },
+            }
 
             // only send to and wait for cpus with the same process
             PageUpdateEntry::Task { process_id, addr: _ } => {
                 for (core_num, core) in cpus.cores.iter().enumerate() {
                     for (thread_num, thread) in core.threads.iter().enumerate() {
-                        if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started() {
-                            if let Some(current_id) = thread.task_queue.lock().current().map(|c| c.id()) && current_id.process == process_id {
-                                thread.page_update_queue.lock().insert(entry);
+                        if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started()
+                            && let Some(current_id) = thread.task_queue.lock().current().map(|c| c.id()) && current_id.process == process_id {
+                            thread.page_update_queue.lock().insert(entry);
 
-                                let id = cpu::ThreadID { core: core_num, thread: thread_num };
+                            let id = cpu::ThreadID { core: core_num, thread: thread_num };
 
-                                assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::PAGE_REFRESH_INT), "failed to send interrupt");
+                            assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::PAGE_REFRESH_INT), "failed to send interrupt");
 
-                                // inefficient and slow :(
-                                trace!("waiting for {id}");
-                                while !thread.page_update_queue.lock().is_empty() {
-                                    crate::arch::spin();
-                                }
+                            // inefficient and slow :(
+                            trace!("waiting for {id}");
+                            while !thread.page_update_queue.lock().is_empty() {
+                                crate::arch::spin();
                             }
                         }
                     }
                 }
-            },
+            }
         }
     }
 }
@@ -253,122 +246,128 @@ fn _context_switch(timer_num: usize, cpu: Option<cpu::ThreadID>, regs: &mut Regi
 
     let thread = get_cpus().expect("CPUs not initialized").get_thread(cpu).expect("couldn't get CPU thread object");
 
-    if !manual {
-        thread.check_enter_kernel();
-    }
+    let in_kernel = if !manual {
+        thread.enter_kernel()
+    } else {
+        true
+    };
 
     // get the task queue for this CPU
     let mut queue = thread.task_queue.lock();
 
-    if manual {
-        // remove the pending timer if there is one
-        if let Some(expires) = queue.timer {
-            let timer_state = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
-            timer_state.remove_timer(expires);
+    if in_kernel {
+        if manual {
+            // remove the pending timer if there is one
+            if let Some(expires) = queue.timer {
+                let timer_state = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
+                timer_state.remove_timer(expires);
 
-            queue.timer = None;
+                queue.timer = None;
+            }
         }
-    }
 
-    // do we have an active task?
-    let last_id = if let Some(current) = queue.current() {
-        // yes, save task state
-        let mut processes = PROCESSES.lock();
+        // do we have an active task?
+        let last_id = if let Some(current) = queue.current() {
+            // yes, save task state
+            let mut processes = PROCESSES.lock();
 
-        if let Some(thread) = processes.get_thread_mut(current.id()) {
-            regs.task_sanity_check().expect("registers failed sanity check");
+            if let Some(thread) = processes.get_thread_mut(current.id()) {
+                regs.task_sanity_check().expect("registers failed sanity check");
 
-            thread.registers.transfer(regs);
+                thread.registers.transfer(regs);
 
-            // todo: saving of other registers (x87, MMX, SSE, etc.)
+                // todo: saving of other registers (x87, MMX, SSE, etc.)
 
-            if thread.is_blocked {
-                None
-            } else {
-                match mode {
-                    ContextSwitchMode::Normal => Some((current.id(), thread.priority)),
-                    ContextSwitchMode::Block => {
-                        thread.is_blocked = true;
-                        None
-                    },
-                    ContextSwitchMode::Remove => {
-                        // TODO: this
-                        thread.is_blocked = true;
-                        None
-                    },
+                if thread.is_blocked {
+                    None
+                } else {
+                    match mode {
+                        ContextSwitchMode::Normal => Some((current.id(), thread.priority)),
+                        ContextSwitchMode::Block => {
+                            thread.is_blocked = true;
+                            None
+                        }
+                        ContextSwitchMode::Remove => {
+                            // TODO: this
+                            thread.is_blocked = true;
+                            None
+                        }
+                    }
                 }
+            } else {
+                error!("couldn't get thread {:?} for saving in context switch", current.id());
+
+                None
             }
         } else {
-            error!("couldn't get thread {:?} for saving in context switch", current.id());
-
             None
-        }
-    } else {
-        None
-    };
+        };
 
-    // do we have another task to load?
-    let mut has_task = false;
+        // do we have another task to load?
+        let mut has_task = false;
 
-    while let Some(next) = queue.consume() {
-        // yes, save task state
-        let mut processes = PROCESSES.lock();
+        while let Some(next) = queue.consume() {
+            // yes, save task state
+            let mut processes = PROCESSES.lock();
 
-        if let Some(process) = processes.get_process_mut(next.id().process) {
-            if let Some(thread) = process.threads.get(next.id().thread) {
-                if thread.is_blocked {
-                    continue;
-                }
+            if let Some(process) = processes.get_process_mut(next.id().process) {
+                if let Some(thread) = process.threads.get(next.id().thread) {
+                    if thread.is_blocked {
+                        continue;
+                    }
 
-                thread.registers.task_sanity_check().expect("thread registers failed sanity check");
+                    thread.registers.task_sanity_check().expect("thread registers failed sanity check");
 
-                regs.transfer(&thread.registers);
+                    regs.transfer(&thread.registers);
 
-                // todo: loading of other registers (x87, MMX, SSE, etc.)
+                    // todo: loading of other registers (x87, MMX, SSE, etc.)
 
-                trace!("syncing");
-                process.page_directory.sync();
+                    trace!("syncing");
+                    process.page_directory.sync();
 
-                if let Some((id, _)) = last_id.as_ref() {
-                    // is the process different? (i.e. not the same thread)
-                    if id.process != next.id().process {
-                        // yes, switch the page directory
+                    if let Some((id, _)) = last_id.as_ref() {
+                        // is the process different? (i.e. not the same thread)
+                        if id.process != next.id().process {
+                            // yes, switch the page directory
+                            trace!("switching page directory");
+                            unsafe {
+                                process.page_directory.switch_to();
+                            }
+                        }
+                    } else {
+                        // switch the page directory no matter what since we weren't in a task before
                         trace!("switching page directory");
                         unsafe {
                             process.page_directory.switch_to();
                         }
                     }
+
+                    has_task = true;
+                    break;
                 } else {
-                    // switch the page directory no matter what since we weren't in a task before
-                    trace!("switching page directory");
-                    unsafe {
-                        process.page_directory.switch_to();
-                    }
+                    error!("couldn't get thread {:?} for saving in context switch", next.id());
                 }
-
-                has_task = true;
-                break;
             } else {
-                error!("couldn't get thread {:?} for saving in context switch", next.id());
+                error!("couldn't get process {:?} for loading in context switch", next.id().process);
             }
-        } else {
-            error!("couldn't get process {:?} for loading in context switch", next.id().process);
         }
-    }
 
-    if !has_task {
-        // this'll set the registers into a safe state so the cpu will return from the interrupt handler and just wait for an interrupt there,
-        // since for whatever reason just waiting here really messes things up
-        crate::arch::safely_halt_cpu(regs);
-    }
-
-    // put previous task back into queue if necessary
-    if mode == ContextSwitchMode::Normal {
-        trace!("re-inserting thread");
-
-        if let Some((id, priority)) = last_id {
-            queue.insert(TaskQueueEntry::new(id, priority));
+        if !has_task {
+            // this'll set the registers into a safe state so the cpu will return from the interrupt handler and just wait for an interrupt there,
+            // since for whatever reason just waiting here really messes things up
+            crate::arch::safely_halt_cpu(regs);
         }
+
+        // put previous task back into queue if necessary
+        if mode == ContextSwitchMode::Normal {
+            trace!("re-inserting thread");
+
+            if let Some((id, priority)) = last_id {
+                queue.insert(TaskQueueEntry::new(id, priority));
+            }
+        }
+    } else {
+        trace!("skipped context switch");
     }
 
     // requeue timer

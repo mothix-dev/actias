@@ -2,11 +2,14 @@
 
 use crate::{
     arch::{KERNEL_PAGE_DIR_SPLIT, STACK_SIZE},
-    mm::paging::{get_page_manager, get_page_dir, map_memory_from, PageDirectory},
+    mm::paging::{get_page_dir, get_page_manager, map_memory_from, PageDirectory},
 };
 use alloc::vec;
 use core::mem::size_of;
-use goblin::elf::{Elf, program_header::{PT_LOAD, PT_INTERP}};
+use goblin::elf::{
+    program_header::{PT_INTERP, PT_LOAD},
+    Elf,
+};
 use log::{debug, info};
 
 /*
@@ -128,13 +131,14 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                         if process_page_dir.get_page(addr).is_none() {
                             // make sure there's actually something here so we don't deadlock if we need to allocate something and the page manager is busy
                             process_page_dir.set_page(addr, None).unwrap();
-                        
+
                             get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true).unwrap();
                         }
                     }
 
                     // write data
                     unsafe {
+                        #[allow(clippy::needless_range_loop)]
                         let op = |s: &mut [u8]| {
                             if filesz > 0 {
                                 s.clone_from_slice(&data[file_start..file_end]);
@@ -163,12 +167,12 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                     if vaddr < lowest_addr {
                         lowest_addr = vaddr;
                     }
-                },
+                }
                 PT_INTERP => {
                     // TODO: use data given by this header to load interpreter for dynamic linking
                     info!("dynamic linking not supported");
                     return Err(ExecError::NotStatic);
-                },
+                }
                 _ => debug!("unknown program header {:?}", ph.p_type),
             }
         }
@@ -276,14 +280,12 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
         let stack_end = KERNEL_PAGE_DIR_SPLIT - 1;
 
         process.set_page_directory(process_page_dir);
-        process.threads = vec![
-            crate::task::Thread {
-                registers: crate::arch::Registers::new_task(entry_point, stack_end),
-                priority: 0,
-                cpu: None,
-                is_blocked: false,
-            }
-        ];
+        process.threads = vec![crate::task::Thread {
+            registers: crate::arch::Registers::new_task(entry_point, stack_end),
+            priority: 0,
+            cpu: None,
+            is_blocked: false,
+        }];
 
         Ok(())
     }

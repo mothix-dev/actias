@@ -9,7 +9,7 @@ use crate::{
     mm::{
         bump_alloc::{bump_alloc, init_bump_alloc},
         heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
-        paging::{get_page_manager, set_page_manager, get_page_dir, PageDirectory, PageManager},
+        paging::{get_page_dir, get_page_manager, set_page_manager, PageDirectory, PageManager},
     },
     util::{
         array::BitSet,
@@ -203,8 +203,7 @@ pub fn kmain() {
             debug!("old_top now @ {old_top:#x}");
 
             for addr in (old_top..new_top).step_by(PAGE_SIZE) {
-
-                if !get_page_dir().0.inner().has_page_table(addr.try_into().unwrap()) {
+                if !get_page_dir().lock().inner().has_page_table(addr.try_into().unwrap()) {
                     trace!("allocating new page table");
 
                     let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
@@ -214,7 +213,10 @@ pub fn kmain() {
                     let phys = get_page_dir().virt_to_phys(virt as usize).ok_or(())?;
 
                     unsafe {
-                        get_page_dir().0.inner_mut().add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                        get_page_dir()
+                            .lock()
+                            .inner_mut()
+                            .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
                     }
                 }
 

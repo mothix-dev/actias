@@ -1,6 +1,6 @@
 use super::PAGE_SIZE;
 use crate::{
-    mm::paging::{get_page_manager, get_page_dir, PageDirectory, PageFrame},
+    mm::paging::{get_page_dir, get_page_manager, PageDirectory, PageFrame},
     task::cpu::ThreadID,
 };
 use alloc::{
@@ -653,7 +653,7 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
 
     // specify page table physical address
     unsafe {
-        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_page_dir().0.inner().tables_physical_addr;
+        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_page_dir().lock().inner().tables_physical_addr;
     }
 
     let local_apic = get_local_apic().expect("local APIC not mapped");
@@ -773,7 +773,9 @@ pub fn calibrate_apic_timer_from(timer_num: usize) {
 
 pub fn init_bsp_apic() {
     // set spurious timer interrupt
-    get_local_apic().expect("local APIC not mapped").set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
+    get_local_apic()
+        .expect("local APIC not mapped")
+        .set_spurious_interrupt(SpuriousIntVectorBuilder::new().vector(0xf0).finish());
 
     // calibrate BSP's APIC timer
     calibrate_apic_timer_from(super::ints::pit_timer_num());
@@ -807,7 +809,13 @@ pub fn send_interrupt_to_cpu(id: ThreadID, int: usize) -> bool {
         if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
             if let Ok(int) = int.try_into() {
                 let local_apic = get_local_apic().expect("local APIC not mapped");
-                local_apic.write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::Fixed).vector_number(int).physical_destination(apic_id).finish());
+                local_apic.write_interrupt_command(
+                    InterruptCommandBuilder::new()
+                        .delivery_mode(DeliveryMode::Fixed)
+                        .vector_number(int)
+                        .physical_destination(apic_id)
+                        .finish(),
+                );
                 local_apic.check_error().unwrap();
                 return true;
             }

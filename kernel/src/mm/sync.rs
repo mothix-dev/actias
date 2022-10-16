@@ -1,10 +1,7 @@
 use super::paging::{PageDirectory, PageFrame, PagingError};
-use crate::{
-    arch::KERNEL_PAGE_DIR_SPLIT,
-    task::queue::PageUpdateEntry,
-};
-use spin::Mutex;
+use crate::{arch::KERNEL_PAGE_DIR_SPLIT, task::queue::PageUpdateEntry};
 use log::debug;
+use spin::{Mutex, MutexGuard};
 
 pub struct PageDirSync<'kernel, D: PageDirectory> {
     pub kernel: &'kernel Mutex<PageDirTracker<D>>,
@@ -113,11 +110,7 @@ impl<D: PageDirectory> PageDirectory for PageDirTracker<D> {
 
 impl<D: PageDirectory> PageDirTracker<D> {
     pub fn new(page_dir: D, is_kernel: bool) -> Self {
-        Self {
-            page_dir,
-            updates: 0,
-            is_kernel,
-        }
+        Self { page_dir, updates: 0, is_kernel }
     }
 
     /// returns the update counter for this tracker
@@ -131,9 +124,9 @@ impl<D: PageDirectory> PageDirTracker<D> {
     }
 
     /// returns a mutable reference to the underlying page directory
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// this is unsafe because care needs to be had to not set any pages this way since that would throw off the sync counter
     pub unsafe fn inner_mut(&mut self) -> &mut D {
         &mut self.page_dir
@@ -141,7 +134,7 @@ impl<D: PageDirectory> PageDirTracker<D> {
 }
 
 /// allows functions that require a PageDirectory to use a PageDirectory under a MutexGuard
-pub struct GuardedPageDir<'a, D: PageDirectory>(pub spin::MutexGuard<'a, D>);
+pub struct GuardedPageDir<'a, D: PageDirectory>(pub MutexGuard<'a, D>);
 
 impl<D: PageDirectory> PageDirectory for GuardedPageDir<'_, D> {
     const PAGE_SIZE: usize = D::PAGE_SIZE;
@@ -176,5 +169,49 @@ impl<D: PageDirectory> PageDirectory for GuardedPageDir<'_, D> {
 
     fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
         self.0.find_hole(start, end, size)
+    }
+}
+
+pub struct MutexedPageDir<'a, D: PageDirectory>(pub &'a Mutex<D>);
+
+impl<D: PageDirectory> PageDirectory for MutexedPageDir<'_, D> {
+    const PAGE_SIZE: usize = D::PAGE_SIZE;
+
+    fn get_page(&self, addr: usize) -> Option<PageFrame> {
+        self.lock().get_page(addr)
+    }
+
+    fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
+        self.lock().set_page(addr, page)
+    }
+
+    unsafe fn switch_to(&self) {
+        self.lock().switch_to()
+    }
+
+    fn is_unused(&self, addr: usize) -> bool {
+        self.lock().is_unused(addr)
+    }
+
+    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        self.lock().copy_from(dir, from, to, num)
+    }
+
+    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        self.lock().copy_on_write_from(dir, from, to, num)
+    }
+
+    fn virt_to_phys(&self, virt: usize) -> Option<u64> {
+        self.lock().virt_to_phys(virt)
+    }
+
+    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
+        self.lock().find_hole(start, end, size)
+    }
+}
+
+impl<'a, D: PageDirectory> MutexedPageDir<'a, D> {
+    pub fn lock(&self) -> MutexGuard<'a, D> {
+        self.0.lock()
     }
 }

@@ -21,6 +21,7 @@ raw-cpuid = "10.6"
 spin = "0.9"
 volatile = "0.4"
 goblin = { version = "0.5", default-features = false, features = [ "elf32", "elf64", "endian_fd" ] }
+num_enum = { version = "0.5", default-features = false }
 
 [build-dependencies]
 cc = "1.0"

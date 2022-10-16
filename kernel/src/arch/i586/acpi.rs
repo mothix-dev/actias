@@ -193,18 +193,17 @@ fn find_rsdp() -> Option<u64> {
     // map pages one at a time to avoid exhausting memory on low memory systems
     for page in (0x000e0000..0x00100000).step_by(PAGE_SIZE) {
         unsafe {
-            if let Some(addr) = 
-                map_memory(&mut get_page_dir(), &[page], |s| {
-                    // signature is always aligned to 16 bytes
-                    for i in (0..PAGE_SIZE).step_by(16) {
-                        if s[i..i + 8] == (b"RSD PTR ")[0..8] {
-                            return Some(page + i as u64);
-                        }
+            if let Some(addr) = map_memory(&mut get_page_dir(), &[page], |s| {
+                // signature is always aligned to 16 bytes
+                for i in (0..PAGE_SIZE).step_by(16) {
+                    if s[i..i + 8] == (b"RSD PTR ")[0..8] {
+                        return Some(page + i as u64);
                     }
+                }
 
-                    None
-                })
-                .unwrap()
+                None
+            })
+            .unwrap()
             {
                 return Some(addr);
             }

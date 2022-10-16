@@ -6,7 +6,7 @@ use super::halt;
     platform::debug::exit_failure,
 };
 use crate::tasks::{get_current_task, get_current_task_mut, remove_page_reference, IN_TASK};*/
-use crate::{util::debug::FormatHex, task::cancel_context_switch_timer};
+use crate::{task::cancel_context_switch_timer, util::debug::FormatHex};
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
 use core::{arch::asm, fmt};
@@ -241,7 +241,7 @@ pub enum TaskSanityError {
 impl fmt::Debug for TaskSanityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StackInKernel(addr) => write!(f, "task stack in kernel memory ({addr:#x})")
+            Self::StackInKernel(addr) => write!(f, "task stack in kernel memory ({addr:#x})"),
         }
     }
 }
@@ -331,7 +331,7 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
         if regs.error_code == 0 {
             error!("{name} in process {} @ {:#x}, no error code", task_id.unwrap(), regs.eip);
         } else {
-            error!("P{name} in process {} @ {:#x}, error code {:#x}", task_id.unwrap(), regs.eip, regs.error_code);
+            error!("{name} in process {} @ {:#x}, error code {:#x}", task_id.unwrap(), regs.eip, regs.error_code);
         }
 
         info!("{:#?}", regs);
@@ -514,7 +514,13 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
         // we're not in the kernel
         cancel_context_switch_timer(None);
 
-        error!("page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}", task_id.unwrap(), regs.eip, address, regs.error_code);
+        error!(
+            "page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}",
+            task_id.unwrap(),
+            regs.eip,
+            address,
+            regs.error_code
+        );
 
         info!("{:#?}", regs);
 
@@ -588,9 +594,17 @@ static mut PIT_TIMER_NUM: usize = 0;
 
 #[interrupt(x86)]
 unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().map(|cpus| cpus.get_thread(thread_id).unwrap());
+    let was_in_kernel = thread.map(|t| t.enter_kernel()).unwrap_or(true);
+
     // irq0 is always timer
     if let Some(timer) = crate::timer::get_timer(PIT_TIMER_NUM) {
         timer.try_tick(regs);
+    }
+
+    if !was_in_kernel {
+        thread.unwrap().leave_kernel();
     }
 
     outb(0x20, 0x20); // reset primary interrupt controller
@@ -599,8 +613,16 @@ unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
 // this is a terrible and inefficient way of doing things but i don't really care
 #[interrupt(x86)]
 unsafe fn irq1_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[1].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0x20, 0x20);
@@ -617,8 +639,16 @@ unsafe fn irq2_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq3_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[3].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0x20, 0x20);
@@ -626,8 +656,16 @@ unsafe fn irq3_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq4_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[4].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0x20, 0x20);
@@ -635,8 +673,16 @@ unsafe fn irq4_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq5_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[5].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0x20, 0x20);
@@ -644,8 +690,16 @@ unsafe fn irq5_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq6_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[6].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0x20, 0x20);
@@ -653,8 +707,16 @@ unsafe fn irq6_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq7_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[7].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0x20, 0x20);
@@ -662,8 +724,16 @@ unsafe fn irq7_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq8_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[8].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20); // reset secondary interrupt controller
@@ -672,8 +742,16 @@ unsafe fn irq8_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq9_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[9].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -682,8 +760,16 @@ unsafe fn irq9_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq10_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[10].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -692,8 +778,16 @@ unsafe fn irq10_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq11_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[11].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -702,8 +796,16 @@ unsafe fn irq11_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq12_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[12].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -712,8 +814,16 @@ unsafe fn irq12_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq13_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[13].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -722,8 +832,16 @@ unsafe fn irq13_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq14_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[14].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -732,8 +850,16 @@ unsafe fn irq14_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
+
     if let Some(h) = IRQ_HANDLERS[15].as_ref() {
         (h)(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     outb(0xa0, 0x20);
@@ -744,10 +870,18 @@ unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
 unsafe fn apic_timer_handler(regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
 
-    let timer = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap().timer;
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+
+    let was_in_kernel = thread.enter_kernel();
+
+    let timer = thread.timer;
 
     if let Some(timer) = crate::timer::get_timer(timer) {
         timer.try_tick(regs);
+    }
+
+    if !was_in_kernel {
+        thread.leave_kernel();
     }
 
     super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
@@ -762,14 +896,32 @@ unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+
+    let was_in_kernel = thread.enter_kernel();
+    
     crate::task::process_page_updates();
+
+    if !was_in_kernel {
+        thread.leave_kernel();
+    }
 
     super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
 }
 
 #[interrupt(x86)]
-unsafe fn syscall_handler(_regs: &mut InterruptRegisters) {
-    info!("syscall");
+unsafe fn syscall_handler(regs: &mut InterruptRegisters) {
+    let thread_id = super::get_thread_id();
+
+    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+
+    thread.check_enter_kernel();
+
+    regs.eax = crate::syscalls::syscall_handler(regs, regs.eax, regs.ebx, regs.ecx, regs.edx);
+
+    thread.leave_kernel();
 }
 
 /// how many entries do we want in our IDT

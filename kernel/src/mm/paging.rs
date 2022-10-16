@@ -1,10 +1,10 @@
 //! paging abstraction layer
 
+use super::sync::PageDirTracker;
 use crate::{
-    mm::sync::GuardedPageDir,
+    mm::sync::MutexedPageDir,
     util::{array::BitSet, debug::FormatHex},
 };
-use super::sync::PageDirTracker;
 use alloc::{
     alloc::{alloc, dealloc, Layout},
     vec::Vec,
@@ -348,17 +348,18 @@ where O: FnOnce(&mut [u8]) -> R {
         assert!(!existing_phys.contains(phys_addr), "trampling on other page directory's memory");
 
         // remap memory
-        map_into.set_page(
-            virt,
-            Some(PageFrame {
-                addr: *phys_addr,
-                present: true,
-                user_mode: false,
-                writable: true,
-                copy_on_write: false,
-            }),
-        )
-        .expect("couldn't remap page");
+        map_into
+            .set_page(
+                virt,
+                Some(PageFrame {
+                    addr: *phys_addr,
+                    present: true,
+                    user_mode: false,
+                    writable: true,
+                    copy_on_write: false,
+                }),
+            )
+            .expect("couldn't remap page");
     }
 
     debug!("slice @ {ptr:?}, len {buf_len:#x}");
@@ -371,17 +372,18 @@ where O: FnOnce(&mut [u8]) -> R {
     for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
         let phys_addr = existing_phys[idx];
         debug!("virt @ {addr:x}, phys @ {phys_addr:x}");
-        map_into.set_page(
-            addr,
-            Some(PageFrame {
-                addr: phys_addr,
-                present: true,
-                user_mode: false,
-                writable: true,
-                copy_on_write: false,
-            }),
-        )
-        .expect("couldn't remap page");
+        map_into
+            .set_page(
+                addr,
+                Some(PageFrame {
+                    addr: phys_addr,
+                    present: true,
+                    user_mode: false,
+                    writable: true,
+                    copy_on_write: false,
+                }),
+            )
+            .expect("couldn't remap page");
     }
 
     // deallocate the buffer
@@ -601,21 +603,9 @@ pub fn set_page_manager(manager: PageManager) {
 
 static mut KERNEL_PAGE_DIR: Option<Mutex<PageDirTracker<crate::arch::PageDirectory<'static>>>> = None;
 
-pub fn get_page_dir() -> GuardedPageDir<'static, PageDirTracker<crate::arch::PageDirectory<'static>>> {
+pub fn get_page_dir() -> MutexedPageDir<'static, PageDirTracker<crate::arch::PageDirectory<'static>>> {
     unsafe {
-        let dir = KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set");
-
-        if dir.is_locked() {
-            debug!("warning: kernel page directory is locked");
-        }
-
-        GuardedPageDir(dir.lock())
-    }
-}
-
-pub fn get_page_dir_mutex() -> &'static Mutex<PageDirTracker<crate::arch::PageDirectory<'static>>> {
-    unsafe {
-        KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set")
+        MutexedPageDir(KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set"))
     }
 }
 

@@ -4,17 +4,15 @@ pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use crate::{
-    task::{
-        cpu::{ThreadID, CPU},
-        set_cpus,
-    },
+use crate::task::{
+    cpu::{ThreadID, CPU},
+    set_cpus,
 };
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::arch::asm;
 use log::{debug, error, info, trace, warn};
 use raw_cpuid::{CpuId, CpuIdResult, TopologyType};
-use x86::{bits32::eflags::EFlags, segmentation::SegmentSelector, Ring, cpuid};
+use x86::{bits32::eflags::EFlags, cpuid, segmentation::SegmentSelector, Ring};
 
 // various useful constants
 pub const MEM_TOP: usize = 0xffffffff;
@@ -346,7 +344,7 @@ pub fn get_thread_id() -> ThreadID {
     unsafe { apic::get_local_apic().map(|apic| APIC_TO_CPU.apic_to_cpu(apic.id().into())).unwrap_or_default() }
 }
 
-pub use apic::{send_nmi_to_cpu, send_interrupt_to_cpu};
+pub use apic::{send_interrupt_to_cpu, send_nmi_to_cpu};
 
 /// refreshes the page at the provided address in the TLB
 pub fn refresh_page(addr: usize) {
@@ -489,7 +487,11 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
 
     let thread_id = cpus.find_thread_to_add_to().unwrap();
 
-    cpus.get_thread(thread_id).unwrap().task_queue.lock().insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
+    cpus.get_thread(thread_id)
+        .unwrap()
+        .task_queue
+        .lock()
+        .insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
 
     drop(process_list);
 
@@ -530,7 +532,7 @@ fn test_create_thread(entry_point: unsafe extern "C" fn()) {
     for addr in (KERNEL_PAGE_DIR_SPLIT - STACK_SIZE..KERNEL_PAGE_DIR_SPLIT).step_by(PAGE_SIZE) {
         // make sure there's actually something here so we don't deadlock if we need to allocate something and the page manager is busy
         page_dir.set_page(addr, None).unwrap();
-    
+
         get_page_manager().alloc_frame(&mut page_dir, addr, true, true).unwrap();
     }
 

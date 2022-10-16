@@ -1,12 +1,12 @@
-use super::queue::{TaskQueue, PageUpdateQueue};
+use super::queue::{PageUpdateQueue, TaskQueue};
 use crate::arch::ThreadInfo;
 use alloc::vec::Vec;
 use core::{
-    sync::atomic::{AtomicBool, Ordering},
     fmt,
+    sync::atomic::{AtomicBool, Ordering},
 };
-use spin::Mutex;
 use log::trace;
+use spin::Mutex;
 
 /// describes a CPU and its layout of cores and threads
 ///
@@ -67,10 +67,7 @@ impl CPU {
 
         for (core_id, core) in self.cores.iter().enumerate() {
             if let Some((thread_num, num_tasks)) = core.find_emptiest_thread() {
-                let id = ThreadID {
-                    core: core_id,
-                    thread: thread_num,
-                };
+                let id = ThreadID { core: core_id, thread: thread_num };
 
                 if num_tasks == 0 {
                     return Some(id);
@@ -129,7 +126,7 @@ impl CPUCore {
     }
 
     /// finds the thread in this core with the least tasks waiting in its queue
-    /// 
+    ///
     /// when successful, returns the ID of the thread and how many tasks it has
     pub fn find_emptiest_thread(&self) -> Option<(usize, usize)> {
         let mut thread_id = None;
