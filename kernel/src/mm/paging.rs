@@ -7,9 +7,11 @@ use crate::{
 };
 use alloc::{
     alloc::{alloc, dealloc, Layout},
+    collections::BTreeMap,
     vec::Vec,
 };
 use core::fmt;
+use lazy_static::lazy_static;
 use log::{debug, error, trace};
 use spin::{Mutex, MutexGuard};
 
@@ -604,9 +606,7 @@ pub fn set_page_manager(manager: PageManager) {
 static mut KERNEL_PAGE_DIR: Option<Mutex<PageDirTracker<crate::arch::PageDirectory<'static>>>> = None;
 
 pub fn get_page_dir() -> MutexedPageDir<'static, PageDirTracker<crate::arch::PageDirectory<'static>>> {
-    unsafe {
-        MutexedPageDir(KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set"))
-    }
+    unsafe { MutexedPageDir(KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set")) }
 }
 
 pub fn set_page_dir(dir: crate::arch::PageDirectory<'static>) {
@@ -615,6 +615,133 @@ pub fn set_page_dir(dir: crate::arch::PageDirectory<'static>) {
             panic!("can't set kernel page directory twice");
         } else {
             KERNEL_PAGE_DIR = Some(Mutex::new(PageDirTracker::new(dir, true)));
+        }
+    }
+}
+
+/// allows for easy reference counting of copy-on-write pages and memory mappings
+pub struct PageRefCounter {
+    references: BTreeMap<u64, PageReference>,
+}
+
+impl PageRefCounter {
+    pub fn new() -> Self {
+        Self { references: BTreeMap::default() }
+    }
+
+    pub fn add_reference(&mut self, phys: u64) {
+        if let Some(reference) = self.references.get_mut(&phys) {
+            reference.references += 1;
+        } else {
+            self.references.insert(phys, PageReference { references: 1, phys });
+        }
+    }
+
+    pub fn remove_reference(&mut self, phys: u64) {
+        let should_remove = if let Some(reference) = self.references.get_mut(&phys) {
+            reference.references -= 1;
+
+            reference.references == 0
+        } else {
+            false
+        };
+
+        if should_remove {
+            self.references.remove(&phys);
+            get_page_manager().set_frame_free(phys);
+        }
+    }
+}
+
+impl Default for PageRefCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// used to keep track of references to a copied page
+#[derive(Debug)]
+pub struct PageReference {
+    /// how many references to this page exist
+    pub references: usize,
+
+    /// physical address of the page this references
+    pub phys: u64,
+}
+
+lazy_static! {
+    pub static ref PAGE_REF_COUNTER: Mutex<PageRefCounter> = Mutex::new(PageRefCounter::new());
+}
+
+/// manages freeing pages allocated for process page directories
+#[repr(transparent)]
+pub struct FreeablePageDir<D: PageDirectory>(D);
+
+impl<D: PageDirectory> PageDirectory for FreeablePageDir<D> {
+    const PAGE_SIZE: usize = D::PAGE_SIZE;
+
+    fn get_page(&self, addr: usize) -> Option<PageFrame> {
+        self.0.get_page(addr)
+    }
+
+    fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
+        self.0.set_page(addr, page)
+    }
+
+    unsafe fn switch_to(&self) {
+        self.0.switch_to()
+    }
+
+    fn is_unused(&self, addr: usize) -> bool {
+        self.0.is_unused(addr)
+    }
+
+    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        self.0.copy_from(dir, from, to, num)
+    }
+
+    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        self.0.copy_on_write_from(dir, from, to, num)
+    }
+
+    fn virt_to_phys(&self, virt: usize) -> Option<u64> {
+        self.0.virt_to_phys(virt)
+    }
+
+    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
+        self.0.find_hole(start, end, size)
+    }
+}
+
+impl<D: PageDirectory> Drop for FreeablePageDir<D> {
+    fn drop(&mut self) {
+        free_page_dir(&mut self.0);
+    }
+}
+
+impl<D: PageDirectory> FreeablePageDir<D> {
+    pub fn new(dir: D) -> Self {
+        Self(dir)
+    }
+
+    pub fn into_inner(self) -> D {
+        unsafe {
+            // this effectively duplicates the value, however we forget self right after, so it should be fine?
+            let res = core::ptr::read(&self.0);
+            core::mem::forget(self);
+            res
+        }
+    }
+}
+
+pub fn free_page_dir<D: PageDirectory>(dir: &mut D) {
+    for addr in (0..crate::arch::KERNEL_PAGE_DIR_SPLIT).step_by(D::PAGE_SIZE) {
+        if let Some(page) = dir.get_page(addr) {
+            if page.copy_on_write {
+                super::paging::PAGE_REF_COUNTER.lock().remove_reference(page.addr);
+            } else {
+                get_page_manager().set_frame_free(page.addr);
+            }
         }
     }
 }

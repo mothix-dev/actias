@@ -2,9 +2,8 @@
 
 use crate::{
     arch::{KERNEL_PAGE_DIR_SPLIT, STACK_SIZE},
-    mm::paging::{get_page_dir, get_page_manager, map_memory_from, PageDirectory},
+    mm::paging::{get_page_dir, get_page_manager, map_memory_from, FreeablePageDir, PageDirectory},
 };
-use alloc::vec;
 use core::mem::size_of;
 use goblin::elf::{
     program_header::{PT_INTERP, PT_LOAD},
@@ -94,6 +93,7 @@ pub enum ExecError {
     WrongPtrSize,
     ValueOverflow,
     NotStatic,
+    AllocError,
     Other,
 }
 
@@ -104,7 +104,7 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
     if (elf.is_64 && size_of::<usize>() != 64 / 8) || (!elf.is_64 && size_of::<usize>() != 32 / 8) {
         Err(ExecError::WrongPtrSize)
     } else {
-        let mut process_page_dir = crate::arch::PageDirectory::new();
+        let mut process_page_dir = FreeablePageDir::new(crate::arch::PageDirectory::new());
 
         let mut lowest_addr = usize::MAX;
 
@@ -279,13 +279,14 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
         let stack_end = KERNEL_PAGE_DIR_SPLIT - 1;
 
-        process.set_page_directory(process_page_dir);
-        process.threads = vec![crate::task::Thread {
+        process.set_page_directory(process_page_dir.into_inner());
+        process.threads.clear();
+        process.threads.add(crate::task::Thread {
             registers: crate::arch::Registers::new_task(entry_point, stack_end),
             priority: 0,
             cpu: None,
             is_blocked: false,
-        }];
+        }).map_err(|_| ExecError::AllocError)?;
 
         Ok(())
     }

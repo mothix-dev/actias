@@ -8,7 +8,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-use log::{debug, info};
+use log::{debug, info, trace};
 use volatile::{
     access::{ReadOnly, ReadWrite, WriteOnly},
     Volatile, // fluid
@@ -159,7 +159,7 @@ impl LocalAPIC {
 
     /// writes an interrupt command to the interrupt command registers
     pub fn write_interrupt_command(&mut self, command: InterruptCommand) {
-        debug!("writing interrupt command {command:?}");
+        trace!("writing interrupt command {command:?}");
 
         let flags = super::get_flags();
         super::cli();
@@ -786,11 +786,10 @@ pub fn init_bsp_apic() {
 
 /// sends a non-maskable interrupt to the given CPU
 pub fn send_nmi_to_cpu(id: ThreadID) -> bool {
-    debug!("sending NMI to CPU {id}");
+    trace!("sending NMI to CPU {id}");
 
     if let Some(thread) = crate::task::get_cpus().and_then(|cpus| cpus.get_thread(id)) {
         if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {
-            debug!("APIC ID is {apic_id}");
             let local_apic = get_local_apic().expect("local APIC not mapped");
             local_apic.write_interrupt_command(InterruptCommandBuilder::new().delivery_mode(DeliveryMode::NMI).physical_destination(apic_id).finish());
             local_apic.check_error().unwrap();
@@ -803,7 +802,7 @@ pub fn send_nmi_to_cpu(id: ThreadID) -> bool {
 
 /// sends a normal interrupt to the given CPU
 pub fn send_interrupt_to_cpu(id: ThreadID, int: usize) -> bool {
-    debug!("sending interrupt {int} to CPU {id}");
+    trace!("sending interrupt {int} to CPU {id}");
 
     if let Some(thread) = crate::task::get_cpus().and_then(|cpus| cpus.get_thread(id)) {
         if let Some(apic_id) = thread.info.apic_id.and_then(|i| i.try_into().ok()) {

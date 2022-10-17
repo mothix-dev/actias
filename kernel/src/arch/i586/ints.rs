@@ -1,12 +1,10 @@
 //! i586 low level interrupt/exception handling
 
 use super::halt;
-/*use crate::{
-    arch::{tasks::exit_current_task, PAGE_SIZE},
-    platform::debug::exit_failure,
+use crate::{
+    task::{cancel_context_switch_timer, exit_current_thread, get_cpus, nmi_all_other_cpus},
+    util::debug::FormatHex,
 };
-use crate::tasks::{get_current_task, get_current_task_mut, remove_page_reference, IN_TASK};*/
-use crate::{task::cancel_context_switch_timer, util::debug::FormatHex};
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
 use core::{arch::asm, fmt};
@@ -22,19 +20,19 @@ use x86::{
 /// IDT flags
 #[bitmask(u8)]
 pub enum IDTFlags {
-    X16Interrupt = Self(0x06),
-    X16Trap = Self(0x07),
-    X32Task = Self(0x05),
-    X32Interrupt = Self(0x0e),
-    X32Trap = Self(0x0f),
+    Interrupt16 = Self(0x06),
+    Trap16 = Self(0x07),
+    Task32 = Self(0x05),
+    Interrupt32 = Self(0x0e),
+    Trap32 = Self(0x0f),
     Ring1 = Self(0x40),
     Ring2 = Self(0x20),
     Ring3 = Self(0x60),
     Present = Self(0x80),
 
-    Exception = Self(Self::X32Interrupt.0 | Self::Present.0),            // exception
-    Interrupt = Self(Self::X32Interrupt.0 | Self::Present.0),            // (usually) external interrupt
-    Call = Self(Self::X32Interrupt.0 | Self::Present.0 | Self::Ring3.0), // system call
+    Exception = Self(Self::Interrupt32.0 | Self::Present.0),            // exception
+    Interrupt = Self(Self::Interrupt32.0 | Self::Present.0),            // external/inter-processor interrupt
+    Call = Self(Self::Interrupt32.0 | Self::Present.0 | Self::Ring3.0), // system call
 }
 
 /// entry in IDT
@@ -308,7 +306,7 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
     super::cli();
 
     let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
+    let thread = get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
 
     let task_id = thread.task_queue.lock().current().map(|c| c.id());
 
@@ -322,11 +320,11 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
 
         info!("{:#?}", regs);
 
-        crate::task::nmi_all_other_cpus();
+        nmi_all_other_cpus();
         halt();
     } else {
         // we're not in the kernel
-        cancel_context_switch_timer(None);
+        cancel_context_switch_timer(Some(thread_id));
 
         if regs.error_code == 0 {
             error!("{name} in process {} @ {:#x}, no error code", task_id.unwrap(), regs.eip);
@@ -336,7 +334,7 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
 
         info!("{:#?}", regs);
 
-        crate::task::manual_context_switch(thread.timer, Some(thread_id), regs, crate::task::ContextSwitchMode::Remove);
+        exit_current_thread(thread_id, thread, regs);
     }
 
     super::set_flags(flags);
@@ -398,7 +396,8 @@ unsafe fn double_fault_handler(regs: &mut InterruptRegisters) {
 
     info!("{:#?}", regs);
 
-    crate::task::nmi_all_other_cpus();
+    nmi_all_other_cpus();
+    halt();
 }
 
 /// exception handler for invalid tss
@@ -496,7 +495,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
         }*/
 
     let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
+    let thread = get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
 
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
@@ -508,11 +507,11 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
 
         info!("{:#?}", regs);
 
-        crate::task::nmi_all_other_cpus();
+        nmi_all_other_cpus();
         halt();
     } else {
         // we're not in the kernel
-        cancel_context_switch_timer(None);
+        cancel_context_switch_timer(Some(thread_id));
 
         error!(
             "page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}",
@@ -524,7 +523,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
 
         info!("{:#?}", regs);
 
-        crate::task::manual_context_switch(thread.timer, Some(thread_id), regs, crate::task::ContextSwitchMode::Remove);
+        exit_current_thread(thread_id, thread, regs);
     }
 
     super::set_flags(flags);
@@ -534,20 +533,6 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
 #[interrupt(x86)]
 unsafe fn x87_fpu_exception_handler(regs: &mut InterruptRegisters) {
     generic_exception("x87 FPU exception", regs);
-}
-
-/// exception handler for alignment check
-#[interrupt(x86_error_code)]
-unsafe fn alignment_check_handler(regs: &mut InterruptRegisters) {
-    super::cli();
-
-    let thread_id = super::get_thread_id();
-
-    error!("PANIC (CPU {thread_id}): machine check @ {:#x}", regs.eip);
-
-    info!("{:#?}", regs);
-
-    crate::task::nmi_all_other_cpus();
 }
 
 /// exception handler for SIMD floating point exception
@@ -869,9 +854,7 @@ unsafe fn irq15_handler(regs: &mut InterruptRegisters) {
 #[interrupt(x86)]
 unsafe fn apic_timer_handler(regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
-
     let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
-
     let was_in_kernel = thread.enter_kernel();
 
     let timer = thread.timer;
@@ -897,11 +880,9 @@ unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
 #[interrupt(x86)]
 unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
-
     let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
-
     let was_in_kernel = thread.enter_kernel();
-    
+
     crate::task::process_page_updates();
 
     if !was_in_kernel {
@@ -912,16 +893,25 @@ unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
 }
 
 #[interrupt(x86)]
-unsafe fn syscall_handler(regs: &mut InterruptRegisters) {
+unsafe fn kill_process_handler(regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
-
     let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+    let was_in_kernel = thread.enter_kernel();
 
-    thread.check_enter_kernel();
+    thread.process_kill_queue(thread_id, regs);
 
-    regs.eax = crate::syscalls::syscall_handler(regs, regs.eax, regs.ebx, regs.ecx, regs.edx);
+    if !was_in_kernel {
+        thread.leave_kernel();
+    }
 
-    thread.leave_kernel();
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
+}
+
+#[interrupt(x86)]
+unsafe fn syscall_handler(regs: &mut InterruptRegisters) {
+    if let Some(ret) = crate::syscalls::syscall_handler(regs, regs.eax, regs.ebx, regs.ecx, regs.edx) {
+        regs.eax = ret;
+    }
 }
 
 /// how many entries do we want in our IDT
@@ -969,7 +959,6 @@ pub unsafe fn init() {
     IDT[Exceptions::GeneralProtectionFault as usize] = IDTEntry::new(general_protection_fault_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::PageFault as usize] = IDTEntry::new(page_fault_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::FloatingPoint as usize] = IDTEntry::new(x87_fpu_exception_handler as *const (), IDTFlags::Exception);
-    IDT[Exceptions::AlignmentCheck as usize] = IDTEntry::new(alignment_check_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::SIMDFloatingPoint as usize] = IDTEntry::new(simd_fpu_exception_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::Virtualization as usize] = IDTEntry::new(virtualization_exception_handler as *const (), IDTFlags::Exception);
     IDT[Exceptions::ControlProtection as usize] = IDTEntry::new(control_protection_handler as *const (), IDTFlags::Exception);
@@ -1003,6 +992,7 @@ pub unsafe fn init() {
 
     // page refresh interrupt
     IDT[super::PAGE_REFRESH_INT] = IDTEntry::new(page_refresh_handler as *const (), IDTFlags::Interrupt);
+    IDT[super::KILL_PROCESS_INT] = IDTEntry::new(kill_process_handler as *const (), IDTFlags::Interrupt);
 
     IDT[super::SYSCALL_INT] = IDTEntry::new(syscall_handler as *const (), IDTFlags::Call);
 

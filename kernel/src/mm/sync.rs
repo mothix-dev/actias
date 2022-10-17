@@ -40,6 +40,18 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<'_, D> {
     unsafe fn switch_to(&self) {
         self.task.switch_to()
     }
+
+    fn is_unused(&self, addr: usize) -> bool {
+        self.task.is_unused(addr)
+    }
+
+    fn virt_to_phys(&self, virt: usize) -> Option<u64> {
+        self.task.virt_to_phys(virt)
+    }
+
+    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
+        self.task.find_hole(start, end, size)
+    }
 }
 
 impl<D: PageDirectory> PageDirSync<'_, D> {
@@ -106,6 +118,18 @@ impl<D: PageDirectory> PageDirectory for PageDirTracker<D> {
     unsafe fn switch_to(&self) {
         self.page_dir.switch_to()
     }
+
+    fn is_unused(&self, addr: usize) -> bool {
+        self.page_dir.is_unused(addr)
+    }
+
+    fn virt_to_phys(&self, virt: usize) -> Option<u64> {
+        self.page_dir.virt_to_phys(virt)
+    }
+
+    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
+        self.page_dir.find_hole(start, end, size)
+    }
 }
 
 impl<D: PageDirectory> PageDirTracker<D> {
@@ -134,6 +158,7 @@ impl<D: PageDirectory> PageDirTracker<D> {
 }
 
 /// allows functions that require a PageDirectory to use a PageDirectory under a MutexGuard
+#[repr(transparent)]
 pub struct GuardedPageDir<'a, D: PageDirectory>(pub MutexGuard<'a, D>);
 
 impl<D: PageDirectory> PageDirectory for GuardedPageDir<'_, D> {
@@ -172,6 +197,7 @@ impl<D: PageDirectory> PageDirectory for GuardedPageDir<'_, D> {
     }
 }
 
+#[repr(transparent)]
 pub struct MutexedPageDir<'a, D: PageDirectory>(pub &'a Mutex<D>);
 
 impl<D: PageDirectory> PageDirectory for MutexedPageDir<'_, D> {

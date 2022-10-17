@@ -1,11 +1,13 @@
-use super::queue::{PageUpdateQueue, TaskQueue};
+use super::{queue::{PageUpdateQueue, TaskQueue}, ProcessID};
 use crate::arch::ThreadInfo;
-use alloc::vec::Vec;
+use alloc::{
+    collections::VecDeque,
+    vec::Vec,
+};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
 };
-use log::trace;
 use spin::Mutex;
 
 /// describes a CPU and its layout of cores and threads
@@ -144,10 +146,17 @@ impl CPUCore {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum KillQueueEntry {
+    Thread(ProcessID),
+    Process(usize),
+}
+
 #[derive(Debug)]
 pub struct CPUThread {
     pub task_queue: Mutex<TaskQueue>,
     pub page_update_queue: Mutex<PageUpdateQueue>,
+    pub kill_queue: Mutex<VecDeque<KillQueueEntry>>,
     pub timer: usize,
     pub info: ThreadInfo,
     in_kernel: AtomicBool,
@@ -159,6 +168,7 @@ impl CPUThread {
         Self {
             task_queue: Mutex::new(TaskQueue::new()),
             page_update_queue: Mutex::new(PageUpdateQueue::new()),
+            kill_queue: Mutex::new(VecDeque::new()),
             timer,
             info,
             in_kernel: AtomicBool::new(true),
@@ -170,6 +180,27 @@ impl CPUThread {
         self.page_update_queue.lock().process(self.task_queue.lock().current().map(|c| c.id()));
     }
 
+    pub fn process_kill_queue(&self, cpu: ThreadID, regs: &mut crate::arch::Registers) {
+        let mut queue = self.kill_queue.lock();
+
+        while let Some(entry) = queue.pop_front() {
+            match entry {
+                KillQueueEntry::Thread(id) => {
+                    self.task_queue.lock().remove_thread(id);
+                    if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id == id {
+                        super::manual_context_switch(self.timer, Some(cpu), regs, super::ContextSwitchMode::Remove);
+                    }
+                },
+                KillQueueEntry::Process(id) => {
+                    self.task_queue.lock().remove_process(id);
+                    if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id.process == id {
+                        super::manual_context_switch(self.timer, Some(cpu), regs, super::ContextSwitchMode::Remove);
+                    }
+                },
+            }
+        }
+    }
+
     pub fn check_enter_kernel(&self) {
         if self.enter_kernel() {
             panic!("already in kernel");
@@ -177,12 +208,12 @@ impl CPUThread {
     }
 
     pub fn enter_kernel(&self) -> bool {
-        trace!("entering kernel");
+        //trace!("entering kernel");
         self.in_kernel.swap(true, Ordering::Acquire)
     }
 
     pub fn leave_kernel(&self) {
-        trace!("leaving kernel");
+        //trace!("leaving kernel");
         self.in_kernel.store(false, Ordering::Release);
     }
 

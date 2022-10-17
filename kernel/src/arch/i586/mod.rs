@@ -355,6 +355,7 @@ pub fn refresh_page(addr: usize) {
 }
 
 pub const PAGE_REFRESH_INT: usize = 0x31;
+pub const KILL_PROCESS_INT: usize = 0x32;
 pub const SYSCALL_INT: usize = 0x80;
 
 pub fn safely_halt_cpu(regs: &mut Registers) {
@@ -478,10 +479,8 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
     let init_name = args.as_ref().and_then(|a| a.get("init").cloned()).unwrap_or(DEFAULT_INIT);
     let init_data = modules.get(init_name).unwrap_or_else(|| modules.get(DEFAULT_INIT).expect("couldn't find init in modules"));
 
-    let mut process_list = crate::task::get_process_list();
-
-    let process = process_list.create_process(paging::PageDir::new()).unwrap();
-    crate::task::exec::exec_as::<paging::PageDir>(None, process_list.get_process_mut(process).unwrap(), init_data).expect("failed to exec init");
+    let process = crate::task::create_process(paging::PageDir::new()).unwrap();
+    crate::task::exec::exec_as::<paging::PageDir>(None, &mut crate::task::get_process(process).unwrap(), init_data).expect("failed to exec init");
 
     let cpus = crate::task::get_cpus().expect("CPUs not initialized");
 
@@ -492,8 +491,6 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
         .task_queue
         .lock()
         .insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
-
-    drop(process_list);
 
     start_context_switching();
 }

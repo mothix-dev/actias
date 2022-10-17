@@ -1,6 +1,5 @@
 //! simple ustar parser
 
-//use common::types::{file::Permissions, GroupID, UserID};
 use core::{ffi::CStr, fmt, mem::size_of, str};
 use generic_array::{
     typenum::{U12, U8},

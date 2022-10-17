@@ -1,4 +1,7 @@
-use alloc::collections::VecDeque;
+use alloc::{
+    collections::VecDeque,
+    vec::Vec,
+};
 use log::trace;
 
 /// a per-CPU task queue
@@ -50,6 +53,22 @@ impl TaskQueue {
     /// gets the current task being processed in the queue
     pub fn current(&self) -> Option<&TaskQueueEntry> {
         self.current.as_ref()
+    }
+
+    /// given a fully qualified process id, remove the thread corresponding to it from the queue
+    pub fn remove_thread(&mut self, id: super::ProcessID) {
+        if let Some(index) = self.queue.iter().position(|e| e.id() == id) {
+            self.queue.remove(index);
+        }
+    }
+
+    /// given a process id, remove all threads corresponding to it from the queue
+    pub fn remove_process(&mut self, id: usize) {
+        let to_remove = self.queue.iter().enumerate().filter(|(_, e)| e.id().process == id).map(|(i, _)| i).collect::<Vec<usize>>();
+
+        for index in to_remove.iter() {
+            self.queue.remove(*index);
+        }
     }
 }
 

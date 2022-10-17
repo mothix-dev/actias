@@ -4,4 +4,6 @@ use num_enum::TryFromPrimitive;
 #[repr(u32)]
 pub enum Syscalls {
     IsComputerOn,
+    ExitProcess,
+    ExitThread,
 }

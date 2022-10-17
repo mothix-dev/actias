@@ -304,3 +304,68 @@ impl VecBitSet {
         self.array.len() * 32
     }
 }
+
+pub struct ConsistentIndexArray<T> {
+    array: Vec<Option<T>>,
+    bit_set: VecBitSet,
+}
+
+impl<T> ConsistentIndexArray<T> {
+    pub const fn new() -> Self {
+        Self {
+            array: Vec::new(),
+            bit_set: VecBitSet::new(),
+        }
+    }
+
+    pub fn add(&mut self, item: T) -> Result<usize, alloc::collections::TryReserveError> {
+        let index = self.bit_set.first_unset();
+        
+        if index >= self.array.len() {
+            self.array.try_reserve(self.array.len() - index + 1)?;
+
+            while index >= self.array.len() {
+                self.array.push(None);
+            }
+        }
+
+        self.array[index] = Some(item);
+        self.bit_set.set(index);
+
+        Ok(index)
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.array.get(index).and_then(|i| i.as_ref())
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.array.get_mut(index).and_then(|i| i.as_mut())
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        if index < self.array.len() {
+            self.array[index] = None;
+            self.bit_set.clear(index);
+        }
+
+        while !self.array.is_empty() && self.array[self.array.len() - 1].is_none() {
+            self.array.pop();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.bit_set.clear_all();
+        self.array.clear();
+    }
+    
+    pub fn num_entries(&self) -> usize {
+        self.bit_set.bits_used
+    }
+}
+
+impl<T> Default for ConsistentIndexArray<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

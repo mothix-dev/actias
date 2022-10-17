@@ -1,12 +1,11 @@
 //! x86 non-PAE paging
 
-use super::PAGE_SIZE;
+use super::{PAGE_SIZE, KERNEL_PAGE_DIR_SPLIT};
 use crate::{
     mm::{
         bump_alloc::bump_alloc,
         paging::{PageDirectory, PageFrame, PagingError},
     },
-    platform::LINKED_BASE,
     util::debug::FormatHex,
 };
 use alloc::alloc::{alloc, alloc_zeroed, dealloc, Layout};
@@ -600,7 +599,7 @@ impl<'a> PageDirectory for PageDir<'a> {
             }
 
             // make sure this newly allocated page table is located in kernel memory so its reference will be valid as long as our current page directory has an up to date copy of the kernel's page directory
-            assert!(ptr as usize >= LINKED_BASE, "new page table isn't in kernel memory");
+            assert!(ptr as usize >= KERNEL_PAGE_DIR_SPLIT, "new page table isn't in kernel memory");
 
             // get the physical address of our new page table
             let phys = unsafe {
@@ -645,7 +644,7 @@ impl<'a> PageDirectory for PageDir<'a> {
 
     unsafe fn switch_to(&self) {
         // check if the reference to this page directory is in kernel memory, and will be valid across *up to date* page directories
-        assert!(self as *const _ as usize >= LINKED_BASE, "current page directory reference isn't in kernel memory");
+        assert!(self as *const _ as usize >= KERNEL_PAGE_DIR_SPLIT, "current page directory reference isn't in kernel memory");
 
         trace!("switching to page table @ {:#x}", self.tables_physical_addr);
 
@@ -674,7 +673,7 @@ impl<'a> Drop for PageDir<'a> {
     fn drop(&mut self) {
         // sanity check, makes sure we're not freeing the current page directory
         if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
-            assert!(self as *const _ as usize != current as *const _ as usize, "attempted to free current page directory");
+            assert!(self.tables_physical_addr != current.tables_physical_addr, "attempted to free current page directory");
         }
 
         // free any allocated page tables
