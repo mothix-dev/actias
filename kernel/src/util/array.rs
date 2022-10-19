@@ -320,7 +320,7 @@ impl<T> ConsistentIndexArray<T> {
 
     pub fn add(&mut self, item: T) -> Result<usize, alloc::collections::TryReserveError> {
         let index = self.bit_set.first_unset();
-        
+
         if index >= self.array.len() {
             self.array.try_reserve(self.array.len() - index + 1)?;
 
@@ -358,7 +358,7 @@ impl<T> ConsistentIndexArray<T> {
         self.bit_set.clear_all();
         self.array.clear();
     }
-    
+
     pub fn num_entries(&self) -> usize {
         self.bit_set.bits_used
     }

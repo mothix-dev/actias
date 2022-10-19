@@ -20,7 +20,6 @@ pub mod arch;
 pub mod platform;
 
 pub mod mm;
-pub mod syscalls;
 pub mod task;
 pub mod timer;
 pub mod util;

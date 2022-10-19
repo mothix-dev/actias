@@ -2,11 +2,15 @@
 
 use super::halt;
 use crate::{
-    task::{cancel_context_switch_timer, exit_current_thread, get_cpus, nmi_all_other_cpus},
+    task::{
+        get_cpus, nmi_all_other_cpus,
+        switch::{cancel_context_switch_timer, exit_current_thread},
+    },
     util::debug::FormatHex,
 };
 use aligned::{Aligned, A16};
 use bitmask_enum::bitmask;
+use common::types::{Errno, Result};
 use core::{arch::asm, fmt};
 use interrupt_macro::*;
 use log::{debug, error, info};
@@ -261,12 +265,12 @@ impl InterruptRegisters {
             eax: 0,
             error_code: 0, // lol, lmao
             eip: entry_point as u32,
-            eflags: super::get_flags().0,
+            eflags: 0b1000000010,
             useresp: stack_end as u32,
         }
     }
 
-    pub fn task_sanity_check(&self) -> Result<(), TaskSanityError> {
+    pub fn task_sanity_check(&self) -> core::result::Result<(), TaskSanityError> {
         if self.useresp > super::KERNEL_PAGE_DIR_SPLIT as u32 {
             return Err(TaskSanityError::StackInKernel(self.useresp));
         }
@@ -276,6 +280,19 @@ impl InterruptRegisters {
 
     pub fn transfer(&mut self, other: &Self) {
         *self = *other;
+    }
+
+    pub fn syscall_return(&mut self, result: Result<u32>) {
+        match result {
+            Ok(num) => {
+                self.eax = num;
+                self.ebx = 0;
+            }
+            Err(num) => {
+                self.eax = 0;
+                self.ebx = num as u32;
+            }
+        }
     }
 }
 
@@ -308,9 +325,11 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
     let thread = get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
 
+    let in_kernel = thread.enter_kernel();
+
     let task_id = thread.task_queue.lock().current().map(|c| c.id());
 
-    if thread.enter_kernel() || task_id.is_none() {
+    if in_kernel || task_id.is_none() {
         // we're in the kernel already, shit's bad
         if regs.error_code == 0 {
             error!("PANIC (CPU {thread_id}): {name} @ {:#x}, no error code", regs.eip);
@@ -324,8 +343,6 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
         halt();
     } else {
         // we're not in the kernel
-        cancel_context_switch_timer(Some(thread_id));
-
         if regs.error_code == 0 {
             error!("{name} in process {} @ {:#x}, no error code", task_id.unwrap(), regs.eip);
         } else {
@@ -337,6 +354,7 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
         exit_current_thread(thread_id, thread, regs);
     }
 
+    thread.leave_kernel();
     super::set_flags(flags);
 }
 
@@ -430,86 +448,24 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
     let flags = super::get_flags();
     super::cli();
 
-    /*let mut address: u32;
-    asm!("mov {0}, cr2", out(reg) address);*/
-
-    /*// no longer in task, indicate as such
-    let was_in_task = IN_TASK;
-    IN_TASK = false;
-
-    // switch to kernel's page directory if initialized
-    if let Some(dir) = PAGE_DIR.as_mut() {
-        dir.switch_to();
-    }
-
-    // rust moment
-    if !was_in_task ||
-        // is there a current task?
-        if let Some(current) = get_current_task_mut() {
-            // get reference to kernel's page directory
-            let dir = PAGE_DIR.as_mut().unwrap();
-
-            // get current task's page entry for given address
-            if let Some(page) = current.state.pages.get_page(address, false) {
-                let page = &mut *page;
-
-                // get flags
-                let flags: PageTableFlags = page.get_flags().into();
-
-                // is read/write flag unset and copy on write flag set?
-                if flags & PageTableFlags::ReadWrite == 0 && flags & PageTableFlags::CopyOnWrite != 0 {
-                    // this is a terrible copy on write implementation but at least it works
-
-                    trace!("copy on write, accessed @ {:#x}", address);
-
-                    let old_addr = page.get_address();
-                    let page_addr = address as u64 & !(PAGE_SIZE as u64 - 1);
-                    let page_mem = current.state.read_mem(page_addr, PAGE_SIZE, true).unwrap();
-
-                    page.set_unused();
-
-                    match dir.alloc_frame(page, false, true) {
-                        Ok(_) => {
-                            current.state.write_mem(page_addr, &page_mem, true).unwrap();
-
-                            remove_page_reference(old_addr as u64);
-
-                            current.state.pages.switch_to();
-
-                            false
-                        },
-                        Err(msg) => {
-                            error!("couldn't allocate frame for copy on write: {}", msg);
-
-                            true // panic
-                        }
-                    }
-                } else {
-                    true // panic
-                }
-            } else {
-                true // panic
-            }
-        } else {
-            true // panic
-        }*/
-
     let thread_id = super::get_thread_id();
     let thread = get_cpus().expect("CPUs not initialized").get_thread(thread_id).expect("couldn't get CPU thread object");
+
+    let in_kernel = thread.enter_kernel();
 
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
     let task_id = thread.task_queue.lock().current().map(|c| c.id());
 
-    if thread.enter_kernel() || task_id.is_none() {
+    if in_kernel || task_id.is_none() {
         error!("PANIC (CPU {thread_id}): page fault @ {:#x} (accessed {:#x}), error code {:#x}", regs.eip, address, regs.error_code);
 
         info!("{:#?}", regs);
 
         nmi_all_other_cpus();
         halt();
-    } else {
+    } else if regs.error_code & 0x7 != 0x7 || crate::mm::paging::try_copy_on_write(thread_id, thread, address as usize).is_err() {
         // we're not in the kernel
         cancel_context_switch_timer(Some(thread_id));
 
@@ -526,6 +482,7 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
         exit_current_thread(thread_id, thread, regs);
     }
 
+    thread.leave_kernel();
     super::set_flags(flags);
 }
 
@@ -909,9 +866,7 @@ unsafe fn kill_process_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn syscall_handler(regs: &mut InterruptRegisters) {
-    if let Some(ret) = crate::syscalls::syscall_handler(regs, regs.eax, regs.ebx, regs.ecx, regs.edx) {
-        regs.eax = ret;
-    }
+    crate::task::syscalls::syscall_handler(regs, regs.eax, regs.ebx, regs.ecx, regs.edx);
 }
 
 /// how many entries do we want in our IDT
@@ -1054,17 +1009,14 @@ pub unsafe fn init_irqs() {
     init_pit(10000);
 }
 
-#[derive(Debug)]
-pub struct InterruptRegisterError;
-
-pub fn register_irq(num: usize, handler: InterruptHandler) -> Result<(), InterruptRegisterError> {
+pub fn register_irq(num: usize, handler: InterruptHandler) -> Result<()> {
     unsafe {
         // irq 0 is always the timer, which is handled separately
         if num != 0 && IRQ_HANDLERS[num].is_none() {
             IRQ_HANDLERS[num] = Some(handler);
             Ok(())
         } else {
-            Err(InterruptRegisterError)
+            Err(Errno::InvalidArgument)
         }
     }
 }

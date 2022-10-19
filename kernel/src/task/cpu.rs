@@ -1,9 +1,9 @@
-use super::{queue::{PageUpdateQueue, TaskQueue}, ProcessID};
-use crate::arch::ThreadInfo;
-use alloc::{
-    collections::VecDeque,
-    vec::Vec,
+use super::{
+    queue::{PageUpdateQueue, TaskQueue},
+    ProcessID,
 };
+use crate::arch::ThreadInfo;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -149,7 +149,7 @@ impl CPUCore {
 #[derive(Copy, Clone, Debug)]
 pub enum KillQueueEntry {
     Thread(ProcessID),
-    Process(usize),
+    Process(u32),
 }
 
 #[derive(Debug)]
@@ -188,15 +188,15 @@ impl CPUThread {
                 KillQueueEntry::Thread(id) => {
                     self.task_queue.lock().remove_thread(id);
                     if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id == id {
-                        super::manual_context_switch(self.timer, Some(cpu), regs, super::ContextSwitchMode::Remove);
+                        super::switch::manual_context_switch(self.timer, Some(cpu), regs, super::switch::ContextSwitchMode::Remove);
                     }
-                },
+                }
                 KillQueueEntry::Process(id) => {
                     self.task_queue.lock().remove_process(id);
                     if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id.process == id {
-                        super::manual_context_switch(self.timer, Some(cpu), regs, super::ContextSwitchMode::Remove);
+                        super::switch::manual_context_switch(self.timer, Some(cpu), regs, super::switch::ContextSwitchMode::Remove);
                     }
-                },
+                }
             }
         }
     }

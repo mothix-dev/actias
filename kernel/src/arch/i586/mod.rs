@@ -4,12 +4,19 @@ pub mod gdt;
 pub mod ints;
 pub mod paging;
 
-use crate::task::{
-    cpu::{ThreadID, CPU},
-    set_cpus,
+use crate::{
+    arch::paging::{is_page_dir_current, PageTable},
+    mm::{
+        heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
+        paging::{get_kernel_page_dir, get_page_manager},
+    },
+    task::{
+        cpu::{ThreadID, CPU},
+        get_process, set_cpus,
+    },
 };
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
-use core::arch::asm;
+use core::{alloc::Layout, arch::asm, mem::size_of};
 use log::{debug, error, info, trace, warn};
 use raw_cpuid::{CpuId, CpuIdResult, TopologyType};
 use x86::{bits32::eflags::EFlags, cpuid, segmentation::SegmentSelector, Ring};
@@ -21,6 +28,8 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub const INV_PAGE_SIZE: usize = !(PAGE_SIZE - 1);
 
 pub const MAX_STACK_FRAMES: usize = 1024;
+
+pub const HEAP_RESERVED: usize = PAGE_SIZE * 4;
 
 // reasonable stack size
 pub const STACK_SIZE: usize = 0x1000 * 4;
@@ -274,8 +283,11 @@ pub fn halt_until_interrupt() {
 /// busy waits for a cycle
 #[inline(always)]
 pub fn spin() {
-    unsafe {
-        asm!("pause");
+    // waste cycles here so it's easier to acquire locks
+    for _i in 0..16 {
+        unsafe {
+            asm!("pause");
+        }
     }
 }
 
@@ -397,6 +409,133 @@ fn init_single_core(timer: usize) {
 
     // set global cpu topology, queues, etc
     set_cpus(cpus);
+}
+
+pub fn init_alloc() {
+    use crate::mm::paging::PageDirectory;
+
+    ALLOCATOR.reserve_memory(Some(Layout::from_size_align(HEAP_RESERVED, PAGE_SIZE).unwrap()));
+
+    fn expand(old_top: usize, new_top: usize, alloc: &ExpandAllocCallback, _free: &ExpandFreeCallback) -> Result<usize, ()> {
+        debug!("expand (old_top: {old_top:#x}, new_top: {new_top:#x})");
+        if new_top <= crate::platform::HEAP_START + crate::platform::KHEAP_MAX_SIZE {
+            let new_top = (new_top / PAGE_SIZE) * PAGE_SIZE + PAGE_SIZE;
+            let old_top = (old_top / PAGE_SIZE) * PAGE_SIZE;
+            debug!("new_top aligned to {new_top:#x}, old_top aligned to {old_top:#x}");
+
+            let expand_inner_kernel = || {
+                debug!("expanding in kernel memory");
+
+                for addr in (old_top..new_top).step_by(PAGE_SIZE) {
+                    let mut page_dir = get_kernel_page_dir();
+
+                    if !page_dir.lock().inner().has_page_table(addr.try_into().unwrap()) {
+                        trace!("allocating new page table");
+
+                        let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
+                            Ok(ptr) => ptr,
+                            Err(()) => return Ok(addr), // fail gracefully if we can't allocate
+                        };
+                        let phys = page_dir.lock().inner().virt_to_phys(virt as usize).ok_or(())?;
+
+                        unsafe {
+                            page_dir
+                                .lock()
+                                .inner_mut()
+                                .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                        }
+                    }
+
+                    get_page_manager().alloc_frame(&mut page_dir, addr, false, true).map_err(|err| {
+                        error!("error allocating page for heap: {err:?}");
+                    })?;
+                }
+
+                Ok(new_top)
+            };
+
+            let expand_inner_task = |current: &crate::task::queue::TaskQueueEntry| {
+                debug!("expanding in both task and kernel memory");
+
+                for addr in (old_top..new_top).step_by(PAGE_SIZE) {
+                    // allocate page directory for kernel
+                    trace!("getting kernel page directory");
+                    let page_dir = get_kernel_page_dir();
+
+                    if !page_dir.lock().inner().has_page_table(addr.try_into().unwrap()) {
+                        trace!("allocating new page table (kernel)");
+
+                        let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
+                            Ok(ptr) => ptr,
+                            Err(()) => return Ok(addr), // fail gracefully if we can't allocate
+                        };
+                        let phys = page_dir.lock().inner().virt_to_phys(virt as usize).ok_or(())?;
+
+                        unsafe {
+                            page_dir
+                                .lock()
+                                .inner_mut()
+                                .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                        }
+                    }
+
+                    // allocate page directory for task
+                    trace!("getting task page directory");
+                    let mut process = get_process(current.id().process).unwrap();
+
+                    if !process.page_directory.task.has_page_table(addr.try_into().unwrap()) {
+                        trace!("allocating new page table (task)");
+
+                        let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
+                            Ok(ptr) => ptr,
+                            Err(()) => return Ok(addr), // fail gracefully if we can't allocate
+                        };
+                        let phys = process.page_directory.task.virt_to_phys(virt as usize).ok_or(())?;
+
+                        unsafe {
+                            process
+                                .page_directory
+                                .task
+                                .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                        }
+                    }
+
+                    drop(process);
+
+                    trace!("allocating page");
+                    get_page_manager()
+                        .alloc_frame(&mut crate::mm::paging::ProcessOrKernelPageDir::Process(current.id().process), addr, false, true)
+                        .map_err(|err| {
+                            error!("error allocating page for heap: {err:?}");
+                        })?;
+                }
+
+                Ok(new_top)
+            };
+
+            if is_page_dir_current(get_kernel_page_dir().lock().inner()) {
+                trace!("kernel page dir is current");
+                expand_inner_kernel()
+            } else {
+                trace!("kernel page dir is NOT current");
+                if let Some(cpus) = crate::task::get_cpus() {
+                    let thread = cpus.get_thread(crate::arch::get_thread_id()).expect("couldn't get CPU thread");
+
+                    if let Some(current) = thread.task_queue.lock().current() {
+                        expand_inner_task(current)
+                    } else {
+                        expand_inner_kernel()
+                    }
+                } else {
+                    expand_inner_kernel()
+                }
+            }
+        } else {
+            Err(())
+        }
+    }
+
+    ALLOCATOR.set_expand_callback(&expand);
 }
 
 pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'static [u8]>) {
@@ -577,5 +716,5 @@ fn start_context_switching() {
 
     info!("CPU {thread_id} starting context switching");
 
-    crate::task::wait_for_context_switch(thread.timer, thread_id);
+    crate::task::switch::wait_for_context_switch(thread.timer, thread_id);
 }

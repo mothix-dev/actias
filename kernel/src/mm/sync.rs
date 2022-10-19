@@ -6,7 +6,7 @@ use spin::{Mutex, MutexGuard};
 pub struct PageDirSync<'kernel, D: PageDirectory> {
     pub kernel: &'kernel Mutex<PageDirTracker<D>>,
     pub task: D,
-    pub process_id: usize,
+    pub process_id: u32,
     pub kernel_space_updates: usize,
 }
 
@@ -237,7 +237,12 @@ impl<D: PageDirectory> PageDirectory for MutexedPageDir<'_, D> {
 }
 
 impl<'a, D: PageDirectory> MutexedPageDir<'a, D> {
-    pub fn lock(&self) -> MutexGuard<'a, D> {
-        self.0.lock()
+    pub fn lock(&self) -> MutexGuard<'_, D> {
+        if let Some(guard) = self.0.try_lock() {
+            guard
+        } else {
+            debug!("page directory is locked, spinning");
+            self.0.lock()
+        }
     }
 }

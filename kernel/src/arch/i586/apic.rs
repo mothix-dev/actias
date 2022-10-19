@@ -1,6 +1,6 @@
 use super::PAGE_SIZE;
 use crate::{
-    mm::paging::{get_page_dir, get_page_manager, PageDirectory, PageFrame},
+    mm::paging::{get_kernel_page_dir, get_page_dir, get_page_manager, PageDirectory, PageFrame},
     task::cpu::ThreadID,
 };
 use alloc::{
@@ -587,9 +587,9 @@ pub fn map_local_apic(addr: u64) {
 
     assert!(!buf.is_null(), "failed to allocate memory for mapping local APIC");
 
-    get_page_manager().free_frame(&mut get_page_dir(), buf as usize).expect("couldn't free page");
+    get_page_manager().free_frame(&mut get_page_dir(None), buf as usize).expect("couldn't free page");
 
-    get_page_dir()
+    get_page_dir(None)
         .set_page(
             buf as usize,
             Some(PageFrame {
@@ -629,7 +629,7 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
     let bootstrap_addr = crate::platform::get_cpu_bootstrap_addr();
 
     // map bootstrap area into memory temporarily
-    get_page_dir()
+    get_page_dir(None)
         .set_page(
             bootstrap_addr.try_into().unwrap(),
             Some(crate::mm::paging::PageFrame {
@@ -653,7 +653,7 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
 
     // specify page table physical address
     unsafe {
-        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_page_dir().lock().inner().tables_physical_addr;
+        *(&mut bootstrap_area[bootstrap_area.len() - 12] as *mut u8 as *mut u32) = get_kernel_page_dir().lock().inner().tables_physical_addr;
     }
 
     let local_apic = get_local_apic().expect("local APIC not mapped");
@@ -667,7 +667,7 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
             let stack = unsafe { alloc(stack_layout) };
 
             // free bottom page of stack to prevent the stack from corrupting other memory without anyone knowing
-            get_page_manager().free_frame(&mut get_page_dir(), stack as usize).unwrap();
+            get_page_manager().free_frame(&mut get_page_dir(None), stack as usize).unwrap();
 
             let stack_end = stack as usize + stack_layout.size() - 1;
 
@@ -681,14 +681,14 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
     }
 
     // unmap the bootstrap area from memory
-    get_page_dir().set_page(bootstrap_addr.try_into().unwrap(), None).unwrap();
+    get_page_dir(None).set_page(bootstrap_addr.try_into().unwrap(), None).unwrap();
 }
 
 unsafe extern "C" fn cpu_entry_point() {
     super::ints::load();
 
     // make sure we're on the latest page directory
-    get_page_dir().switch_to();
+    get_page_dir(None).switch_to();
 
     super::gdt::init_other_cpu(super::STACK_SIZE);
 
@@ -700,15 +700,16 @@ unsafe extern "C" fn cpu_entry_point() {
     local_apic.check_error().unwrap();
 
     let cpus = crate::task::get_cpus().expect("CPUs not initialized");
+    let thread_id = super::get_thread_id();
 
-    info!("CPU {} is alive!", super::get_thread_id());
+    info!("CPU {thread_id} is alive!");
 
     super::sti(); // i spent HOURS debugging to find that i forgot this
 
     // signal that this CPU has started
-    cpus.get_thread(super::get_thread_id()).unwrap().start();
+    cpus.get_thread(thread_id).unwrap().start();
 
-    get_page_dir().switch_to();
+    get_page_dir(Some(thread_id)).switch_to();
 
     // FIXME: should probably store BSP's ID somewhere
     calibrate_apic_timer_from(cpus.get_thread(ThreadID { core: 0, thread: 0 }).unwrap().timer);

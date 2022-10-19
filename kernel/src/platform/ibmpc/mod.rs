@@ -8,8 +8,8 @@ use crate::{
     },
     mm::{
         bump_alloc::{bump_alloc, init_bump_alloc},
-        heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
-        paging::{get_page_dir, get_page_manager, set_page_manager, PageDirectory, PageManager},
+        heap::ALLOCATOR,
+        paging::{get_page_manager, set_page_manager, PageDirectory, PageManager},
     },
     util::{
         array::BitSet,
@@ -27,10 +27,10 @@ use alloc::{
 };
 use compression::prelude::*;
 use core::{arch::asm, mem::size_of};
-use log::{debug, error, info, trace};
+use log::{debug, error, info};
 
 pub const LINKED_BASE: usize = 0xe0000000;
-pub const KHEAP_START: usize = LINKED_BASE + 0x01000000;
+pub const HEAP_START: usize = LINKED_BASE + 0x01000000;
 pub const KHEAP_INITIAL_SIZE: usize = 0x100000;
 pub const KHEAP_MAX_SIZE: usize = 0xffff000;
 pub const HEAP_MIN_SIZE: usize = 0x70000;
@@ -127,8 +127,6 @@ pub fn kmain() {
     // page directory for kernel
     let mut page_dir = PageDir::bump_allocate();
 
-    let heap_reserved = PAGE_SIZE * 2;
-
     let kernel_start = LINKED_BASE + 0x100000;
 
     // allocate pages
@@ -162,10 +160,10 @@ pub fn kmain() {
         BOOTSTRAP_ADDR = bootstrap_addr;
     }
 
-    let heap_init_end = KHEAP_START + HEAP_MIN_SIZE;
-    debug!("mapping heap ({KHEAP_START:#x} - {heap_init_end:#x})");
+    let heap_init_end = HEAP_START + HEAP_MIN_SIZE;
+    debug!("mapping heap ({HEAP_START:#x} - {heap_init_end:#x})");
 
-    for addr in (KHEAP_START..heap_init_end).step_by(PAGE_SIZE) {
+    for addr in (HEAP_START..heap_init_end).step_by(PAGE_SIZE) {
         if !page_dir.has_page_table(addr.try_into().unwrap()) {
             debug!("allocating new page table");
             let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
@@ -189,49 +187,9 @@ pub fn kmain() {
     // === heap init ===
 
     // set up allocator with minimum size
-    ALLOCATOR.init(KHEAP_START, HEAP_MIN_SIZE);
+    ALLOCATOR.init(HEAP_START, HEAP_MIN_SIZE);
 
-    ALLOCATOR.reserve_memory(Some(Layout::from_size_align(heap_reserved, PAGE_SIZE).unwrap()));
-
-    fn expand(old_top: usize, new_top: usize, alloc: &ExpandAllocCallback, _free: &ExpandFreeCallback) -> Result<usize, ()> {
-        debug!("expand (old_top: {old_top:#x}, new_top: {new_top:#x})");
-        if new_top <= KHEAP_START + KHEAP_MAX_SIZE {
-            let new_top = (new_top / PAGE_SIZE) * PAGE_SIZE + PAGE_SIZE;
-            debug!("new_top now @ {new_top:#x}");
-
-            let old_top = (old_top / PAGE_SIZE) * PAGE_SIZE;
-            debug!("old_top now @ {old_top:#x}");
-
-            for addr in (old_top..new_top).step_by(PAGE_SIZE) {
-                if !get_page_dir().lock().inner().has_page_table(addr.try_into().unwrap()) {
-                    trace!("allocating new page table");
-
-                    let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
-                        Ok(ptr) => ptr,
-                        Err(()) => return Ok(addr), // fail gracefully if we can't allocate
-                    };
-                    let phys = get_page_dir().virt_to_phys(virt as usize).ok_or(())?;
-
-                    unsafe {
-                        get_page_dir()
-                            .lock()
-                            .inner_mut()
-                            .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
-                    }
-                }
-
-                get_page_manager().alloc_frame(&mut get_page_dir(), addr, false, true).map_err(|err| {
-                    error!("error allocating page for heap: {err:?}");
-                })?;
-            }
-
-            Ok(new_top)
-        } else {
-            Err(())
-        }
-    }
-
-    ALLOCATOR.set_expand_callback(&expand);
+    crate::arch::init_alloc();
 
     unsafe {
         crate::mm::bump_alloc::free_unused_bump_alloc(&mut get_page_manager(), PAGE_DIR.as_mut().unwrap());
@@ -367,7 +325,7 @@ pub fn kmain() {
     debug!("{:?}", cmdline);
 
     // set the global kernel page directory
-    crate::mm::paging::set_page_dir(unsafe { PAGE_DIR.take().unwrap() });
+    crate::mm::paging::set_kernel_page_dir(unsafe { PAGE_DIR.take().unwrap() });
 
     // arch code takes over here
     crate::arch::init(cmdline, modules);

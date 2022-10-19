@@ -233,8 +233,7 @@ where O: FnOnce(&mut [u8]) -> R {
 
     assert!(end > start);
 
-    debug!("mapping partial page directory in");
-    debug!("start @ {start:#x}, end @ {end:#x}");
+    debug!("mapping memory in ({start:#x} - {end:#x})");
 
     // offset into memory we've paged in
     let mut offset = 0;
@@ -249,8 +248,7 @@ where O: FnOnce(&mut [u8]) -> R {
         end = (end & !(page_size - 1)) + (page_size - 1);
     }
 
-    debug!("start now @ {start:#x}, end now @ {end:#x}");
-    debug!("offset is {offset:#x}, len is {len:#x}");
+    trace!("aligned to {start:#x} + {offset:#x} - {end:#x}, slice len is {len:#x}");
 
     let mut addresses: Vec<u64> = Vec::new();
 
@@ -275,7 +273,7 @@ where O: FnOnce(&mut [u8]) -> R {
         addresses.push(phys_addr);
     }
 
-    debug!("addresses: {addresses:x?}");
+    trace!("addresses: {addresses:x?}");
 
     // map the memory
     map_memory(map_into, &addresses, |s| op(&mut s[offset..offset + len]))
@@ -334,17 +332,17 @@ where O: FnOnce(&mut [u8]) -> R {
                 return Err(PagingError::BadAddress);
             }
         };
-        debug!("existing: {i:#x} -> {addr:#x}");
+        trace!("existing: {i:#x} -> {addr:#x}");
         existing_phys.push(addr);
     }
 
-    debug!("existing_phys: {existing_phys:x?}");
+    trace!("existing_phys: {existing_phys:x?}");
 
     // remap all pages in region
     for (i, phys_addr) in addresses.iter().enumerate() {
         let virt = ptr as usize + i * page_size;
 
-        debug!("{virt:x} now @ phys addr: {phys_addr:x}");
+        trace!("{virt:x} now @ phys addr: {phys_addr:x}");
 
         // todo: maybe change this to debug_assert at some point? its prolly hella slow
         assert!(!existing_phys.contains(phys_addr), "trampling on other page directory's memory");
@@ -364,16 +362,16 @@ where O: FnOnce(&mut [u8]) -> R {
             .expect("couldn't remap page");
     }
 
-    debug!("slice @ {ptr:?}, len {buf_len:#x}");
+    trace!("slice @ {ptr:?}, len {buf_len:#x}");
 
     // call function
     let res = op(core::slice::from_raw_parts_mut(ptr as *mut u8, buf_len));
 
     // map pages back to their original addresses
-    debug!("cleaning up mapping");
+    trace!("cleaning up mapping");
     for (idx, addr) in (ptr as usize..ptr as usize + buf_len).step_by(page_size).enumerate() {
         let phys_addr = existing_phys[idx];
-        debug!("virt @ {addr:x}, phys @ {phys_addr:x}");
+        trace!("virt @ {addr:x}, phys @ {phys_addr:x}");
         map_into
             .set_page(
                 addr,
@@ -605,17 +603,106 @@ pub fn set_page_manager(manager: PageManager) {
 
 static mut KERNEL_PAGE_DIR: Option<Mutex<PageDirTracker<crate::arch::PageDirectory<'static>>>> = None;
 
-pub fn get_page_dir() -> MutexedPageDir<'static, PageDirTracker<crate::arch::PageDirectory<'static>>> {
+pub fn get_kernel_page_dir() -> MutexedPageDir<'static, PageDirTracker<crate::arch::PageDirectory<'static>>> {
     unsafe { MutexedPageDir(KERNEL_PAGE_DIR.as_ref().expect("kernel page directory not set")) }
 }
 
-pub fn set_page_dir(dir: crate::arch::PageDirectory<'static>) {
+pub fn set_kernel_page_dir(dir: crate::arch::PageDirectory<'static>) {
     unsafe {
         if KERNEL_PAGE_DIR.is_some() {
             panic!("can't set kernel page directory twice");
         } else {
             KERNEL_PAGE_DIR = Some(Mutex::new(PageDirTracker::new(dir, true)));
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum ProcessOrKernelPageDir {
+    Process(u32),
+    Kernel,
+}
+
+impl PageDirectory for ProcessOrKernelPageDir {
+    const PAGE_SIZE: usize = crate::arch::PageDirectory::PAGE_SIZE;
+
+    fn get_page(&self, addr: usize) -> Option<PageFrame> {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.get_page(addr),
+            Self::Kernel => get_kernel_page_dir().get_page(addr),
+        }
+    }
+
+    fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.set_page(addr, page),
+            Self::Kernel => get_kernel_page_dir().set_page(addr, page),
+        }
+    }
+
+    unsafe fn switch_to(&self) {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.switch_to(),
+            Self::Kernel => get_kernel_page_dir().switch_to(),
+        }
+    }
+
+    fn is_unused(&self, addr: usize) -> bool {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.is_unused(addr),
+            Self::Kernel => get_kernel_page_dir().is_unused(addr),
+        }
+    }
+
+    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.copy_from(dir, from, to, num),
+            Self::Kernel => get_kernel_page_dir().copy_from(dir, from, to, num),
+        }
+    }
+
+    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.copy_on_write_from(dir, from, to, num),
+            Self::Kernel => get_kernel_page_dir().copy_on_write_from(dir, from, to, num),
+        }
+    }
+
+    fn virt_to_phys(&self, virt: usize) -> Option<u64> {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.virt_to_phys(virt),
+            Self::Kernel => get_kernel_page_dir().virt_to_phys(virt),
+        }
+    }
+
+    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
+        match self {
+            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.find_hole(start, end, size),
+            Self::Kernel => get_kernel_page_dir().find_hole(start, end, size),
+        }
+    }
+}
+
+/*impl ProcessOrKernelPageDir {
+    pub fn inner() -> &dyn PageDirectory {
+        match self {
+            Self::Process(id) => &crate::task::get_process(*id).unwrap().page_directory.task,
+            Self::Kernel => get_kernel_page_dir().lock().inner(),
+        }
+    }
+}*/
+
+pub fn get_page_dir(thread_id: Option<crate::task::cpu::ThreadID>) -> ProcessOrKernelPageDir {
+    if let Some(cpus) = crate::task::get_cpus() {
+        let thread = cpus.get_thread(thread_id.unwrap_or_else(crate::arch::get_thread_id)).expect("couldn't get CPU thread");
+
+        if let Some(current) = thread.task_queue.lock().current() {
+            ProcessOrKernelPageDir::Process(current.id().process)
+        } else {
+            ProcessOrKernelPageDir::Kernel
+        }
+    } else {
+        ProcessOrKernelPageDir::Kernel
     }
 }
 
@@ -630,25 +717,37 @@ impl PageRefCounter {
     }
 
     pub fn add_reference(&mut self, phys: u64) {
+        self.add_references(phys, 1);
+    }
+
+    pub fn add_references(&mut self, phys: u64, num: usize) {
         if let Some(reference) = self.references.get_mut(&phys) {
-            reference.references += 1;
+            reference.references += num;
         } else {
-            self.references.insert(phys, PageReference { references: 1, phys });
+            self.references.insert(phys, PageReference { references: num, phys });
         }
     }
 
     pub fn remove_reference(&mut self, phys: u64) {
-        let should_remove = if let Some(reference) = self.references.get_mut(&phys) {
-            reference.references -= 1;
-
-            reference.references == 0
+        if let Some(reference) = self.references.get_mut(&phys) {
+            if reference.references > 1 {
+                reference.references -= 1;
+            } else {
+                debug!("no more references, freeing {phys:#x}");
+                self.references.remove(&phys);
+                get_page_manager().set_frame_free(phys);
+            }
         } else {
-            false
-        };
-
-        if should_remove {
-            self.references.remove(&phys);
+            debug!("no references, freeing {phys:#x}");
             get_page_manager().set_frame_free(phys);
+        }
+    }
+
+    pub fn get_references_for(&self, phys: u64) -> usize {
+        if let Some(reference) = self.references.get(&phys) {
+            reference.references
+        } else {
+            0
         }
     }
 }
@@ -743,5 +842,114 @@ pub fn free_page_dir<D: PageDirectory>(dir: &mut D) {
                 get_page_manager().set_frame_free(page.addr);
             }
         }
+    }
+}
+
+pub fn try_copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<(), ()> {
+    let current_id = thread.task_queue.lock().current().ok_or(())?.id(); // interrupt handler should have checked this already
+
+    let mut page = crate::task::get_process(current_id.process).ok_or(())?.page_directory.get_page(addr).ok_or(())?;
+
+    let page_size = crate::arch::PageDirectory::PAGE_SIZE;
+
+    // round down to nearest multiple of page size
+    let addr = (addr / page_size) * page_size;
+
+    if !page.writable && page.copy_on_write {
+        if PAGE_REF_COUNTER.lock().get_references_for(page.addr) > 1 {
+            debug!("copying page {addr:#x} (phys {:#x})", page.addr);
+
+            unsafe {
+                let copied_layout = Layout::from_size_align(page_size, page_size).unwrap();
+                let copied_area = alloc(copied_layout);
+
+                let copied_slice = core::slice::from_raw_parts_mut(copied_area, page_size);
+                let copybara = core::slice::from_raw_parts_mut(addr as *mut u8, page_size);
+
+                trace!("copying");
+                copied_slice.copy_from_slice(copybara);
+
+                let original_page = page;
+
+                // we can't lock this any earlier since that'll deadlock in alloc() if the heap needs expanding
+                let mut process = crate::task::get_process(current_id.process).ok_or(())?;
+
+                match process.page_directory.virt_to_phys(copied_area as usize) {
+                    Some(new) => page.addr = new,
+                    None => {
+                        error!("copy on write failed: couldn't get physical address for {copied_area:?}");
+
+                        dealloc(copied_area, copied_layout);
+
+                        return Err(());
+                    }
+                }
+                page.writable = true;
+                page.copy_on_write = false;
+
+                trace!("updating page");
+                if let Err(err) = process.page_directory.set_page(addr, Some(page)) {
+                    error!("copy on write failed: {err:?}");
+
+                    dealloc(copied_area, copied_layout);
+
+                    return Err(());
+                }
+
+                drop(process);
+
+                trace!("cleaning up");
+
+                // allocate a new page for the heap
+                let mut page_dir = get_page_dir(Some(thread_id));
+
+                if let Err(err) = page_dir.set_page(copied_area as usize, None) {
+                    error!("copy on write failed: {err:?}");
+
+                    crate::task::get_process(current_id.process)
+                        .expect("copy on write cleanup failed")
+                        .page_directory
+                        .set_page(addr, Some(original_page))
+                        .expect("copy on write cleanup failed");
+                    dealloc(copied_area, copied_layout);
+
+                    return Err(());
+                }
+
+                if let Err(err) = get_page_manager().alloc_frame(&mut page_dir, copied_area as usize, false, true) {
+                    error!("copy on write failed: {err:?}");
+
+                    crate::task::get_process(current_id.process)
+                        .expect("copy on write cleanup failed")
+                        .page_directory
+                        .set_page(addr, Some(original_page))
+                        .expect("copy on write cleanup failed");
+                    dealloc(copied_area, copied_layout);
+
+                    return Err(());
+                }
+
+                dealloc(copied_area, copied_layout);
+
+                PAGE_REF_COUNTER.lock().remove_reference(original_page.addr);
+
+                debug!("copied");
+            }
+        } else {
+            debug!("page {addr:#x} (phys {:#x}) isn't referenced by anything else, not copying", page.addr);
+
+            // we can just update writable here, keeping the copy on write flag set means it'll be deallocated thru the page reference counter
+            page.writable = true;
+
+            if let Err(err) = crate::task::get_process(current_id.process).ok_or(())?.page_directory.set_page(addr, Some(page)) {
+                error!("copy on write failed: {err:?}");
+
+                return Err(());
+            }
+        }
+
+        Ok(())
+    } else {
+        Err(())
     }
 }

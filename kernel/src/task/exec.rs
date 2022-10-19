@@ -108,6 +108,8 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
         let mut lowest_addr = usize::MAX;
 
+        let thread_id = crate::arch::get_thread_id();
+
         // assemble program in memory
         for ph in elf.program_headers {
             debug!("{:?}", ph);
@@ -152,7 +154,7 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                         if let Some(dir) = kernel_page_dir.as_mut() {
                             map_memory_from(*dir, &mut process_page_dir, vaddr, memsz, op).map_err(|_| ExecError::Other)?;
                         } else {
-                            map_memory_from(&mut get_page_dir(), &mut process_page_dir, vaddr, memsz, op).map_err(|_| ExecError::Other)?;
+                            map_memory_from(&mut get_page_dir(Some(thread_id)), &mut process_page_dir, vaddr, memsz, op).map_err(|_| ExecError::Other)?;
                         }
                     }
 
@@ -281,12 +283,15 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
         process.set_page_directory(process_page_dir.into_inner());
         process.threads.clear();
-        process.threads.add(crate::task::Thread {
-            registers: crate::arch::Registers::new_task(entry_point, stack_end),
-            priority: 0,
-            cpu: None,
-            is_blocked: false,
-        }).map_err(|_| ExecError::AllocError)?;
+        process
+            .threads
+            .add(crate::task::Thread {
+                registers: crate::arch::Registers::new_task(entry_point, stack_end),
+                priority: 0,
+                cpu: None,
+                is_blocked: false,
+            })
+            .map_err(|_| ExecError::AllocError)?;
 
         Ok(())
     }

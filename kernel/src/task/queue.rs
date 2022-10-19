@@ -1,7 +1,4 @@
-use alloc::{
-    collections::VecDeque,
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, vec::Vec};
 use log::trace;
 
 /// a per-CPU task queue
@@ -63,7 +60,7 @@ impl TaskQueue {
     }
 
     /// given a process id, remove all threads corresponding to it from the queue
-    pub fn remove_process(&mut self, id: usize) {
+    pub fn remove_process(&mut self, id: u32) {
         let to_remove = self.queue.iter().enumerate().filter(|(_, e)| e.id().process == id).map(|(i, _)| i).collect::<Vec<usize>>();
 
         for index in to_remove.iter() {
@@ -161,7 +158,7 @@ impl Default for PageUpdateQueue {
 
 #[derive(Debug, Copy, Clone)]
 pub enum PageUpdateEntry {
-    Task { process_id: usize, addr: usize },
+    Task { process_id: u32, addr: usize },
     Kernel { addr: usize },
 }
 

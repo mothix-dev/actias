@@ -6,4 +6,5 @@ pub enum Syscalls {
     IsComputerOn,
     ExitProcess,
     ExitThread,
+    Fork,
 }

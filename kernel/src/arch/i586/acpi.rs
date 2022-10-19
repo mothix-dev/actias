@@ -33,7 +33,7 @@ fn read_header(phys_addr: u64) -> Option<ACPIHeader> {
     let page = (phys_addr / PAGE_SIZE as u64) * PAGE_SIZE as u64;
     let offset = (phys_addr % PAGE_SIZE as u64) as usize;
 
-    unsafe { map_memory(&mut get_page_dir(), &[page, page + 1], |s| *(&s[offset] as *const u8 as *const ACPIHeader)).ok() }
+    unsafe { map_memory(&mut get_page_dir(None), &[page, page + 1], |s| *(&s[offset] as *const u8 as *const ACPIHeader)).ok() }
 }
 
 /// gets the data of an acpi table at the provided physical address
@@ -48,7 +48,7 @@ fn read_data(phys_addr: u64, len: u32) -> Option<Vec<u8>> {
         addresses.push(addr);
     }
 
-    unsafe { map_memory(&mut get_page_dir(), &addresses, |s| s[offset..offset + len].to_vec()).ok() }
+    unsafe { map_memory(&mut get_page_dir(None), &addresses, |s| s[offset..offset + len].to_vec()).ok() }
 }
 
 #[repr(C)]
@@ -125,7 +125,7 @@ fn read_sdt<S: SDTPointer + Clone>(phys_addr: u64) -> Option<SDT<S>> {
     let page = (phys_addr / PAGE_SIZE as u64) * PAGE_SIZE as u64;
     let offset = (phys_addr % PAGE_SIZE as u64) as usize;
 
-    unsafe { map_memory(&mut get_page_dir(), &[page, page + 1], |s| SDT::from_raw_pointer(&s[offset] as *const u8)).ok() }
+    unsafe { map_memory(&mut get_page_dir(None), &[page, page + 1], |s| SDT::from_raw_pointer(&s[offset] as *const u8)).ok() }
 }
 
 #[repr(C)]
@@ -193,7 +193,7 @@ fn find_rsdp() -> Option<u64> {
     // map pages one at a time to avoid exhausting memory on low memory systems
     for page in (0x000e0000..0x00100000).step_by(PAGE_SIZE) {
         unsafe {
-            if let Some(addr) = map_memory(&mut get_page_dir(), &[page], |s| {
+            if let Some(addr) = map_memory(&mut get_page_dir(None), &[page], |s| {
                 // signature is always aligned to 16 bytes
                 for i in (0..PAGE_SIZE).step_by(16) {
                     if s[i..i + 8] == (b"RSD PTR ")[0..8] {
@@ -219,7 +219,7 @@ fn read_rsdp(phys_addr: u64) -> Option<RSDP> {
     let offset = (phys_addr % PAGE_SIZE as u64) as usize;
 
     unsafe {
-        map_memory(&mut get_page_dir(), &[page, page + 1], |s| {
+        map_memory(&mut get_page_dir(None), &[page, page + 1], |s| {
             // always read extended rsdp regardless of the revision
             RSDP {
                 extended: *(&s[offset] as *const _ as *const RSDPExtended),

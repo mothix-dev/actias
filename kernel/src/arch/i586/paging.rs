@@ -1,6 +1,6 @@
 //! x86 non-PAE paging
 
-use super::{PAGE_SIZE, KERNEL_PAGE_DIR_SPLIT};
+use super::{KERNEL_PAGE_DIR_SPLIT, PAGE_SIZE};
 use crate::{
     mm::{
         bump_alloc::bump_alloc,
@@ -438,6 +438,14 @@ impl fmt::Debug for PageDir<'_> {
 /// additionally, there are checks in place to prevent freeing the current page table to prevent potential use-after-free bugs
 static mut CURRENT_PAGE_DIR: Option<&'static PageDir> = None;
 
+pub fn is_page_dir_current(page_dir: &PageDir) -> bool {
+    if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
+        page_dir.tables_physical_addr == current.tables_physical_addr
+    } else {
+        false
+    }
+}
+
 impl<'a> PageDir<'a> {
     /// constructs a new PageDir, allocating memory for it in the process
     pub fn new() -> Self {
@@ -672,9 +680,7 @@ impl<'a> PageDirectory for PageDir<'a> {
 impl<'a> Drop for PageDir<'a> {
     fn drop(&mut self) {
         // sanity check, makes sure we're not freeing the current page directory
-        if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
-            assert!(self.tables_physical_addr != current.tables_physical_addr, "attempted to free current page directory");
-        }
+        assert!(!is_page_dir_current(self), "attempted to free current page directory");
 
         // free any allocated page tables
         for i in 0..1024 {
