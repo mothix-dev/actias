@@ -1,6 +1,6 @@
 #![no_std]
 
-use common::types::{Errno, Result, Syscalls};
+use common::types::{Errno, MmapArguments, MmapFlags, MmapProtection, ProcessID, Result, Syscalls, UnmapArguments};
 use core::arch::asm;
 
 #[inline]
@@ -114,4 +114,68 @@ pub fn exit_thread() -> ! {
 
 pub fn fork() -> Result<u32> {
     unsafe { syscall_0_args(Syscalls::Fork) }
+}
+
+pub fn mmap(id: u32, addr_hint: *mut u8, length: usize, protection: MmapProtection, flags: MmapFlags) -> Result<*mut u8> {
+    let mut args = MmapArguments {
+        id,
+        address: addr_hint as u64,
+        length: length as u64,
+        protection,
+        flags,
+    };
+
+    let addr = &mut args as *mut _ as usize;
+
+    #[cfg(target_pointer_width = "64")]
+    unsafe {
+        syscall_2_args(Syscalls::Mmap, (addr >> 32) as u32, addr as u32 & u32::MAX)?;
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    unsafe {
+        syscall_1_args(Syscalls::Mmap, addr as u32)?;
+    }
+
+    let res: usize = unsafe { core::ptr::read_volatile(&args.address) }.try_into().map_err(|_| Errno::ValueOverflow)?;
+    Ok(res as *mut u8)
+}
+
+pub fn unmap(addr_hint: *mut u8, length: usize) -> Result<()> {
+    let args = UnmapArguments {
+        address: addr_hint as u64,
+        length: length as u64,
+    };
+
+    let addr = &args as *const _ as usize;
+
+    #[cfg(target_pointer_width = "64")]
+    unsafe {
+        syscall_2_args(Syscalls::Unmap, (addr >> 32) as u32, addr as u32 & u32::MAX)?;
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    unsafe {
+        syscall_1_args(Syscalls::Unmap, addr as u32)?;
+    }
+
+    Ok(())
+}
+
+pub fn get_process_id() -> Result<ProcessID> {
+    let mut pid: ProcessID = ProcessID { process: 0, thread: 0 };
+
+    let addr = &mut pid as *mut _ as usize;
+
+    #[cfg(target_pointer_width = "64")]
+    unsafe {
+        syscall_2_args(Syscalls::GetProcessID, (addr >> 32) as u32, addr as u32 & u32::MAX)?;
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    unsafe {
+        syscall_1_args(Syscalls::GetProcessID, addr as u32)?;
+    }
+
+    Ok(unsafe { core::ptr::read_volatile(&pid) })
 }

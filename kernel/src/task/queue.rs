@@ -1,4 +1,5 @@
 use alloc::{collections::VecDeque, vec::Vec};
+use common::types::{Errno, Result};
 use log::trace;
 
 /// a per-CPU task queue
@@ -29,12 +30,19 @@ impl TaskQueue {
         self.current.as_ref()
     }
 
+    /// wrapper around try_reserve for the internal queue structure
+    pub fn try_reserve(&mut self, amt: usize) -> Result<()> {
+        self.queue.try_reserve(amt).map_err(|_| Errno::OutOfMemory)
+    }
+
     /// inserts a task into the queue
-    pub fn insert(&mut self, entry: TaskQueueEntry) {
+    pub fn insert(&mut self, entry: TaskQueueEntry) -> Result<()> {
+        self.try_reserve(1)?;
         match self.queue.iter().position(|e| entry.full_priority() > e.full_priority()) {
             Some(index) => self.queue.insert(index, entry),
             None => self.queue.push_back(entry),
         }
+        Ok(())
     }
 
     /// checks whether this taskqueue is empty
@@ -48,8 +56,8 @@ impl TaskQueue {
     }
 
     /// gets the current task being processed in the queue
-    pub fn current(&self) -> Option<&TaskQueueEntry> {
-        self.current.as_ref()
+    pub fn current(&self) -> Option<TaskQueueEntry> {
+        self.current
     }
 
     /// given a fully qualified process id, remove the thread corresponding to it from the queue
@@ -76,7 +84,7 @@ impl Default for TaskQueue {
 }
 
 /// an entry in a task queue
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TaskQueueEntry {
     /// the PID associated with this task
     id: super::ProcessID,

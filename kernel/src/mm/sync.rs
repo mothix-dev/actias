@@ -58,12 +58,12 @@ impl<D: PageDirectory> PageDirSync<'_, D> {
     /// synchronizes if we've fallen out of sync
     pub fn sync(&mut self) {
         if self.kernel_space_updates != self.kernel.lock().updates() {
-            self.force_sync();
+            self.force_sync().expect("unable to synchronize page directories");
         }
     }
 
     /// forces a synchronization regardless of whether we're in sync or not
-    pub fn force_sync(&mut self) {
+    pub fn force_sync(&mut self) -> Result<(), super::paging::PagingError> {
         debug!("synchronizing page directories");
 
         let mut initial_updates = self.kernel.lock().updates();
@@ -73,7 +73,7 @@ impl<D: PageDirectory> PageDirSync<'_, D> {
             for i in (KERNEL_PAGE_DIR_SPLIT..=usize::MAX).step_by(Self::PAGE_SIZE) {
                 let page = self.kernel.lock().get_page(i);
 
-                self.task.set_page(i, page).expect("unable to synchronize page directories");
+                self.task.set_page(i, page)?;
             }
 
             let current_updates = self.kernel.lock().updates();
@@ -88,6 +88,7 @@ impl<D: PageDirectory> PageDirSync<'_, D> {
         }
 
         debug!("finished synchronizing");
+        Ok(())
     }
 }
 

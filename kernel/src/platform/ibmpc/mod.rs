@@ -139,7 +139,7 @@ pub fn kmain() {
             page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
         }
 
-        manager.alloc_frame_at(&mut page_dir, addr, (addr - LINKED_BASE) as u64, false, true).unwrap();
+        manager.alloc_frame_at(&mut page_dir, addr, (addr - LINKED_BASE) as u64, false, true, true).unwrap();
     }
 
     // free the page below the stack, to catch stack overflow
@@ -170,7 +170,7 @@ pub fn kmain() {
             page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
         }
 
-        manager.alloc_frame(&mut page_dir, addr, false, true).unwrap();
+        manager.alloc_frame(&mut page_dir, addr, false, true, false).unwrap();
     }
 
     // let go of our lock on the global page manager, since it would likely cause problems with the allocator

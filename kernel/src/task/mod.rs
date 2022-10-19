@@ -6,21 +6,10 @@ pub mod queue;
 pub mod switch;
 pub mod syscalls;
 
-use crate::{
-    arch::{Registers, KERNEL_PAGE_DIR_SPLIT},
-    mm::{
-        paging::{get_kernel_page_dir, PageDirectory},
-        sync::PageDirSync,
-    },
-    util::array::ConsistentIndexArray,
-};
-use alloc::vec::Vec;
-use common::types::{Errno, Result};
-use core::{
-    fmt,
-    sync::atomic::{AtomicBool, Ordering},
-};
-use log::{debug, trace, warn};
+use crate::{arch::Registers, mm::sync::PageDirSync, util::array::ConsistentIndexArray};
+use common::types::{Errno, ProcessID, Result};
+use core::sync::atomic::{AtomicBool, Ordering};
+use log::{debug, error, trace, warn};
 use spin::Mutex;
 
 use queue::PageUpdateEntry;
@@ -39,16 +28,25 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn set_page_directory(&mut self, page_dir: crate::arch::PageDirectory<'static>) {
-        crate::mm::paging::free_page_dir(&mut self.page_directory.task);
-        self.page_directory.task = page_dir;
-        self.page_directory.force_sync();
+    pub fn set_page_directory(&mut self, page_dir: crate::arch::PageDirectory<'static>) -> core::result::Result<(), (Errno, crate::arch::PageDirectory<'static>)> {
+        let old_page_dir = core::mem::replace(&mut self.page_directory.task, page_dir);
+        match self.page_directory.force_sync() {
+            Ok(_) => {
+                crate::mm::paging::free_page_dir(&old_page_dir);
+                Ok(())
+            }
+            Err(err) => {
+                error!("failed to set page directory of process: {err:?}");
+                let page_dir = core::mem::replace(&mut self.page_directory.task, old_page_dir);
+                Err((Errno::OutOfMemory, page_dir)) // pass the page dir back so it can be dealt with
+            }
+        }
     }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
-        crate::mm::paging::free_page_dir(&mut self.page_directory.task);
+        crate::mm::paging::free_page_dir(&self.page_directory.task);
     }
 }
 
@@ -64,18 +62,6 @@ pub struct Thread {
 
     /// whether this thread is blocked or not
     pub is_blocked: bool,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ProcessID {
-    pub process: u32,
-    pub thread: u32,
-}
-
-impl fmt::Display for ProcessID {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.process, self.thread)
-    }
 }
 
 // this is all very jank but it seems to work? wonder whether the overhead of locking individual processes is at all worth it
@@ -148,7 +134,14 @@ pub fn create_process(page_dir: crate::arch::PageDirectory<'static>) -> Result<u
             let mut process = get_process(pid).ok_or(Errno::TryAgain)?;
 
             process.page_directory.process_id = pid;
-            process.page_directory.force_sync();
+            match process.page_directory.force_sync() {
+                Ok(_) => (),
+                Err(err) => {
+                    error!("failed to synchronize page directory for new process: {err:?}");
+                    remove_process(pid);
+                    return Err(Errno::OutOfMemory);
+                }
+            }
 
             drop(process);
 
@@ -281,107 +274,4 @@ pub fn nmi_all_other_cpus() {
             }
         }
     }
-}
-
-/// forks the current process, returning the ID of the newly created process
-pub fn fork_current_process(thread: &cpu::CPUThread, regs: &mut crate::arch::Registers) -> Result<u32> {
-    trace!("forking current process");
-
-    let id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
-
-    let cpus = crate::task::get_cpus().expect("CPUs not initialized");
-    let process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
-    let thread = process.threads.get(id.thread as usize).ok_or(Errno::NoSuchProcess)?;
-
-    let priority = thread.priority;
-    let is_blocked = thread.is_blocked;
-
-    drop(process);
-
-    // copy page directory
-    trace!("copying page directory");
-    let mut new_orig_page_dir = crate::arch::PageDirectory::new();
-    let mut new_fork_page_dir = crate::arch::PageDirectory::new();
-    let mut referenced_pages = Vec::new();
-
-    let page_size = crate::arch::PageDirectory::PAGE_SIZE;
-
-    for addr in (0..KERNEL_PAGE_DIR_SPLIT).step_by(page_size) {
-        let mut page = get_process(id.process).ok_or(Errno::NoSuchProcess)?.page_directory.get_page(addr);
-
-        // does this page exist?
-        if let Some(page) = page.as_mut() {
-            debug!("modifying page {addr:#x}");
-            // if this page is writable, set it as non-writable and set it to copy on write
-            //
-            // pages have to be set as non writable in order for copy on write to work since attempting to write to a non writable page causes a page fault exception,
-            // which we can then use to copy the page and resume execution as normal
-            if page.writable {
-                page.writable = false;
-                page.copy_on_write = true;
-            }
-
-            // add this page's address to our list of referenced pages
-            referenced_pages.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
-            referenced_pages.push(page.addr);
-
-            // set page in page directories
-            trace!("setting page");
-            new_orig_page_dir.set_page(addr, Some(*page)).map_err(|_| Errno::OutOfMemory)?;
-            new_fork_page_dir.set_page(addr, Some(*page)).map_err(|_| Errno::OutOfMemory)?;
-        }
-    }
-
-    // update the page directory of the process we're forking from
-    unsafe {
-        let mut process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
-
-        get_kernel_page_dir().switch_to();
-
-        process.page_directory.task = new_orig_page_dir;
-        process.page_directory.force_sync();
-
-        process.page_directory.switch_to();
-
-        drop(process);
-    }
-
-    // create new process
-    trace!("creating new process");
-    let process_id = crate::task::create_process(new_fork_page_dir)?;
-
-    trace!("getting process");
-    let mut process = get_process(process_id).ok_or(Errno::NoSuchProcess)?;
-
-    trace!("adding thread");
-    process
-        .threads
-        .add(crate::task::Thread {
-            registers: *regs,
-            priority,
-            cpu: None,
-            is_blocked,
-        })
-        .map_err(|_| Errno::OutOfMemory)?;
-
-    // release lock
-    drop(process);
-
-    // update the page reference counter with our new pages
-    for addr in referenced_pages.iter() {
-        // FIXME: BTreeMap used in the page ref counter doesn't expect alloc to fail, this can probably crash the kernel if we run out of memory!
-        crate::mm::paging::PAGE_REF_COUNTER.lock().add_references(*addr, 2);
-    }
-
-    // queue new process for execution
-    let thread_id = cpus.find_thread_to_add_to().unwrap_or_default();
-
-    debug!("queueing process on CPU {thread_id}");
-    cpus.get_thread(thread_id)
-        .unwrap()
-        .task_queue
-        .lock()
-        .insert(crate::task::queue::TaskQueueEntry::new(ProcessID { process: process_id, thread: 0 }, 0));
-
-    Ok(process_id)
 }

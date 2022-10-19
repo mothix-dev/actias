@@ -2,8 +2,9 @@
 
 use crate::{
     arch::{KERNEL_PAGE_DIR_SPLIT, STACK_SIZE},
-    mm::paging::{get_page_dir, get_page_manager, map_memory_from, FreeablePageDir, PageDirectory},
+    mm::paging::{free_page_dir, get_page_dir, get_page_manager, map_memory, map_memory_from, FreeablePageDir, PageDirectory},
 };
+use common::types::{Errno, Result};
 use core::mem::size_of;
 use goblin::elf::{
     program_header::{PT_INTERP, PT_LOAD},
@@ -87,22 +88,12 @@ fn poke_str_slice_into_mem(task: &mut Task, slice: &[String]) -> Result<usize, E
 }
 */
 
-#[derive(Debug)]
-pub enum ExecError {
-    ElfParseError,
-    WrongPtrSize,
-    ValueOverflow,
-    NotStatic,
-    AllocError,
-    Other,
-}
-
 #[allow(clippy::vec_init_then_push)]
-pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &mut super::Process, data: &[u8]) -> Result<(), ExecError> {
-    let elf = Elf::parse(data).map_err(|_| ExecError::ElfParseError)?;
+pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &mut super::Process, data: &[u8]) -> Result<()> {
+    let elf = Elf::parse(data).map_err(|_| Errno::ExecutableFormatErr)?;
 
     if (elf.is_64 && size_of::<usize>() != 64 / 8) || (!elf.is_64 && size_of::<usize>() != 32 / 8) {
-        Err(ExecError::WrongPtrSize)
+        Err(Errno::ExecutableFormatErr)
     } else {
         let mut process_page_dir = FreeablePageDir::new(crate::arch::PageDirectory::new());
 
@@ -116,15 +107,15 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
             match ph.p_type {
                 PT_LOAD => {
-                    let file_start: usize = ph.p_offset.try_into().map_err(|_| ExecError::ValueOverflow)?;
-                    let file_end: usize = (ph.p_offset + ph.p_filesz).try_into().map_err(|_| ExecError::ValueOverflow)?;
+                    let file_start: usize = ph.p_offset.try_into().map_err(|_| Errno::ValueOverflow)?;
+                    let file_end: usize = (ph.p_offset + ph.p_filesz).try_into().map_err(|_| Errno::ValueOverflow)?;
 
-                    let vaddr: usize = ph.p_vaddr.try_into().map_err(|_| ExecError::ValueOverflow)?;
-                    let filesz: usize = ph.p_filesz.try_into().map_err(|_| ExecError::ValueOverflow)?;
-                    let memsz: usize = ph.p_memsz.try_into().map_err(|_| ExecError::ValueOverflow)?;
+                    let vaddr: usize = ph.p_vaddr.try_into().map_err(|_| Errno::ValueOverflow)?;
+                    let filesz: usize = ph.p_filesz.try_into().map_err(|_| Errno::ValueOverflow)?;
+                    let memsz: usize = ph.p_memsz.try_into().map_err(|_| Errno::ValueOverflow)?;
 
                     if vaddr >= KERNEL_PAGE_DIR_SPLIT {
-                        return Err(ExecError::ValueOverflow);
+                        return Err(Errno::ValueOverflow);
                     }
 
                     debug!("data @ {:#x} - {:#x}", ph.p_vaddr, ph.p_vaddr + memsz as u64);
@@ -134,33 +125,42 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                             // make sure there's actually something here so we don't deadlock if we need to allocate something and the page manager is busy
                             process_page_dir.set_page(addr, None).unwrap();
 
-                            get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true).unwrap();
+                            let phys = get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true, ph.is_executable()).unwrap();
+
+                            // clear page so we don't leak any information
+                            unsafe {
+                                let op = |s: &mut [u8]| {
+                                    for i in s.iter_mut() {
+                                        *i = 0;
+                                    }
+                                };
+
+                                if let Some(dir) = kernel_page_dir.as_mut() {
+                                    map_memory(*dir, &[phys], op).map_err(|_| Errno::OutOfMemory)?;
+                                } else {
+                                    map_memory(&mut get_page_dir(Some(thread_id)), &[phys], op).map_err(|_| Errno::OutOfMemory)?;
+                                }
+                            }
                         }
                     }
 
                     // write data
-                    unsafe {
-                        #[allow(clippy::needless_range_loop)]
-                        let op = |s: &mut [u8]| {
-                            if filesz > 0 {
-                                s.clone_from_slice(&data[file_start..file_end]);
-                            }
+                    if filesz > 0 {
+                        unsafe {
+                            #[allow(clippy::needless_range_loop)]
+                            let op = |s: &mut [u8]| s.clone_from_slice(&data[file_start..file_end]);
 
-                            for i in filesz..memsz {
-                                s[i] = 0;
+                            if let Some(dir) = kernel_page_dir.as_mut() {
+                                map_memory_from(*dir, &mut process_page_dir, vaddr, memsz, op).map_err(|_| Errno::OutOfMemory)?;
+                            } else {
+                                map_memory_from(&mut get_page_dir(Some(thread_id)), &mut process_page_dir, vaddr, memsz, op).map_err(|_| Errno::OutOfMemory)?;
                             }
-                        };
-
-                        if let Some(dir) = kernel_page_dir.as_mut() {
-                            map_memory_from(*dir, &mut process_page_dir, vaddr, memsz, op).map_err(|_| ExecError::Other)?;
-                        } else {
-                            map_memory_from(&mut get_page_dir(Some(thread_id)), &mut process_page_dir, vaddr, memsz, op).map_err(|_| ExecError::Other)?;
                         }
                     }
 
                     if !ph.is_write() {
                         for addr in (((vaddr + D::PAGE_SIZE - 1) / D::PAGE_SIZE) * D::PAGE_SIZE..=((vaddr + memsz) / D::PAGE_SIZE) * D::PAGE_SIZE).step_by(D::PAGE_SIZE) {
-                            let mut page = process_page_dir.get_page(addr).ok_or(ExecError::Other)?;
+                            let mut page = process_page_dir.get_page(addr).ok_or(Errno::OutOfMemory)?;
                             page.writable = false;
                             process_page_dir.set_page(addr, Some(page)).unwrap();
                         }
@@ -173,7 +173,7 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                 PT_INTERP => {
                     // TODO: use data given by this header to load interpreter for dynamic linking
                     info!("dynamic linking not supported");
-                    return Err(ExecError::NotStatic);
+                    return Err(Errno::ExecutableFormatErr);
                 }
                 _ => debug!("unknown program header {:?}", ph.p_type),
             }
@@ -181,10 +181,10 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
         for addr in (KERNEL_PAGE_DIR_SPLIT - STACK_SIZE..KERNEL_PAGE_DIR_SPLIT).step_by(D::PAGE_SIZE) {
             process_page_dir.set_page(addr, None).unwrap();
-            get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true).unwrap();
+            get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true, false).unwrap();
         }
 
-        let entry_point = elf.entry.try_into().map_err(|_| ExecError::ValueOverflow)?;
+        let entry_point = elf.entry.try_into().map_err(|_| Errno::ValueOverflow)?;
 
         /*debug!("lowest @ {:#x}", lowest_addr);
 
@@ -281,7 +281,13 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
         let stack_end = KERNEL_PAGE_DIR_SPLIT - 1;
 
-        process.set_page_directory(process_page_dir.into_inner());
+        match process.set_page_directory(process_page_dir.into_inner()) {
+            Ok(_) => (),
+            Err((err, page_dir)) => {
+                free_page_dir(&page_dir);
+                return Err(err);
+            }
+        }
         process.threads.clear();
         process
             .threads
@@ -291,7 +297,7 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                 cpu: None,
                 is_blocked: false,
             })
-            .map_err(|_| ExecError::AllocError)?;
+            .map_err(|_| Errno::OutOfMemory)?;
 
         Ok(())
     }

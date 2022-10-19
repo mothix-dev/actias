@@ -157,7 +157,7 @@ impl MultibootModuleCopy {
             // remap memory
             for i in (0..num_pages * PAGE_SIZE).step_by(PAGE_SIZE) {
                 manager.free_frame(dir, ptr as usize + i).unwrap();
-                manager.alloc_frame_at(dir, ptr as usize + i, data_start_aligned as u64 + i as u64, false, false).unwrap();
+                manager.alloc_frame_at(dir, ptr as usize + i, data_start_aligned as u64 + i as u64, false, false, false).unwrap();
             }
 
             self.data = Some(unsafe { slice::from_raw_parts(ptr.offset(data_start_offset.try_into().unwrap()), buf_size) });

@@ -598,6 +598,7 @@ pub fn map_local_apic(addr: u64) {
                 user_mode: false,
                 writable: true,
                 copy_on_write: false,
+                executable: false,
             }),
         )
         .expect("couldn't remap page");
@@ -638,6 +639,7 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
                 user_mode: false,
                 writable: true,
                 copy_on_write: false,
+                executable: true,
             }),
         )
         .unwrap();

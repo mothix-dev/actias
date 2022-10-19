@@ -1,14 +1,9 @@
-use super::{
-    cpu::{CPUThread, ThreadID},
-    get_cpus, get_process,
-    queue::TaskQueueEntry,
-    remove_process, remove_thread,
-};
+use super::{cpu::ThreadID, get_cpus, get_process, queue::TaskQueueEntry, remove_thread};
 use crate::{
     arch::{get_thread_id, Registers},
     mm::paging::PageDirectory,
 };
-use log::{debug, error, trace};
+use log::{error, trace};
 
 /// how much time each process gets before it's forcefully preempted
 pub const CPU_TIME_SLICE: u64 = 200; // 5 ms quantum
@@ -49,118 +44,112 @@ fn _context_switch(timer_num: usize, cpu: Option<ThreadID>, regs: &mut Registers
 
         if queue.len() > 0 || mode != ContextSwitchMode::Normal {
             let mut remove_id = None;
+            let mut can_load_task = true;
 
-            // do we have an active task?
-            let last_id = if let Some(current) = queue.current() {
-                // yes, save task state
+            // save state of task if we're in one
+            let mut find_last_id = || {
+                let current = queue.current()?;
+
+                // make sure we'll be able to reinsert the process back into the queue if we need to
+                if mode == ContextSwitchMode::Normal && queue.try_reserve(1).is_err() {
+                    can_load_task = false;
+                    return None;
+                }
 
                 let id = current.id();
 
-                if let Some(mut process) = get_process(id.process) {
-                    if let Some(thread) = process.threads.get_mut(id.thread as usize) {
-                        regs.task_sanity_check().expect("registers failed sanity check");
+                let mut process = get_process(id.process)?;
+                let thread = process.threads.get_mut(id.thread as usize)?;
+                regs.task_sanity_check().expect("registers failed sanity check");
 
-                        thread.registers.transfer(regs);
+                thread.registers.transfer(regs);
 
-                        // todo: saving of other registers (x87, MMX, SSE, etc.)
+                // todo: saving of other registers (x87, MMX, SSE, etc.)
 
-                        if thread.is_blocked {
-                            None
-                        } else {
-                            match mode {
-                                ContextSwitchMode::Normal => Some((current.id(), thread.priority)),
-                                ContextSwitchMode::Block => {
-                                    thread.is_blocked = true;
-                                    None
-                                }
-                                ContextSwitchMode::Remove => {
-                                    remove_id = Some(current.id());
-                                    None
-                                }
-                            }
-                        }
-                    } else {
-                        error!("couldn't get process {:?} for saving in context switch", current.id());
-
-                        None
+                if !thread.is_blocked {
+                    match mode {
+                        ContextSwitchMode::Normal => return Some((current.id(), thread.priority)),
+                        ContextSwitchMode::Block => thread.is_blocked = true,
+                        ContextSwitchMode::Remove => remove_id = Some(current.id()),
                     }
-                } else {
-                    error!("couldn't get process {:?} for saving in context switch", current.id());
-
-                    None
                 }
-            } else {
+
                 None
             };
+            let last_id = find_last_id();
 
-            // do we have another task to load?
-            let mut has_task = false;
+            if can_load_task {
+                // do we have another task to load?
+                let mut has_task = false;
 
-            while let Some(next) = queue.consume() {
-                // yes, save task state
+                while let Some(next) = queue.consume() {
+                    // yes, save task state
 
-                let id = next.id();
+                    let id = next.id();
 
-                if let Some(mut process) = get_process(id.process) {
-                    if let Some(thread) = process.threads.get_mut(id.thread as usize) {
-                        if thread.is_blocked {
-                            continue;
-                        }
+                    if let Some(mut process) = get_process(id.process) {
+                        if let Some(thread) = process.threads.get_mut(id.thread as usize) {
+                            if thread.is_blocked {
+                                continue;
+                            }
 
-                        thread.registers.task_sanity_check().expect("thread registers failed sanity check");
+                            thread.registers.task_sanity_check().expect("thread registers failed sanity check");
 
-                        regs.transfer(&thread.registers);
+                            regs.transfer(&thread.registers);
 
-                        // todo: loading of other registers (x87, MMX, SSE, etc.)
+                            // todo: loading of other registers (x87, MMX, SSE, etc.)
 
-                        process.page_directory.sync();
+                            process.page_directory.sync();
 
-                        if let Some((last_process_id, _)) = last_id.as_ref() {
-                            // is the process different? (i.e. not the same thread)
-                            if last_process_id.process != id.process {
-                                // yes, switch the page directory
+                            if let Some((last_process_id, _)) = last_id.as_ref() {
+                                // is the process different? (i.e. not the same thread)
+                                if last_process_id.process != id.process {
+                                    // yes, switch the page directory
+                                    unsafe {
+                                        process.page_directory.switch_to();
+                                    }
+                                }
+                            } else {
+                                // switch the page directory no matter what since we weren't in a task before
                                 unsafe {
                                     process.page_directory.switch_to();
                                 }
                             }
+
+                            has_task = true;
+                            break;
                         } else {
-                            // switch the page directory no matter what since we weren't in a task before
-                            unsafe {
-                                process.page_directory.switch_to();
-                            }
+                            error!("couldn't get thread {id:?} for loading in context switch");
                         }
-
-                        has_task = true;
-                        break;
                     } else {
-                        error!("couldn't get thread {id:?} for loading in context switch");
+                        error!("couldn't get process {:?} for loading in context switch", id.process);
                     }
-                } else {
-                    error!("couldn't get process {:?} for loading in context switch", id.process);
                 }
-            }
 
-            if !has_task {
-                // this'll set the registers into a safe state so the cpu will return from the interrupt handler and just wait for an interrupt there,
-                // since for whatever reason just waiting here really messes things up
-                crate::arch::safely_halt_cpu(regs);
-            }
+                if !has_task {
+                    // this'll set the registers into a safe state so the cpu will return from the interrupt handler and just wait for an interrupt there,
+                    // since for whatever reason just waiting here really messes things up
+                    crate::arch::safely_halt_cpu(regs);
+                }
 
-            // put previous task back into queue if necessary
-            match mode {
-                ContextSwitchMode::Normal => {
-                    if let Some((id, priority)) = last_id {
-                        queue.insert(TaskQueueEntry::new(id, priority));
+                // put previous task back into queue if necessary
+                match mode {
+                    ContextSwitchMode::Normal => {
+                        if let Some((id, priority)) = last_id {
+                            queue.insert(TaskQueueEntry::new(id, priority)).unwrap();
+                        }
+                    }
+                    ContextSwitchMode::Block => (),
+                    ContextSwitchMode::Remove => {
+                        if let Some(id) = remove_id {
+                            remove_thread(id);
+                        } else {
+                            trace!("no thread to remove");
+                        }
                     }
                 }
-                ContextSwitchMode::Block => (),
-                ContextSwitchMode::Remove => {
-                    if let Some(id) = remove_id {
-                        remove_thread(id);
-                    } else {
-                        trace!("no thread to remove");
-                    }
-                }
+            } else {
+                error!("something bad happened, skipping context switch");
             }
         }
     }
@@ -229,62 +218,5 @@ pub fn cancel_context_switch_timer(cpu: Option<ThreadID>) {
         timer_state.remove_timer(expires);
 
         queue.timer = None;
-    }
-}
-
-/// exits the current process, cleans up memory, and performs a context switch to the next process if applicable
-pub fn exit_current_process(thread_id: ThreadID, thread: &super::cpu::CPUThread, regs: &mut crate::arch::Registers) {
-    let cpus = get_cpus().expect("CPUs not initialized");
-
-    // make sure we're not on the process' page directory
-    unsafe {
-        crate::mm::paging::get_kernel_page_dir().switch_to();
-    }
-
-    let id = thread.task_queue.lock().current().unwrap().id();
-    let num_threads = get_process(id.process).unwrap().threads.num_entries();
-
-    debug!("exiting process {}", id.process);
-
-    // perform context switch so we're not on this thread anymore
-    manual_context_switch(thread.timer, Some(thread_id), regs, ContextSwitchMode::Remove);
-
-    // remove any more threads of the process
-    thread.task_queue.lock().remove_process(id.process);
-
-    if num_threads > 1 && cpus.cores.len() > 1 {
-        // tell all other CPUs to kill this process
-        for (core_num, core) in cpus.cores.iter().enumerate() {
-            for (thread_num, thread) in core.threads.iter().enumerate() {
-                if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started() {
-                    thread.kill_queue.lock().push_back(super::cpu::KillQueueEntry::Process(id.process));
-
-                    let id = ThreadID { core: core_num, thread: thread_num };
-
-                    assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::KILL_PROCESS_INT), "failed to send interrupt");
-
-                    // inefficient and slow :(
-                    trace!("waiting for {id}");
-                    while !thread.kill_queue.lock().is_empty() {
-                        crate::arch::spin();
-                    }
-                }
-            }
-        }
-    }
-
-    remove_process(id.process);
-}
-
-/// exits current thread, calls exit_current_process if it's the last remaining thread
-pub fn exit_current_thread(thread_id: ThreadID, thread: &CPUThread, regs: &mut crate::arch::Registers) {
-    debug!("exiting current thread");
-    let id = thread.task_queue.lock().current().unwrap().id();
-    let num_threads = get_process(id.process).unwrap().threads.num_entries();
-
-    if num_threads > 1 {
-        manual_context_switch(thread.timer, Some(thread_id), regs, ContextSwitchMode::Remove);
-    } else {
-        exit_current_process(thread_id, thread, regs);
     }
 }

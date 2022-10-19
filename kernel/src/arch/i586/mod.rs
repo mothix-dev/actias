@@ -446,7 +446,7 @@ pub fn init_alloc() {
                         }
                     }
 
-                    get_page_manager().alloc_frame(&mut page_dir, addr, false, true).map_err(|err| {
+                    get_page_manager().alloc_frame(&mut page_dir, addr, false, true, false).map_err(|err| {
                         error!("error allocating page for heap: {err:?}");
                     })?;
                 }
@@ -454,7 +454,7 @@ pub fn init_alloc() {
                 Ok(new_top)
             };
 
-            let expand_inner_task = |current: &crate::task::queue::TaskQueueEntry| {
+            let expand_inner_task = |current: crate::task::queue::TaskQueueEntry| {
                 debug!("expanding in both task and kernel memory");
 
                 for addr in (old_top..new_top).step_by(PAGE_SIZE) {
@@ -504,7 +504,7 @@ pub fn init_alloc() {
 
                     trace!("allocating page");
                     get_page_manager()
-                        .alloc_frame(&mut crate::mm::paging::ProcessOrKernelPageDir::Process(current.id().process), addr, false, true)
+                        .alloc_frame(&mut crate::mm::paging::ProcessOrKernelPageDir::Process(current.id().process), addr, false, true, false)
                         .map_err(|err| {
                             error!("error allocating page for heap: {err:?}");
                         })?;
@@ -629,7 +629,8 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
         .unwrap()
         .task_queue
         .lock()
-        .insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
+        .insert(crate::task::queue::TaskQueueEntry::new(common::types::ProcessID { process, thread: 0 }, 0))
+        .unwrap();
 
     start_context_switching();
 }
@@ -704,7 +705,7 @@ fn test_create_thread(entry_point: unsafe extern "C" fn()) {
 
     let thread_id = crate::task::get_cpus().find_thread_to_add_to().unwrap();
 
-    crate::task::get_cpus().get_thread(thread_id).unwrap().task_queue.lock().insert(crate::task::queue::TaskQueueEntry::new(crate::task::ProcessID { process, thread: 0 }, 0));
+    crate::task::get_cpus().get_thread(thread_id).unwrap().task_queue.lock().insert(crate::task::queue::TaskQueueEntry::new(common::types::ProcessID { process, thread: 0 }, 0));
 
     drop(process_list);
 }*/

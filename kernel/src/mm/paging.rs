@@ -25,7 +25,7 @@ pub enum PagingError {
     BadAddress,
 }
 
-impl fmt::Display for PagingError {
+impl fmt::Debug for PagingError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", match self {
             Self::NoAvailableFrames => "no available frames (out of memory)",
@@ -35,12 +35,6 @@ impl fmt::Display for PagingError {
             Self::BadFrame => "bad frame",
             Self::BadAddress => "address not mapped",
         })
-    }
-}
-
-impl fmt::Debug for PagingError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PagingError: \"{self}\"")
     }
 }
 
@@ -65,6 +59,9 @@ pub struct PageFrame {
 
     /// whether this page should be copied upon attempting to write to it (requires writable flag to be disabled)
     pub copy_on_write: bool,
+
+    /// whether code can be executed from this page. not supported on all platforms
+    pub executable: bool,
 }
 
 impl fmt::Debug for PageFrame {
@@ -75,6 +72,7 @@ impl fmt::Debug for PageFrame {
             .field("user_mode", &self.user_mode)
             .field("writable", &self.writable)
             .field("copy_on_write", &self.copy_on_write)
+            .field("executable", &self.executable)
             .finish()
     }
 }
@@ -357,6 +355,7 @@ where O: FnOnce(&mut [u8]) -> R {
                     user_mode: false,
                     writable: true,
                     copy_on_write: false,
+                    executable: false,
                 }),
             )
             .expect("couldn't remap page");
@@ -381,6 +380,7 @@ where O: FnOnce(&mut [u8]) -> R {
                     user_mode: false,
                     writable: true,
                     copy_on_write: false,
+                    executable: false,
                 }),
             )
             .expect("couldn't remap page");
@@ -426,7 +426,7 @@ impl PageManager {
     /// * `addr` - the virtual address to allocate the frame at. must be page aligned
     /// * `user_mode` - whether the allocated page will be accessible in user mode
     /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool) -> Result<u64, PagingError> {
+    pub fn alloc_frame<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool, executable: bool) -> Result<u64, PagingError> {
         assert!(T::PAGE_SIZE == self.page_size);
 
         assert!(addr % self.page_size == 0, "frame address is not page aligned");
@@ -441,6 +441,7 @@ impl PageManager {
                     user_mode,
                     writable,
                     copy_on_write: false,
+                    executable,
                 };
 
                 trace!("allocating frame {:?} @ virt {:#x}", frame, addr);
@@ -470,7 +471,7 @@ impl PageManager {
     /// * `phys` - the physical address to map the frame to. must also be page aligned
     /// * `user_mode` - whether the allocated page will be accessible in user mode
     /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame_at<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, phys: u64, user_mode: bool, writable: bool) -> Result<(), PagingError> {
+    pub fn alloc_frame_at<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, phys: u64, user_mode: bool, writable: bool, executable: bool) -> Result<(), PagingError> {
         assert!(T::PAGE_SIZE == self.page_size);
 
         assert!(addr % self.page_size == 0, "frame address is not page aligned");
@@ -485,6 +486,7 @@ impl PageManager {
                 user_mode,
                 writable,
                 copy_on_write: false,
+                executable,
             };
 
             trace!("allocating frame {:?} @ {:#x}", frame, addr);
@@ -683,15 +685,6 @@ impl PageDirectory for ProcessOrKernelPageDir {
     }
 }
 
-/*impl ProcessOrKernelPageDir {
-    pub fn inner() -> &dyn PageDirectory {
-        match self {
-            Self::Process(id) => &crate::task::get_process(*id).unwrap().page_directory.task,
-            Self::Kernel => get_kernel_page_dir().lock().inner(),
-        }
-    }
-}*/
-
 pub fn get_page_dir(thread_id: Option<crate::task::cpu::ThreadID>) -> ProcessOrKernelPageDir {
     if let Some(cpus) = crate::task::get_cpus() {
         let thread = cpus.get_thread(thread_id.unwrap_or_else(crate::arch::get_thread_id)).expect("couldn't get CPU thread");
@@ -814,7 +807,7 @@ impl<D: PageDirectory> PageDirectory for FreeablePageDir<D> {
 
 impl<D: PageDirectory> Drop for FreeablePageDir<D> {
     fn drop(&mut self) {
-        free_page_dir(&mut self.0);
+        free_page_dir(&self.0);
     }
 }
 
@@ -833,7 +826,7 @@ impl<D: PageDirectory> FreeablePageDir<D> {
     }
 }
 
-pub fn free_page_dir<D: PageDirectory>(dir: &mut D) {
+pub fn free_page_dir<D: PageDirectory>(dir: &D) {
     for addr in (0..crate::arch::KERNEL_PAGE_DIR_SPLIT).step_by(D::PAGE_SIZE) {
         if let Some(page) = dir.get_page(addr) {
             if page.copy_on_write {
@@ -916,7 +909,7 @@ pub fn try_copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::
                     return Err(());
                 }
 
-                if let Err(err) = get_page_manager().alloc_frame(&mut page_dir, copied_area as usize, false, true) {
+                if let Err(err) = get_page_manager().alloc_frame(&mut page_dir, copied_area as usize, false, true, false) {
                     error!("copy on write failed: {err:?}");
 
                     crate::task::get_process(current_id.process)

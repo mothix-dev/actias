@@ -2,10 +2,7 @@
 
 use super::halt;
 use crate::{
-    task::{
-        get_cpus, nmi_all_other_cpus,
-        switch::{cancel_context_switch_timer, exit_current_thread},
-    },
+    task::{get_cpus, nmi_all_other_cpus, syscalls::exit_current_thread},
     util::debug::FormatHex,
 };
 use aligned::{Aligned, A16};
@@ -24,19 +21,19 @@ use x86::{
 /// IDT flags
 #[bitmask(u8)]
 pub enum IDTFlags {
-    Interrupt16 = Self(0x06),
-    Trap16 = Self(0x07),
-    Task32 = Self(0x05),
-    Interrupt32 = Self(0x0e),
-    Trap32 = Self(0x0f),
-    Ring1 = Self(0x40),
-    Ring2 = Self(0x20),
-    Ring3 = Self(0x60),
-    Present = Self(0x80),
+    Interrupt16 = 0x06,
+    Trap16 = 0x07,
+    Task32 = 0x05,
+    Interrupt32 = 0x0e,
+    Trap32 = 0x0f,
+    Ring1 = 0x40,
+    Ring2 = 0x20,
+    Ring3 = 0x60,
+    Present = 0x80,
 
-    Exception = Self(Self::Interrupt32.0 | Self::Present.0),            // exception
-    Interrupt = Self(Self::Interrupt32.0 | Self::Present.0),            // external/inter-processor interrupt
-    Call = Self(Self::Interrupt32.0 | Self::Present.0 | Self::Ring3.0), // system call
+    Exception = Self::Interrupt32.bits | Self::Present.bits,               // exception
+    Interrupt = Self::Interrupt32.bits | Self::Present.bits,               // external/inter-processor interrupt
+    Call = Self::Interrupt32.bits | Self::Present.bits | Self::Ring3.bits, // system call
 }
 
 /// entry in IDT
@@ -68,7 +65,7 @@ impl IDTEntry {
             isr_low: ((isr as u32) & 0xffff) as u16, // gets address of function pointer, then chops off the top 2 bytes
             isr_high: ((isr as u32) >> 16) as u16,   // upper 2 bytes
             kernel_cs: 0x08,                         // offset of kernel code selector in GDT (see boot.S)
-            attributes: flags.0,
+            attributes: flags.bits,
             reserved: 0,
         }
     }
@@ -466,9 +463,6 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
         nmi_all_other_cpus();
         halt();
     } else if regs.error_code & 0x7 != 0x7 || crate::mm::paging::try_copy_on_write(thread_id, thread, address as usize).is_err() {
-        // we're not in the kernel
-        cancel_context_switch_timer(Some(thread_id));
-
         error!(
             "page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}",
             task_id.unwrap(),
