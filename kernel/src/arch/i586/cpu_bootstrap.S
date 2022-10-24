@@ -70,6 +70,11 @@ _start:
     movl 0x2000 - 12, %eax
     movl %eax, %cr3
 
+    /* enable global pages */
+    movl %cr4, %eax
+    orl $0x80, %eax
+    movl %eax, %cr4
+
     /* enable protected mode and paging */
     movl %cr0, %eax
     orl $0x80010001, %eax

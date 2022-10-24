@@ -6,10 +6,10 @@ use super::{
 };
 use crate::{
     arch::KERNEL_PAGE_DIR_SPLIT,
-    mm::paging::{get_kernel_page_dir, get_page_dir, get_page_manager, PageDirectory},
+    mm::paging::{find_hole, get_kernel_page_dir, get_page_dir, get_page_manager, PageDirectory},
 };
 use alloc::vec::Vec;
-use common::types::{Errno, MmapArguments, MmapFlags, MmapProtection, Result, Syscalls, UnmapArguments};
+use common::types::{Errno, MmapArguments, MmapFlags, MmapProtection, Result, Syscalls};
 use core::mem::size_of;
 use log::{debug, error, trace};
 
@@ -91,6 +91,11 @@ pub fn fork_current_process(thread: &CPUThread, regs: &mut crate::arch::Register
     let mut new_fork_page_dir = crate::arch::PageDirectory::new();
     let mut referenced_pages = Vec::new();
 
+    debug!(
+        "new_orig_page_dir @ {:#x}, new_fork_page_dir @ {:#x}",
+        new_orig_page_dir.tables_physical_addr, new_fork_page_dir.tables_physical_addr
+    );
+
     let page_size = crate::arch::PageDirectory::PAGE_SIZE;
 
     for addr in (0..KERNEL_PAGE_DIR_SPLIT).step_by(page_size) {
@@ -106,6 +111,7 @@ pub fn fork_current_process(thread: &CPUThread, regs: &mut crate::arch::Register
             if page.writable {
                 page.writable = false;
                 page.copy_on_write = true;
+                page.referenced = true;
             }
 
             // add this page's address to our list of referenced pages
@@ -177,7 +183,7 @@ pub fn fork_current_process(thread: &CPUThread, regs: &mut crate::arch::Register
         Some(thread) => match thread
             .task_queue
             .lock()
-            .insert(crate::task::queue::TaskQueueEntry::new(ProcessID { process: process_id, thread: 0 }, 0))
+            .insert(crate::task::queue::TaskQueueEntry::new(ProcessID { process: process_id, thread: 1 }, 0))
         {
             Ok(_) => Ok(process_id),
             Err(err) => {
@@ -194,35 +200,43 @@ pub fn fork_current_process(thread: &CPUThread, regs: &mut crate::arch::Register
 
 pub const MINIMUM_MAPPING_ADDR: usize = 0x4000;
 
-#[allow(unused_variables)]
-fn syscall_mmap(thread_id: ThreadID, thread: &CPUThread, arg0: u32, arg1: u32) -> Result<u32> {
-    #[cfg(target_pointer_width = "64")]
-    let addr = ((arg0 as usize) << 32) | arg1 as usize;
-
-    #[cfg(target_pointer_width = "32")]
-    let addr = arg0 as usize;
-
+fn syscall_mmap(thread_id: ThreadID, thread: &CPUThread, addr: usize) -> Result<u32> {
     if !validate_region(thread_id, addr, size_of::<MmapArguments>()) {
         Err(Errno::BadAddress)
     } else {
         let page_size = crate::arch::PageDirectory::PAGE_SIZE;
-        let args = unsafe { &mut *(addr as *mut u8 as *mut MmapArguments) };
+        let mut args = unsafe { &mut *(addr as *mut u8 as *mut MmapArguments) };
 
+        if (args.flags & MmapFlags::Anonymous).bits() == 0 && args.length == 0 {
+            args.length = crate::mm::shared::SHARED_MEMORY_AREAS
+                .lock()
+                .get(args.id as usize)
+                .ok_or(Errno::InvalidArgument)?
+                .physical_addresses
+                .len() as u64
+                * page_size as u64;
+        }
+
+        // validate arguments
         if args.length == 0 || args.address < MINIMUM_MAPPING_ADDR as u64 || u64::MAX - args.address < args.length {
+            trace!("mmap: bad args {args:?}");
             return Err(Errno::InvalidArgument);
         }
 
+        // make sure addresses can fit in a usize
         let mut start_addr: usize = args.address.try_into().map_err(|_| Errno::InvalidArgument)?;
         let mut end_addr: usize = (args.address + (args.length - 1)).try_into().map_err(|_| Errno::InvalidArgument)?;
 
         let id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
 
         if (args.flags & MmapFlags::Fixed).bits() > 0 || (args.flags & MmapFlags::FixedNoReplace).bits() > 0 {
-            // make sure address is page aligned if fixed
+            // make sure address is page aligned if moving the address around isn't allowed
             if start_addr % page_size != 0 || end_addr % page_size != 0 {
+                trace!("mmap: fixed flag set and address isn't aligned");
                 return Err(Errno::InvalidArgument);
             }
         } else {
+            // round addresses to nearest multiple of page size, ensuring the resulting region completely covers the provided region
             start_addr = (start_addr / page_size) * page_size;
             end_addr = (end_addr / page_size) * page_size + (page_size - 1); // - 1 to account for top of address space
 
@@ -230,132 +244,153 @@ fn syscall_mmap(thread_id: ThreadID, thread: &CPUThread, arg0: u32, arg1: u32) -
 
             let process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
 
-            if let Some(hole) = process.page_directory.find_hole(start_addr, KERNEL_PAGE_DIR_SPLIT, len) {
+            // if this mapping would overwrite existing memory, try to find somewhere where it wouldn't
+            if let Some(hole) = find_hole(&process.page_directory, start_addr, KERNEL_PAGE_DIR_SPLIT, len) {
                 start_addr = hole;
                 end_addr = hole + len;
-            } else if let Some(hole) = process.page_directory.find_hole(MINIMUM_MAPPING_ADDR, start_addr, len) {
+            } else if let Some(hole) = find_hole(&process.page_directory, MINIMUM_MAPPING_ADDR, start_addr, len) {
                 start_addr = hole;
                 end_addr = hole + len;
             } else {
+                // we can't, give up
                 return Err(Errno::OutOfMemory);
             }
         }
 
+        // make sure we're not touching kernel memory
         if start_addr >= KERNEL_PAGE_DIR_SPLIT || end_addr >= KERNEL_PAGE_DIR_SPLIT {
+            trace!("mmap: aligned area ({start_addr:#x} - {end_addr:#x}) is in kernel memory");
             return Err(Errno::InvalidArgument);
         }
 
         debug!("mapping memory ({start_addr:#x} - {end_addr:#x})");
 
-        if (args.flags & MmapFlags::Anonymous).bits() > 0 {
-            // anonymous flag is set, map in new memory
+        if (args.flags & MmapFlags::FixedNoReplace).bits() > 0 {
+            let process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
 
+            // make sure pages won't be replaced here
             for addr in (start_addr..=end_addr).step_by(page_size) {
-                let mut process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
-                if let Some(page) = process.page_directory.get_page(addr) {
-                    if (args.flags & MmapFlags::FixedNoReplace).bits() > 0 {
-                        // can't replace pages!
-                        return Err(Errno::Exists);
-                    } else if page.copy_on_write {
-                        crate::mm::paging::PAGE_REF_COUNTER.lock().remove_reference(page.addr);
-                    } else {
-                        process.page_directory.set_page(addr, None).map_err(|_| Errno::OutOfMemory)?;
-                    }
+                if process.page_directory.get_page(addr).is_some() {
+                    // can't replace pages!
+                    return Err(Errno::Exists);
                 }
-                drop(process); // release lock
+            }
+        }
 
-                get_page_manager()
-                    .alloc_frame(
-                        &mut crate::mm::paging::ProcessOrKernelPageDir::Process(id.process),
+        let map_memory = |physical_addresses: &[u64], shared: bool| -> Result<()> {
+            for (index, addr) in (start_addr..=end_addr).step_by(page_size).enumerate() {
+                if index > physical_addresses.len() {
+                    break;
+                }
+
+                get_process(id.process)
+                    .ok_or(Errno::NoSuchProcess)?
+                    .page_directory
+                    .set_page(
                         addr,
-                        true,
-                        (args.protection & MmapProtection::Write).bits() > 0,
-                        (args.protection & MmapProtection::Execute).bits() > 0,
+                        Some(crate::mm::paging::PageFrame {
+                            addr: physical_addresses[index],
+                            present: true,
+                            user_mode: true,
+                            writable: (args.protection & MmapProtection::Write).bits() > 0,
+                            executable: (args.protection & MmapProtection::Execute).bits() > 0,
+                            referenced: shared,
+                            shared,
+                            ..Default::default()
+                        }),
                     )
                     .map_err(|_| Errno::OutOfMemory)?;
             }
+
+            Ok(())
+        };
+
+        let num_pages = (end_addr - start_addr + 1) / page_size; // how many pages do we want to map?
+
+        if (args.flags & MmapFlags::Anonymous).bits() > 0 {
+            // anonymous flag is set, map in new memory
+
+            let mut physical_addresses = Vec::new();
+            physical_addresses.try_reserve(num_pages).map_err(|_| Errno::OutOfMemory)?;
+
+            // allocate new memory
+            for _i in 0..num_pages {
+                match get_page_manager().alloc_frame() {
+                    Ok(addr) => physical_addresses.push(addr),
+                    Err(_) => {
+                        // free memory we're not gonna be using
+                        for addr in physical_addresses.iter() {
+                            get_page_manager().set_frame_free(*addr);
+                        }
+
+                        return Err(Errno::OutOfMemory);
+                    }
+                }
+            }
+
+            map_memory(&physical_addresses, false)?;
 
             // zero out new mapping
             let slice = unsafe { core::slice::from_raw_parts_mut(start_addr as *mut u8, end_addr - start_addr) };
             for i in slice.iter_mut() {
                 *i = 0;
             }
-
-            args.address = start_addr as u64;
-            args.length = (end_addr - start_addr) as u64;
-
-            Ok(0)
         } else {
-            // anonymous flag is unset, map in existing shared region
+            let mut shm_lock = crate::mm::shared::SHARED_MEMORY_AREAS.lock();
+            let shm = shm_lock.get_mut(args.id as usize).ok_or(Errno::InvalidArgument)?;
 
-            todo!();
-        }
-    }
-}
+            map_memory(&shm.physical_addresses, true)?;
 
-#[allow(unused_variables)]
-fn syscall_unmap(thread_id: ThreadID, thread: &CPUThread, arg0: u32, arg1: u32) -> Result<u32> {
-    #[cfg(target_pointer_width = "64")]
-    let addr = ((arg0 as usize) << 32) | arg1 as usize;
-
-    #[cfg(target_pointer_width = "32")]
-    let addr = arg0 as usize;
-
-    if !validate_region(thread_id, addr, size_of::<UnmapArguments>()) {
-        Err(Errno::BadAddress)
-    } else {
-        let page_size = crate::arch::PageDirectory::PAGE_SIZE;
-        let page_size_u64 = crate::arch::PageDirectory::PAGE_SIZE as u64;
-        let args = unsafe { *(addr as *const u8 as *const UnmapArguments) };
-
-        if args.length == 0 || args.address < MINIMUM_MAPPING_ADDR as u64 || u64::MAX - args.address < args.length {
-            return Err(Errno::InvalidArgument);
+            shm.references += num_pages;
         }
 
-        let mut start_addr: usize = args.address.try_into().map_err(|_| Errno::InvalidArgument)?;
-        let mut end_addr: usize = (args.address + (args.length - 1)).try_into().map_err(|_| Errno::InvalidArgument)?;
-
-        start_addr = (start_addr / page_size) * page_size;
-        end_addr = (end_addr / page_size) * page_size + (page_size - 1); // - 1 to account for top of address space
-
-        if start_addr >= KERNEL_PAGE_DIR_SPLIT || end_addr >= KERNEL_PAGE_DIR_SPLIT {
-            return Err(Errno::InvalidArgument);
-        }
-
-        debug!("unmapping memory ({start_addr:#x} - {end_addr:#x})");
-
-        let id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
-        let mut process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
-
-        for addr in (start_addr..=end_addr).step_by(page_size) {
-            if let Some(page) = process.page_directory.get_page(addr) {
-                if page.copy_on_write {
-                    crate::mm::paging::PAGE_REF_COUNTER.lock().remove_reference(page.addr);
-                } else {
-                    get_page_manager().set_frame_free(page.addr);
-                }
-
-                process.page_directory.set_page(addr, None).map_err(|_| Errno::OutOfMemory)?;
-            }
-        }
+        args.address = start_addr as u64;
+        args.length = (end_addr - start_addr) as u64;
 
         Ok(0)
     }
 }
 
-#[allow(unused_variables)]
-fn syscall_getpid(thread_id: ThreadID, thread: &CPUThread, arg0: u32, arg1: u32) -> Result<u32> {
-    #[cfg(target_pointer_width = "64")]
-    let addr = ((arg0 as usize) << 32) | arg1 as usize;
+fn syscall_unmap(thread: &CPUThread, address: usize, length: usize) -> Result<u32> {
+    let page_size = crate::arch::PageDirectory::PAGE_SIZE;
 
-    #[cfg(target_pointer_width = "32")]
-    let addr = arg0 as usize;
+    // validate arguments
+    if length == 0 || usize::MAX - address < length {
+        trace!("unmap: addr {address:#x} + length {length:#x} would overflow");
+        return Err(Errno::InvalidArgument);
+    }
 
+    // round addresses to nearest multiple of page size
+    let start_addr = (address / page_size) * page_size;
+    let end_addr = ((address + (length - 1)) / page_size) * page_size + (page_size - 1); // - 1 to account for top of address space
+
+    // make sure we're not touching kernel memory
+    if start_addr >= KERNEL_PAGE_DIR_SPLIT || end_addr >= KERNEL_PAGE_DIR_SPLIT {
+        trace!("unmap: aligned area ({start_addr:#x} - {end_addr:#x}) is in kernel memory");
+        return Err(Errno::InvalidArgument);
+    }
+
+    debug!("unmapping memory ({start_addr:#x} - {end_addr:#x})");
+
+    let id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
+    let mut process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
+
+    // unmap memory
+    for addr in (start_addr..=end_addr).step_by(page_size) {
+        if let Some(page) = process.page_directory.get_page(addr) {
+            process.page_directory.set_page(addr, None).map_err(|_| Errno::OutOfMemory)?;
+
+            crate::mm::paging::free_page(page);
+        }
+    }
+
+    Ok(0)
+}
+
+fn syscall_getpid(thread_id: ThreadID, thread: &CPUThread, addr: usize) -> Result<u32> {
     if !validate_region(thread_id, addr, size_of::<ProcessID>()) {
         Err(Errno::BadAddress)
     } else {
-        let page_size = crate::arch::PageDirectory::PAGE_SIZE;
-
         let id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
 
         unsafe {
@@ -364,6 +399,47 @@ fn syscall_getpid(thread_id: ThreadID, thread: &CPUThread, arg0: u32, arg1: u32)
 
         Ok(0)
     }
+}
+
+fn syscall_share_memory(thread_id: ThreadID, thread: &CPUThread, address: usize, length: usize) -> Result<u32> {
+    let page_size = crate::arch::PageDirectory::PAGE_SIZE;
+
+    // validate arguments
+    if length == 0 || usize::MAX - address < length {
+        trace!("share_memory: addr {address:#x} + length {length:#x} would overflow");
+        return Err(Errno::InvalidArgument);
+    }
+
+    let start_addr = (address / page_size) * page_size;
+    let end_addr = ((address + (length - 1)) / page_size) * page_size + (page_size - 1);
+
+    if start_addr >= KERNEL_PAGE_DIR_SPLIT || end_addr >= KERNEL_PAGE_DIR_SPLIT {
+        trace!("share_memory: aligned area ({start_addr:#x} - {end_addr:#x}) is in kernel memory");
+        return Err(Errno::InvalidArgument);
+    }
+
+    let mut phys_addresses = Vec::new();
+    phys_addresses.try_reserve((end_addr - start_addr + 1) / page_size).map_err(|_| Errno::OutOfMemory)?;
+
+    let id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
+
+    for addr in (start_addr..=end_addr).step_by(page_size) {
+        let mut page = get_process(id.process).ok_or(Errno::NoSuchProcess)?.page_directory.get_page(addr).ok_or(Errno::BadAddress)?;
+
+        if page.shared {
+            return Err(Errno::BadAddress);
+        } else if !page.writable && page.copy_on_write && page.referenced {
+            crate::mm::paging::copy_on_write(thread_id, thread, addr)?;
+            page = get_process(id.process).ok_or(Errno::NoSuchProcess)?.page_directory.get_page(addr).ok_or(Errno::BadAddress)?;
+        }
+
+        phys_addresses.push(page.addr);
+
+        page.shared = true;
+        get_process(id.process).ok_or(Errno::NoSuchProcess)?.page_directory.set_page(addr, Some(page)).map_err(|_| Errno::OutOfMemory)?;
+    }
+
+    crate::mm::shared::share_area(&phys_addresses)
 }
 
 fn validate_region(thread_id: ThreadID, start: usize, len: usize) -> bool {
@@ -382,7 +458,7 @@ fn validate_region(thread_id: ThreadID, start: usize, len: usize) -> bool {
 }
 
 /// low-level syscall handler. handles the parsing, execution, and error handling of syscalls
-pub fn syscall_handler(regs: &mut crate::arch::Registers, num: u32, arg0: u32, arg1: u32, _arg2: u32) {
+pub fn syscall_handler(regs: &mut crate::arch::Registers, num: u32, arg0: usize, arg1: usize, _arg2: usize) {
     let thread_id = crate::arch::get_thread_id();
     let cpus = get_cpus().expect("CPUs not initialized");
     let thread = cpus.get_thread(thread_id).expect("couldn't get CPU thread");
@@ -398,7 +474,9 @@ pub fn syscall_handler(regs: &mut crate::arch::Registers, num: u32, arg0: u32, a
         }
     }
 
-    match Syscalls::try_from(num) {
+    let syscall = Syscalls::try_from(num);
+    trace!("(CPU {thread_id}) process got syscall {syscall:?}");
+    match syscall {
         Ok(Syscalls::IsComputerOn) => regs.syscall_return(Ok(1)),
         Ok(Syscalls::ExitProcess) => exit_current_process(thread_id, thread, regs),
         Ok(Syscalls::ExitThread) => exit_current_thread(thread_id, thread, regs),
@@ -411,9 +489,10 @@ pub fn syscall_handler(regs: &mut crate::arch::Registers, num: u32, arg0: u32, a
             let res = fork_current_process(thread, regs);
             regs.syscall_return(res);
         }
-        Ok(Syscalls::Mmap) => regs.syscall_return(syscall_mmap(thread_id, thread, arg0, arg1)),
-        Ok(Syscalls::Unmap) => regs.syscall_return(syscall_unmap(thread_id, thread, arg0, arg1)),
-        Ok(Syscalls::GetProcessID) => regs.syscall_return(syscall_getpid(thread_id, thread, arg0, arg1)),
+        Ok(Syscalls::Mmap) => regs.syscall_return(syscall_mmap(thread_id, thread, arg0)),
+        Ok(Syscalls::Unmap) => regs.syscall_return(syscall_unmap(thread, arg0, arg1)),
+        Ok(Syscalls::GetProcessID) => regs.syscall_return(syscall_getpid(thread_id, thread, arg0)),
+        Ok(Syscalls::ShareMemory) => regs.syscall_return(syscall_share_memory(thread_id, thread, arg0, arg1)),
         Err(err) => {
             // invalid syscall, yoink the thread
             let pid = thread.task_queue.lock().current().unwrap().id();

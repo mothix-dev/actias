@@ -8,7 +8,7 @@ use crate::{
     arch::paging::{is_page_dir_current, PageTable},
     mm::{
         heap::{ExpandAllocCallback, ExpandFreeCallback, ALLOCATOR},
-        paging::{get_kernel_page_dir, get_page_manager},
+        paging::{get_kernel_page_dir, get_page_manager, PageFrame},
     },
     task::{
         cpu::{ThreadID, CPU},
@@ -32,7 +32,7 @@ pub const MAX_STACK_FRAMES: usize = 1024;
 pub const HEAP_RESERVED: usize = PAGE_SIZE * 4;
 
 // reasonable stack size
-pub const STACK_SIZE: usize = 0x1000 * 4;
+pub const STACK_SIZE: usize = 0x1000 * 8;
 
 fn cpuid_reader(leaf: u32, subleaf: u32) -> CpuIdResult {
     let eax: u32;
@@ -284,7 +284,7 @@ pub fn halt_until_interrupt() {
 #[inline(always)]
 pub fn spin() {
     // waste cycles here so it's easier to acquire locks
-    for _i in 0..16 {
+    for _i in 0..32 {
         unsafe {
             asm!("pause");
         }
@@ -446,9 +446,24 @@ pub fn init_alloc() {
                         }
                     }
 
-                    get_page_manager().alloc_frame(&mut page_dir, addr, false, true, false).map_err(|err| {
+                    let phys_addr = get_page_manager().alloc_frame().map_err(|err| {
                         error!("error allocating page for heap: {err:?}");
                     })?;
+
+                    page_dir
+                        .set_page(
+                            addr,
+                            Some(PageFrame {
+                                addr: phys_addr,
+                                present: true,
+                                writable: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .map_err(|err| {
+                            get_page_manager().set_frame_free(phys_addr);
+                            error!("error allocating page for heap: {err:?}");
+                        })?;
                 }
 
                 Ok(new_top)
@@ -503,9 +518,27 @@ pub fn init_alloc() {
                     drop(process);
 
                     trace!("allocating page");
-                    get_page_manager()
-                        .alloc_frame(&mut crate::mm::paging::ProcessOrKernelPageDir::Process(current.id().process), addr, false, true, false)
+                    let phys_addr = get_page_manager().alloc_frame().map_err(|err| {
+                        error!("error allocating page for heap: {err:?}");
+                    })?;
+
+                    get_process(current.id().process)
+                        .ok_or_else(|| {
+                            get_page_manager().set_frame_free(phys_addr);
+                            error!("error allocating page for heap: couldn't get process");
+                        })?
+                        .page_directory
+                        .set_page(
+                            addr,
+                            Some(PageFrame {
+                                addr: phys_addr,
+                                present: true,
+                                writable: true,
+                                ..Default::default()
+                            }),
+                        )
                         .map_err(|err| {
+                            get_page_manager().set_frame_free(phys_addr);
                             error!("error allocating page for heap: {err:?}");
                         })?;
                 }
@@ -629,7 +662,7 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
         .unwrap()
         .task_queue
         .lock()
-        .insert(crate::task::queue::TaskQueueEntry::new(common::types::ProcessID { process, thread: 0 }, 0))
+        .insert(crate::task::queue::TaskQueueEntry::new(common::types::ProcessID { process, thread: 1 }, 0))
         .unwrap();
 
     start_context_switching();

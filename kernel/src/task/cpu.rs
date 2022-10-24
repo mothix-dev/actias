@@ -135,7 +135,10 @@ impl CPUCore {
         let mut num_tasks = usize::MAX;
 
         for (id, thread) in self.threads.iter().enumerate() {
-            let cur_num_tasks = thread.task_queue.lock().len();
+            let cur_num_tasks = {
+                let queue = thread.task_queue.lock();
+                queue.len() + usize::from(queue.current().is_some())
+            };
             if cur_num_tasks < num_tasks {
                 thread_id = Some(id);
                 num_tasks = cur_num_tasks;

@@ -13,7 +13,7 @@
 /* The kernel is linked to run at 3.5GB */
 LINKED_BASE = 0xe0000000
 
-STACK_SIZE = 0x1000 * 4
+STACK_SIZE = 0x1000 * 8
 
 /* === Multiboot Header === */
 MULTIBOOT_PAGE_ALIGN  =  (1<<0)
@@ -51,6 +51,11 @@ start:
     push $init_pt - LINKED_BASE
     call x86_prep_page_table - LINKED_BASE
     add 4, %esp
+
+    /* enable global pages */
+    mov %cr4, %eax
+    or $0x80, %eax
+    mov %eax, %cr4
 
     /* Enable paging */
     mov $page_directory - LINKED_BASE, %eax

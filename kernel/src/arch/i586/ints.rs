@@ -10,7 +10,7 @@ use bitmask_enum::bitmask;
 use common::types::{Errno, Result};
 use core::{arch::asm, fmt};
 use interrupt_macro::*;
-use log::{debug, error, info};
+use log::{debug, error, info, trace, warn};
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
     io::{inb, outb},
@@ -280,6 +280,7 @@ impl InterruptRegisters {
     }
 
     pub fn syscall_return(&mut self, result: Result<u32>) {
+        trace!("syscall returned {result:?}");
         match result {
             Ok(num) => {
                 self.eax = num;
@@ -324,6 +325,8 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
 
     let in_kernel = thread.enter_kernel();
 
+    super::set_flags(flags);
+
     let task_id = thread.task_queue.lock().current().map(|c| c.id());
 
     if in_kernel || task_id.is_none() {
@@ -352,7 +355,6 @@ unsafe fn generic_exception(name: &str, regs: &mut InterruptRegisters) {
     }
 
     thread.leave_kernel();
-    super::set_flags(flags);
 }
 
 /// exception handler for divide by zero
@@ -369,7 +371,6 @@ unsafe fn breakpoint_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn nmi_handler(_regs: &InterruptRegisters) {
-    use log::warn;
     warn!("CPU {} got NMI", super::get_thread_id());
     loop {
         asm!("cli; hlt");
@@ -450,6 +451,8 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
 
     let in_kernel = thread.enter_kernel();
 
+    super::set_flags(flags);
+
     let mut address: u32;
     asm!("mov {0}, cr2", out(reg) address);
 
@@ -462,7 +465,11 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
 
         nmi_all_other_cpus();
         halt();
-    } else if regs.error_code & 0x7 != 0x7 || crate::mm::paging::try_copy_on_write(thread_id, thread, address as usize).is_err() {
+    } else if regs.error_code & 0x7 != 0x7 || !crate::mm::paging::copy_on_write(thread_id, thread, address as usize).unwrap_or_else(|err| {
+        error!("copy on write failed: {err:?}");
+
+        false
+    }) {
         error!(
             "page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}",
             task_id.unwrap(),
@@ -477,7 +484,6 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
     }
 
     thread.leave_kernel();
-    super::set_flags(flags);
 }
 
 /// exception handler for x87 floating point exception
@@ -536,7 +542,7 @@ unsafe fn irq0_handler(regs: &mut InterruptRegisters) {
 
     // irq0 is always timer
     if let Some(timer) = crate::timer::get_timer(PIT_TIMER_NUM) {
-        timer.try_tick(regs);
+        timer.try_tick(regs, was_in_kernel);
     }
 
     if !was_in_kernel {
@@ -811,21 +817,20 @@ unsafe fn apic_timer_handler(regs: &mut InterruptRegisters) {
     let timer = thread.timer;
 
     if let Some(timer) = crate::timer::get_timer(timer) {
-        timer.try_tick(regs);
+        timer.try_tick(regs, was_in_kernel);
     }
 
     if !was_in_kernel {
         thread.leave_kernel();
     }
-
-    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi();
 }
 
 #[interrupt(x86)]
 unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
     debug!("apic spurious interrupt");
 
-    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi();
 }
 
 #[interrupt(x86)]
@@ -834,13 +839,12 @@ unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
     let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
     let was_in_kernel = thread.enter_kernel();
 
-    crate::task::process_page_updates();
+    crate::task::process_page_updates(thread_id);
 
     if !was_in_kernel {
         thread.leave_kernel();
     }
-
-    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi();
 }
 
 #[interrupt(x86)]
@@ -854,13 +858,12 @@ unsafe fn kill_process_handler(regs: &mut InterruptRegisters) {
     if !was_in_kernel {
         thread.leave_kernel();
     }
-
-    super::apic::get_local_apic().expect("local APIC not mapped").eoi.write(0);
+    super::apic::get_local_apic().expect("local APIC not mapped").eoi();
 }
 
 #[interrupt(x86)]
 unsafe fn syscall_handler(regs: &mut InterruptRegisters) {
-    crate::task::syscalls::syscall_handler(regs, regs.eax, regs.ebx, regs.ecx, regs.edx);
+    crate::task::syscalls::syscall_handler(regs, regs.eax, regs.ebx as usize, regs.ecx as usize, regs.edx as usize);
 }
 
 /// how many entries do we want in our IDT

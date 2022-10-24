@@ -2,7 +2,7 @@
 
 use crate::{
     arch::{KERNEL_PAGE_DIR_SPLIT, STACK_SIZE},
-    mm::paging::{free_page_dir, get_page_dir, get_page_manager, map_memory, map_memory_from, FreeablePageDir, PageDirectory},
+    mm::paging::{free_page_dir, get_page_dir, get_page_manager, map_memory, map_memory_from, FreeablePageDir, PageDirectory, PageFrame},
 };
 use common::types::{Errno, Result};
 use core::mem::size_of;
@@ -122,10 +122,24 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
 
                     for addr in ((vaddr / D::PAGE_SIZE) * D::PAGE_SIZE..=((vaddr + memsz) / D::PAGE_SIZE) * D::PAGE_SIZE).step_by(D::PAGE_SIZE) {
                         if process_page_dir.get_page(addr).is_none() {
-                            // make sure there's actually something here so we don't deadlock if we need to allocate something and the page manager is busy
-                            process_page_dir.set_page(addr, None).unwrap();
+                            let phys = get_page_manager().alloc_frame().map_err(|_| Errno::OutOfMemory)?;
 
-                            let phys = get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true, ph.is_executable()).unwrap();
+                            process_page_dir
+                                .set_page(
+                                    addr,
+                                    Some(PageFrame {
+                                        addr: phys,
+                                        user_mode: true,
+                                        writable: true,
+                                        executable: ph.is_executable(),
+                                        present: true,
+                                        ..Default::default()
+                                    }),
+                                )
+                                .map_err(|_| {
+                                    get_page_manager().set_frame_free(phys);
+                                    Errno::OutOfMemory
+                                })?;
 
                             // clear page so we don't leak any information
                             unsafe {
@@ -180,8 +194,23 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
         }
 
         for addr in (KERNEL_PAGE_DIR_SPLIT - STACK_SIZE..KERNEL_PAGE_DIR_SPLIT).step_by(D::PAGE_SIZE) {
-            process_page_dir.set_page(addr, None).unwrap();
-            get_page_manager().alloc_frame(&mut process_page_dir, addr, true, true, false).unwrap();
+            let phys = get_page_manager().alloc_frame().map_err(|_| Errno::OutOfMemory)?;
+
+            process_page_dir
+                .set_page(
+                    addr,
+                    Some(PageFrame {
+                        addr: phys,
+                        user_mode: true,
+                        writable: true,
+                        present: true,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(|_| {
+                    get_page_manager().set_frame_free(phys);
+                    Errno::OutOfMemory
+                })?;
         }
 
         let entry_point = elf.entry.try_into().map_err(|_| Errno::ValueOverflow)?;
@@ -288,10 +317,9 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                 return Err(err);
             }
         }
-        process.threads.clear();
+        process.remove_all_threads();
         process
-            .threads
-            .add(crate::task::Thread {
+            .add_thread(crate::task::Thread {
                 registers: crate::arch::Registers::new_task(entry_point, stack_end),
                 priority: 0,
                 cpu: None,

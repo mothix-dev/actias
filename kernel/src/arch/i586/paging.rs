@@ -71,6 +71,8 @@ impl From<PageTableEntry> for PageFrame {
             writable: flags & PageTableFlags::ReadWrite.bits > 0,
             copy_on_write: flags & PageTableFlags::CopyOnWrite.bits > 0,
             executable: true,
+            referenced: flags & PageTableFlags::Referenced.bits > 0,
+            shared: flags & PageTableFlags::Shared.bits > 0,
         }
     }
 }
@@ -95,6 +97,14 @@ impl TryFrom<PageFrame> for PageTableEntry {
 
         if frame.copy_on_write {
             flags |= PageTableFlags::CopyOnWrite;
+        }
+
+        if frame.referenced {
+            flags |= PageTableFlags::Referenced;
+        }
+
+        if frame.shared {
+            flags |= PageTableFlags::Shared;
         }
 
         Ok(PageTableEntry::new(frame.addr.try_into().map_err(|_| ())?, flags))
@@ -151,56 +161,70 @@ pub enum PageTableFlags {
     /// tells cpu to not invalidate this page table entry in cache when page tables are reloaded
     Global = 1 << 8,
 
-    /// if this bit is set and the present bit is not, the page will be copied into a new page when written to
+    /// if this bit is set and the writable bit is not, the page will be copied into a new page when written to
     CopyOnWrite = 1 << 9,
+
+    /// signifies that this page may have more than one reference and should be cleaned up with the reference counter
+    Referenced = 1 << 10,
+
+    /// this page has been shared from another process
+    Shared = 1 << 11,
 }
 
 impl fmt::Display for PageTableFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "PageTableFlags {{")?;
 
-        if self.bits & (1 << 0) > 0 {
+        if (*self & Self::Present).bits() > 0 {
             write!(f, " present,")?;
         }
 
-        if self.bits & (1 << 1) > 0 {
+        if (*self & Self::ReadWrite).bits() > 0 {
             write!(f, " read/write")?;
         } else {
             write!(f, " read only")?;
         }
 
-        if self.bits & (1 << 2) > 0 {
+        if (*self & Self::UserSupervisor).bits() > 0 {
             write!(f, ", user + supervisor mode")?;
         } else {
             write!(f, ", supervisor mode")?;
         }
 
-        if self.bits & (1 << 3) > 0 {
+        if (*self & Self::PageWriteThru).bits() > 0 {
             write!(f, ", write thru")?;
         }
 
-        if self.bits & (1 << 4) > 0 {
+        if (*self & Self::PageCacheDisable).bits() > 0 {
             write!(f, ", cache disable")?;
         }
 
-        if self.bits & (1 << 5) > 0 {
+        if (*self & Self::Accessed).bits() > 0 {
             write!(f, ", accessed")?;
         }
 
-        if self.bits & (1 << 6) > 0 {
+        if (*self & Self::Dirty).bits() > 0 {
             write!(f, ", dirty")?;
         }
 
-        if self.bits & (1 << 7) > 0 {
+        if (*self & Self::PageAttributeTable).bits() > 0 {
             write!(f, ", page attribute table")?;
         }
 
-        if self.bits & (1 << 8) > 0 {
+        if (*self & Self::Global).bits() > 0 {
             write!(f, ", global")?;
         }
 
-        if self.bits & (1 << 9) > 0 {
+        if (*self & Self::CopyOnWrite).bits() > 0 {
             write!(f, ", copy on write")?;
+        }
+
+        if (*self & Self::Referenced).bits() > 0 {
+            write!(f, ", reference counted")?;
+        }
+
+        if (*self & Self::Shared).bits() > 0 {
+            write!(f, ", shared")?;
         }
 
         write!(f, " }}")
@@ -438,11 +462,7 @@ impl fmt::Debug for PageDir<'_> {
 static mut CURRENT_PAGE_DIR: Option<&'static PageDir> = None;
 
 pub fn is_page_dir_current(page_dir: &PageDir) -> bool {
-    if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
-        page_dir.tables_physical_addr == current.tables_physical_addr
-    } else {
-        false
-    }
+    page_dir.tables_physical_addr == unsafe { x86::controlregs::cr3() as u32 }
 }
 
 impl<'a> PageDir<'a> {
@@ -517,7 +537,11 @@ impl<'a> PageDir<'a> {
 
         trace!("adding a new page table for virt {:#x} @ {:#x} (phys {:#x})", addr, table as *mut _ as usize, physical_addr);
 
-        self.tables_physical[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor);
+        if idx >= KERNEL_PAGE_DIR_SPLIT / PAGE_SIZE / 1024 {
+            self.tables_physical[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor | PageDirFlags::Global);
+        } else {
+            self.tables_physical[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor);
+        }
 
         trace!("physical entry is {:#x} ({:?})", self.tables_physical[idx].0, self.tables_physical[idx]);
 
@@ -575,16 +599,43 @@ impl<'a> PageDirectory for PageDir<'a> {
 
         let table_idx = (addr / 1024) as usize;
 
-        //trace!("idx is {:?}", table_idx);
-
         if let Some(table) = self.tables[table_idx].as_ref() {
-            //trace!("got table {:?}", table);
             let entry = table.table.entries[(addr % 1024) as usize];
 
             if entry.is_unused() {
                 None
             } else {
                 Some(entry.into())
+            }
+        } else {
+            None
+        }
+    }
+
+    fn is_unused(&self, mut addr: usize) -> bool {
+        addr /= PAGE_SIZE;
+
+        let table_idx = (addr / 1024) as usize;
+
+        if let Some(table) = self.tables[table_idx].as_ref() {
+            table.table.entries[(addr % 1024) as usize].is_unused()
+        } else {
+            true
+        }
+    }
+
+    fn virt_to_phys(&self, mut virt: usize) -> Option<u64> {
+        virt /= PAGE_SIZE;
+
+        let table_idx = (virt / 1024) as usize;
+
+        if let Some(table) = self.tables[table_idx].as_ref() {
+            let entry = table.table.entries[(virt % 1024) as usize];
+
+            if entry.is_unused() {
+                None
+            } else {
+                Some(entry.get_address() as u64)
             }
         } else {
             None
@@ -617,32 +668,30 @@ impl<'a> PageDirectory for PageDir<'a> {
                     .expect("new page table isn't mapped into kernel memory")
             };
 
-            self.tables_physical[table_idx] = PageDirEntry::new(phys as u32, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor);
-
-            self.tables[table_idx] = unsafe {
-                Some(TableRef {
-                    table: &mut *(ptr as *mut PageTable),
-                    can_free: true,
-                })
-            };
+            self.add_page_table((addr * PAGE_SIZE).try_into().unwrap(), unsafe { &mut *(ptr as *mut PageTable) }, phys.try_into().unwrap(), true);
         }
 
-        self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] = if let Some(page) = page {
+        let mut entry = if let Some(page) = page {
             page.try_into().map_err(|_| PagingError::BadFrame)?
         } else {
             PageTableEntry::new_unused()
         };
 
+        if addr >= KERNEL_PAGE_DIR_SPLIT {
+            entry.set_flags(PageTableFlags {
+                bits: entry.get_flags() | PageTableFlags::Global.bits,
+            });
+        }
+
+        self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize] = entry;
+
         //trace!("table is now {:?}", self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize]);
 
         // invalidate this page in the tlb if we're modifying the current page directory
-        if let Some(current) = unsafe { CURRENT_PAGE_DIR.as_ref() } {
-            // prolly not the best way to compare two different page directories, but it works
-            if self.tables_physical_addr == current.tables_physical_addr {
-                trace!("flushing {:#x} in tlb", addr * PAGE_SIZE);
-                unsafe {
-                    flush(addr * PAGE_SIZE);
-                }
+        if is_page_dir_current(self) {
+            trace!("flushing {:#x} in tlb", addr * PAGE_SIZE);
+            unsafe {
+                flush(addr * PAGE_SIZE);
             }
         }
 
@@ -660,12 +709,12 @@ impl<'a> PageDirectory for PageDir<'a> {
         asm!(
             "cli", // we CANNOT afford for this code to be interrupted
             "mov cr3, {0}",
-            "mov {1}, cr0",
+            /*"mov {1}, cr0",
             "or {1}, 0x80000000",
-            "mov cr0, {1}",
+            "mov cr0, {1}",*/
 
             in(reg) self.tables_physical_addr,
-            out(reg) _,
+            //out(reg) _,
         );
 
         // effectively clone the reference to this page directory and put it in CURRENT_PAGE_DIR

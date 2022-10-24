@@ -11,6 +11,7 @@ pub enum Syscalls {
     Mmap,
     Unmap,
     GetProcessID,
+    ShareMemory,
 }
 
 #[repr(C)]
@@ -30,16 +31,6 @@ pub struct MmapArguments {
 
     /// flags describing how this mapping should work
     pub flags: MmapFlags,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct UnmapArguments {
-    /// the starting address to unmap from
-    pub address: u64,
-
-    /// the length of the range to unmap
-    pub length: u64,
 }
 
 #[bitmask(u8)]

@@ -283,6 +283,10 @@ impl LocalAPIC {
             Ok(())
         }
     }
+
+    pub fn eoi(&mut self) {
+        self.eoi.write(0);
+    }
 }
 
 #[derive(Debug)]
@@ -595,10 +599,8 @@ pub fn map_local_apic(addr: u64) {
             Some(PageFrame {
                 addr,
                 present: true,
-                user_mode: false,
                 writable: true,
-                copy_on_write: false,
-                executable: false,
+                ..Default::default()
             }),
         )
         .expect("couldn't remap page");
@@ -636,10 +638,9 @@ pub fn bring_up_cpus(apic_ids: &[u8]) {
             Some(crate::mm::paging::PageFrame {
                 addr: bootstrap_addr,
                 present: true,
-                user_mode: false,
                 writable: true,
-                copy_on_write: false,
                 executable: true,
+                ..Default::default()
             }),
         )
         .unwrap();

@@ -1,4 +1,8 @@
-use core::{fmt, fmt::Write};
+use core::{
+    fmt,
+    fmt::Write,
+    sync::atomic::{AtomicU32, Ordering},
+};
 use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
 
 use x86::io::{inb, outb};
@@ -32,8 +36,6 @@ pub unsafe fn serial_putb(b: u8) {
 }
 
 /// wrapper struct to allow us to "safely" write!() to the serial port
-///
-/// we don't worry about synchronization and locking since that creates more problems than it's worth for a simple debugging interface
 struct SerialWriter;
 
 impl Write for SerialWriter {
@@ -47,7 +49,8 @@ impl Write for SerialWriter {
 
 /// simple logger implementation over serial
 struct Logger {
-    pub max_level: LevelFilter,
+    max_level: LevelFilter,
+    lock: AtomicU32,
 }
 
 impl Log for Logger {
@@ -58,6 +61,19 @@ impl Log for Logger {
     #[allow(unused_must_use)]
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
+            let apic_id = crate::arch::apic::get_local_apic().map(|apic| apic.id() as u32 + 1).unwrap_or(1);
+
+            // acquire lock if this cpu doesn't have it already
+            let has_lock = if self.lock.load(Ordering::Acquire) != apic_id {
+                // how the fuck does ordering work
+                while self.lock.compare_exchange(0, apic_id, Ordering::SeqCst, Ordering::Acquire).is_err() {
+                    crate::arch::spin();
+                }
+                true
+            } else {
+                false
+            };
+
             let level = record.level();
             let width = 5;
             let args = record.args();
@@ -67,6 +83,11 @@ impl Log for Logger {
             } else {
                 writeln!(&mut SerialWriter, "{level:width$} [unknown] {args}");
             }
+
+            if has_lock {
+                // release lock
+                self.lock.store(0, Ordering::Release);
+            }
         }
     }
 
@@ -74,7 +95,10 @@ impl Log for Logger {
 }
 
 /// our logger that we will log things with
-static LOGGER: Logger = Logger { max_level: LevelFilter::Debug };
+static LOGGER: Logger = Logger {
+    max_level: LevelFilter::Info,
+    lock: AtomicU32::new(0),
+};
 
 /// initialize the logger, setting the max level in the process
 pub fn init() -> Result<(), SetLoggerError> {

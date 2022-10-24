@@ -11,6 +11,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use common::types::Errno;
 use lazy_static::lazy_static;
 use log::{debug, error, trace};
 use spin::{Mutex, MutexGuard};
@@ -39,7 +40,7 @@ impl fmt::Debug for PagingError {
 }
 
 /// hardware agnostic form of a page frame
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 pub struct PageFrame {
     /// physical address of this page frame
     ///
@@ -62,6 +63,12 @@ pub struct PageFrame {
 
     /// whether code can be executed from this page. not supported on all platforms
     pub executable: bool,
+
+    /// whether this page has more than one reference and its freeing should be handled by the reference counter
+    pub referenced: bool,
+
+    /// whether this page has been shared from another process
+    pub shared: bool,
 }
 
 impl fmt::Debug for PageFrame {
@@ -73,6 +80,7 @@ impl fmt::Debug for PageFrame {
             .field("writable", &self.writable)
             .field("copy_on_write", &self.copy_on_write)
             .field("executable", &self.executable)
+            .field("referenced", &self.referenced)
             .finish()
     }
 }
@@ -108,57 +116,6 @@ pub trait PageDirectory {
         self.get_page(addr).is_none()
     }
 
-    /// copy a certain amount of pages from the given page directory to this one
-    ///
-    /// # Arguments
-    ///
-    /// * `dir` - the PageDirectory to copy pages from
-    /// * `from` - the starting index in the page directory to be copied from (index here means an address divided by the system's page size, i.e. 4 KiB on x86)
-    /// * `to` - the starting index in the page directory we're copying to
-    /// * `num` - the number of pages to copy
-    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        let page_size = Self::PAGE_SIZE;
-
-        // just iterate over all pages in the range provided and copy them
-        for i in (0..(num * page_size)).step_by(page_size) {
-            self.set_page(to + i, dir.get_page(from + i))?;
-        }
-
-        Ok(())
-    }
-
-    /// copy a certain amount of pages from the given page directory to this one and set them as copy-on-write
-    ///
-    /// # Arguments
-    ///
-    /// * `dir` - the PageDirectory to copy pages from
-    /// * `from` - the starting index in the page directory to be copied from (index here means an address divided by the system's page size, i.e. 4 KiB on x86)
-    /// * `to` - the starting index in the page directory we're copying to
-    /// * `num` - the number of pages to copy
-    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        let page_size = Self::PAGE_SIZE;
-
-        for i in (0..(num * page_size)).step_by(page_size) {
-            let mut page = dir.get_page(from + i);
-
-            // does this page exist?
-            if let Some(page) = page.as_mut() {
-                // if this page is writable, set it as non-writable and set it to copy on write
-                //
-                // pages have to be set as non writable in order for copy on write to work since attempting to write to a non writable page causes a page fault exception,
-                // which we can then use to copy the page and resume execution as normal
-                if page.writable {
-                    page.writable = false;
-                    page.copy_on_write = true;
-                }
-            }
-
-            self.set_page(to + i, page)?;
-        }
-
-        Ok(())
-    }
-
     /// transforms the provided virtual address in this page directory into a physical address, if possible
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         let page_size = Self::PAGE_SIZE - 1;
@@ -166,42 +123,6 @@ pub trait PageDirectory {
         let offset = virt & page_size;
 
         self.get_page(page_addr).map(|page| page.addr | offset as u64)
-    }
-
-    /// finds available area in this page directory's memory of given size. this area is guaranteed to be unused, unallocated, and aligned to a page boundary
-    ///
-    /// # Arguments
-    ///
-    /// * `start` - the lowest address this hole can be located at. useful to keep null pointers null. must be page aligned
-    /// * `end` - the highest address this hole can be located at. must be page aligned
-    /// * `size` - the size of the hole (automatically rounded up to the nearest multiple of the page size of this page directory)
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        let page_size = Self::PAGE_SIZE;
-
-        assert!(start % page_size == 0, "start address is not page aligned");
-        assert!(end % page_size == 0, "end address is not page aligned");
-
-        let size = (size / page_size) * page_size + page_size;
-
-        let mut hole_start: Option<usize> = None;
-
-        for addr in (start..end).step_by(page_size) {
-            if self.is_unused(addr) {
-                if let Some(start) = hole_start {
-                    if addr - start >= size {
-                        return hole_start;
-                    }
-                /*} else if size <= page_size && addr >= start {
-                return Some(addr);*/
-                } else if hole_start.is_none() && addr >= start {
-                    hole_start = Some(addr);
-                }
-            } else {
-                hole_start = None;
-            }
-        }
-
-        None
     }
 }
 
@@ -352,10 +273,8 @@ where O: FnOnce(&mut [u8]) -> R {
                 Some(PageFrame {
                     addr: *phys_addr,
                     present: true,
-                    user_mode: false,
                     writable: true,
-                    copy_on_write: false,
-                    executable: false,
+                    ..Default::default()
                 }),
             )
             .expect("couldn't remap page");
@@ -377,10 +296,8 @@ where O: FnOnce(&mut [u8]) -> R {
                 Some(PageFrame {
                     addr: phys_addr,
                     present: true,
-                    user_mode: false,
                     writable: true,
-                    copy_on_write: false,
-                    executable: false,
+                    ..Default::default()
                 }),
             )
             .expect("couldn't remap page");
@@ -390,6 +307,42 @@ where O: FnOnce(&mut [u8]) -> R {
     dealloc(ptr, layout);
 
     Ok(res)
+}
+
+/// finds available area in this page directory's memory of given size. this area is guaranteed to be unused, unallocated, and aligned to a page boundary
+///
+/// # Arguments
+///
+/// * `start` - the lowest address this hole can be located at. useful to keep null pointers null. must be page aligned
+/// * `end` - the highest address this hole can be located at. must be page aligned
+/// * `size` - the size of the hole (automatically rounded up to the nearest multiple of the page size of this page directory)
+pub fn find_hole<D: PageDirectory>(page_dir: &D, start: usize, end: usize, size: usize) -> Option<usize> {
+    let page_size = D::PAGE_SIZE;
+
+    assert!(start % page_size == 0, "start address is not page aligned");
+    assert!(end % page_size == 0, "end address is not page aligned");
+
+    let size = (size / page_size) * page_size + page_size;
+
+    let mut hole_start: Option<usize> = None;
+
+    for addr in (start..end).step_by(page_size) {
+        if page_dir.is_unused(addr) {
+            if let Some(start) = hole_start {
+                if addr - start >= size {
+                    return hole_start;
+                }
+            /*} else if size <= page_size && addr >= start {
+            return Some(addr);*/
+            } else if hole_start.is_none() && addr >= start {
+                hole_start = Some(addr);
+            }
+        } else {
+            hole_start = None;
+        }
+    }
+
+    None
 }
 
 /// struct to make allocating physical memory for page directories easier
@@ -416,45 +369,14 @@ impl PageManager {
         Self { frame_set, page_size }
     }
 
-    /// allocates a frame in the provided page directory
-    ///
-    /// the physical address of the newly allocated frame will be returned if successful
-    ///
-    /// # Arguments
-    ///
-    /// * `dir` - the page directory to allocate the frame in
-    /// * `addr` - the virtual address to allocate the frame at. must be page aligned
-    /// * `user_mode` - whether the allocated page will be accessible in user mode
-    /// * `writable` - whether the allocated page will be able to be written to
-    pub fn alloc_frame<T: PageDirectory>(&mut self, dir: &mut T, addr: usize, user_mode: bool, writable: bool, executable: bool) -> Result<u64, PagingError> {
-        assert!(T::PAGE_SIZE == self.page_size);
+    /// allocates a frame in memory, returning its physical address without assigning it to any page directories
+    pub fn alloc_frame(&mut self) -> Result<u64, PagingError> {
+        if let Some(idx) = self.frame_set.first_unset() {
+            self.frame_set.set(idx);
 
-        assert!(addr % self.page_size == 0, "frame address is not page aligned");
-
-        if dir.is_unused(addr) {
-            if let Some(idx) = self.frame_set.first_unset() {
-                let phys_addr = idx as u64 * self.page_size as u64;
-
-                let frame = PageFrame {
-                    addr: phys_addr,
-                    present: true,
-                    user_mode,
-                    writable,
-                    copy_on_write: false,
-                    executable,
-                };
-
-                trace!("allocating frame {:?} @ virt {:#x}", frame, addr);
-
-                self.frame_set.set(idx);
-                dir.set_page(addr, Some(frame))?;
-
-                Ok(phys_addr)
-            } else {
-                Err(PagingError::NoAvailableFrames)
-            }
+            Ok(idx as u64 * self.page_size as u64)
         } else {
-            Err(PagingError::FrameInUse)
+            Err(PagingError::NoAvailableFrames)
         }
     }
 
@@ -485,8 +407,8 @@ impl PageManager {
                 present: true,
                 user_mode,
                 writable,
-                copy_on_write: false,
                 executable,
+                ..Default::default()
             };
 
             trace!("allocating frame {:?} @ {:#x}", frame, addr);
@@ -585,7 +507,7 @@ pub fn get_page_manager() -> MutexGuard<'static, PageManager> {
         let manager = PAGE_MANAGER.as_ref().expect("page manager not initialized");
 
         if manager.is_locked() {
-            debug!("warning: page manager is locked");
+            debug!("warning (cpu {}): page manager is locked", crate::arch::get_thread_id());
         }
 
         manager.lock()
@@ -656,31 +578,10 @@ impl PageDirectory for ProcessOrKernelPageDir {
         }
     }
 
-    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        match self {
-            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.copy_from(dir, from, to, num),
-            Self::Kernel => get_kernel_page_dir().copy_from(dir, from, to, num),
-        }
-    }
-
-    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        match self {
-            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.copy_on_write_from(dir, from, to, num),
-            Self::Kernel => get_kernel_page_dir().copy_on_write_from(dir, from, to, num),
-        }
-    }
-
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         match self {
             Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.virt_to_phys(virt),
             Self::Kernel => get_kernel_page_dir().virt_to_phys(virt),
-        }
-    }
-
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        match self {
-            Self::Process(id) => crate::task::get_process(*id).unwrap().page_directory.find_hole(start, end, size),
-            Self::Kernel => get_kernel_page_dir().find_hole(start, end, size),
         }
     }
 }
@@ -736,6 +637,13 @@ impl PageRefCounter {
         }
     }
 
+    pub fn remove_all_references(&mut self, phys: u64) {
+        if self.references.contains_key(&phys) {
+            debug!("removing all references to {phys:#x}");
+            self.references.remove(&phys);
+        }
+    }
+
     pub fn get_references_for(&self, phys: u64) -> usize {
         if let Some(reference) = self.references.get(&phys) {
             reference.references
@@ -788,20 +696,8 @@ impl<D: PageDirectory> PageDirectory for FreeablePageDir<D> {
         self.0.is_unused(addr)
     }
 
-    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        self.0.copy_from(dir, from, to, num)
-    }
-
-    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        self.0.copy_on_write_from(dir, from, to, num)
-    }
-
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         self.0.virt_to_phys(virt)
-    }
-
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        self.0.find_hole(start, end, size)
     }
 }
 
@@ -826,31 +722,41 @@ impl<D: PageDirectory> FreeablePageDir<D> {
     }
 }
 
+/// given a page frame, free its contents or otherwise clean them up with the proper method
+pub fn free_page(page: PageFrame) {
+    if page.shared {
+        if !super::shared::free_shared_reference(page.addr) {
+            PAGE_REF_COUNTER.lock().remove_reference(page.addr);
+        }
+    } else if page.referenced {
+        PAGE_REF_COUNTER.lock().remove_reference(page.addr);
+    } else {
+        get_page_manager().set_frame_free(page.addr);
+    }
+}
+
+/// frees all pages in the provided page directory
 pub fn free_page_dir<D: PageDirectory>(dir: &D) {
     for addr in (0..crate::arch::KERNEL_PAGE_DIR_SPLIT).step_by(D::PAGE_SIZE) {
         if let Some(page) = dir.get_page(addr) {
-            if page.copy_on_write {
-                super::paging::PAGE_REF_COUNTER.lock().remove_reference(page.addr);
-            } else {
-                get_page_manager().set_frame_free(page.addr);
-            }
+            free_page(page);
         }
     }
 }
 
-pub fn try_copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<(), ()> {
-    let current_id = thread.task_queue.lock().current().ok_or(())?.id(); // interrupt handler should have checked this already
+pub fn copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<bool, Errno> {
+    let current_id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
 
-    let mut page = crate::task::get_process(current_id.process).ok_or(())?.page_directory.get_page(addr).ok_or(())?;
+    let mut page = crate::task::get_process(current_id.process).ok_or(Errno::NoSuchProcess)?.page_directory.get_page(addr).ok_or(Errno::BadAddress)?;
 
     let page_size = crate::arch::PageDirectory::PAGE_SIZE;
 
     // round down to nearest multiple of page size
     let addr = (addr / page_size) * page_size;
 
-    if !page.writable && page.copy_on_write {
+    if !page.writable && page.copy_on_write && page.referenced {
         if PAGE_REF_COUNTER.lock().get_references_for(page.addr) > 1 {
-            debug!("copying page {addr:#x} (phys {:#x})", page.addr);
+            debug!("(CPU {thread_id}) copying page {addr:#x} (phys {:#x})", page.addr);
 
             unsafe {
                 let copied_layout = Layout::from_size_align(page_size, page_size).unwrap();
@@ -859,13 +765,13 @@ pub fn try_copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::
                 let copied_slice = core::slice::from_raw_parts_mut(copied_area, page_size);
                 let copybara = core::slice::from_raw_parts_mut(addr as *mut u8, page_size);
 
-                trace!("copying");
+                trace!("(CPU {thread_id}) copying");
                 copied_slice.copy_from_slice(copybara);
 
                 let original_page = page;
 
                 // we can't lock this any earlier since that'll deadlock in alloc() if the heap needs expanding
-                let mut process = crate::task::get_process(current_id.process).ok_or(())?;
+                let mut process = crate::task::get_process(current_id.process).ok_or(Errno::NoSuchProcess)?;
 
                 match process.page_directory.virt_to_phys(copied_area as usize) {
                     Some(new) => page.addr = new,
@@ -874,59 +780,65 @@ pub fn try_copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::
 
                         dealloc(copied_area, copied_layout);
 
-                        return Err(());
+                        return Err(Errno::BadAddress);
                     }
                 }
                 page.writable = true;
                 page.copy_on_write = false;
+                page.referenced = false;
 
-                trace!("updating page");
+                trace!("(CPU {thread_id}) updating page");
                 if let Err(err) = process.page_directory.set_page(addr, Some(page)) {
                     error!("copy on write failed: {err:?}");
 
                     dealloc(copied_area, copied_layout);
 
-                    return Err(());
+                    return Err(Errno::OutOfMemory);
                 }
 
                 drop(process);
 
-                trace!("cleaning up");
+                trace!("(CPU {thread_id}) cleaning up");
 
                 // allocate a new page for the heap
-                let mut page_dir = get_page_dir(Some(thread_id));
+                trace!("(CPU {thread_id}) allocating new page");
+                let phys_addr = match get_page_manager().alloc_frame() {
+                    Ok(addr) => addr,
+                    Err(err) => {
+                        error!("copy on write failed: {err:?}");
 
-                if let Err(err) = page_dir.set_page(copied_area as usize, None) {
-                    error!("copy on write failed: {err:?}");
+                        crate::task::get_process(current_id.process)
+                            .expect("copy on write cleanup failed")
+                            .page_directory
+                            .set_page(addr, Some(original_page))
+                            .expect("copy on write cleanup failed");
+                        dealloc(copied_area, copied_layout);
 
-                    crate::task::get_process(current_id.process)
-                        .expect("copy on write cleanup failed")
-                        .page_directory
-                        .set_page(addr, Some(original_page))
-                        .expect("copy on write cleanup failed");
-                    dealloc(copied_area, copied_layout);
+                        return Err(Errno::OutOfMemory);
+                    }
+                };
 
-                    return Err(());
-                }
+                trace!("(CPU {thread_id}) replacing new page");
+                crate::task::get_process(current_id.process)
+                    .expect("couldn't get process we're currently in???")
+                    .page_directory
+                    .set_page(
+                        copied_area as usize,
+                        Some(PageFrame {
+                            addr: phys_addr,
+                            present: true,
+                            writable: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .expect("couldn't set page in copy on write cleanup"); // if we can't set this page we're fucked tbqh
 
-                if let Err(err) = get_page_manager().alloc_frame(&mut page_dir, copied_area as usize, false, true, false) {
-                    error!("copy on write failed: {err:?}");
-
-                    crate::task::get_process(current_id.process)
-                        .expect("copy on write cleanup failed")
-                        .page_directory
-                        .set_page(addr, Some(original_page))
-                        .expect("copy on write cleanup failed");
-                    dealloc(copied_area, copied_layout);
-
-                    return Err(());
-                }
-
+                trace!("(CPU {thread_id}) freeing area");
                 dealloc(copied_area, copied_layout);
 
                 PAGE_REF_COUNTER.lock().remove_reference(original_page.addr);
 
-                debug!("copied");
+                trace!("(CPU {thread_id}) copied");
             }
         } else {
             debug!("page {addr:#x} (phys {:#x}) isn't referenced by anything else, not copying", page.addr);
@@ -934,15 +846,15 @@ pub fn try_copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::
             // we can just update writable here, keeping the copy on write flag set means it'll be deallocated thru the page reference counter
             page.writable = true;
 
-            if let Err(err) = crate::task::get_process(current_id.process).ok_or(())?.page_directory.set_page(addr, Some(page)) {
+            if let Err(err) = crate::task::get_process(current_id.process).ok_or(Errno::NoSuchProcess)?.page_directory.set_page(addr, Some(page)) {
                 error!("copy on write failed: {err:?}");
 
-                return Err(());
+                return Err(Errno::OutOfMemory);
             }
         }
 
-        Ok(())
+        Ok(true)
     } else {
-        Err(())
+        Ok(false)
     }
 }

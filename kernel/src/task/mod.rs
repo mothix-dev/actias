@@ -19,6 +19,8 @@ use queue::PageUpdateEntry;
 /// we could use u32::MAX but POSIX assumes pid_t is signed and compatibility with it is nice
 pub const MAX_PROCESSES: u32 = u32::pow(2, 31) - 2;
 
+pub const MAX_THREADS: u32 = u32::pow(2, 31) - 2;
+
 pub struct Process {
     /// the page directory of this process
     pub page_directory: PageDirSync<'static, crate::arch::PageDirectory<'static>>,
@@ -40,6 +42,33 @@ impl Process {
                 let page_dir = core::mem::replace(&mut self.page_directory.task, old_page_dir);
                 Err((Errno::OutOfMemory, page_dir)) // pass the page dir back so it can be dealt with
             }
+        }
+    }
+
+    pub fn remove_all_threads(&mut self) {
+        self.threads.clear();
+        self.page_directory.should_update_pages = false;
+    }
+
+    pub fn add_thread(&mut self, thread: Thread) -> Result<u32> {
+        if self.threads.num_entries() >= MAX_THREADS as usize {
+            Err(Errno::TryAgain)
+        } else {
+            let idx = self.threads.add(thread).map_err(|_| Errno::OutOfMemory).and_then(|i| i.try_into().map_err(|_| Errno::ValueOverflow))?;
+
+            if !self.page_directory.should_update_pages && self.threads.num_entries() > 1 {
+                self.page_directory.should_update_pages = true;
+            }
+
+            Ok(idx)
+        }
+    }
+
+    pub fn remove_thread(&mut self, index: u32) {
+        self.threads.remove(index as usize);
+
+        if self.page_directory.should_update_pages && self.threads.num_entries() <= 1 {
+            self.page_directory.should_update_pages = false;
         }
     }
 }
@@ -71,7 +100,7 @@ static mut PROCESSES: ConsistentIndexArray<Mutex<Process>> = ConsistentIndexArra
 fn take_processes_lock() {
     //trace!("taking process list lock");
     if PROCESSES_LOCK.swap(true, Ordering::Acquire) {
-        debug!("processes list is locked, spinning");
+        debug!("(CPU {}) processes list is locked", crate::arch::get_thread_id());
         while PROCESSES_LOCK.swap(true, Ordering::Acquire) {}
     }
 }
@@ -84,7 +113,7 @@ fn release_processes_lock() {
 pub fn get_process(id: u32) -> Option<spin::MutexGuard<'static, Process>> {
     take_processes_lock();
 
-    let res = unsafe { PROCESSES.get(id as usize - 1).map(|p| p.lock()) };
+    let res = unsafe { PROCESSES.get(id as usize).map(|p| p.lock()) };
 
     release_processes_lock();
 
@@ -107,6 +136,7 @@ pub fn create_process(page_dir: crate::arch::PageDirectory<'static>) -> Result<u
                     task: page_dir,
                     process_id: 0,
                     kernel_space_updates: 0,
+                    should_update_pages: false,
                 },
                 threads: ConsistentIndexArray::new(),
             }))
@@ -129,7 +159,7 @@ pub fn create_process(page_dir: crate::arch::PageDirectory<'static>) -> Result<u
         } else {
             release_processes_lock();
 
-            let pid = index as u32 + 1;
+            let pid = index as u32;
 
             let mut process = get_process(pid).ok_or(Errno::TryAgain)?;
 
@@ -154,17 +184,7 @@ pub fn remove_process(id: u32) {
     take_processes_lock();
 
     unsafe {
-        PROCESSES.remove(id as usize - 1);
-    }
-
-    release_processes_lock();
-}
-
-pub fn remove_thread(id: ProcessID) {
-    take_processes_lock();
-
-    if let Some(mut process) = unsafe { PROCESSES.get(id.process as usize - 1).map(|p| p.lock()) } {
-        process.threads.remove(id.thread as usize);
+        PROCESSES.remove(id as usize);
     }
 
     release_processes_lock();
@@ -198,16 +218,34 @@ pub fn set_cpus(cpus: cpu::CPU) {
     }
 }
 
-pub fn process_page_updates() {
-    let thread_id = crate::arch::get_thread_id();
-
+pub fn process_page_updates(thread_id: cpu::ThreadID) {
+    trace!("CPU {thread_id} processing page updates");
     get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap().process_page_updates();
+    trace!("CPU {thread_id} finished processing page updates");
+}
+
+static PAGE_UPDATE_MUTEX: AtomicBool = AtomicBool::new(false);
+
+fn take_page_update_lock(thread_id: cpu::ThreadID) {
+    let thread = get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
+
+    if PAGE_UPDATE_MUTEX.swap(true, Ordering::Acquire) {
+        // if some other cpu is already trying to update pages, do this as much as we fucking can because otherwise everything goes to shit
+        while PAGE_UPDATE_MUTEX.swap(true, Ordering::Acquire) {
+            crate::arch::spin();
+            thread.process_page_updates();
+        }
+    }
+}
+
+fn release_page_update_lock() {
+    PAGE_UPDATE_MUTEX.store(false, Ordering::Release);
 }
 
 pub fn update_page(entry: PageUpdateEntry) {
-    trace!("updating page {entry:?}");
-
     let thread_id = crate::arch::get_thread_id();
+
+    debug!("(CPU {thread_id}) updating page {entry:?}");
 
     if let Some(cpus) = get_cpus() {
         match entry {
@@ -216,6 +254,9 @@ pub fn update_page(entry: PageUpdateEntry) {
                 for (core_num, core) in cpus.cores.iter().enumerate() {
                     for (thread_num, thread) in core.threads.iter().enumerate() {
                         if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started() {
+                            take_page_update_lock(thread_id);
+
+                            trace!("sending to thread {core_num}:{thread_num}");
                             thread.page_update_queue.lock().insert(entry);
 
                             let id = cpu::ThreadID { core: core_num, thread: thread_num };
@@ -223,10 +264,12 @@ pub fn update_page(entry: PageUpdateEntry) {
                             assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::PAGE_REFRESH_INT), "failed to send interrupt");
 
                             // inefficient and slow :(
-                            //debug!("waiting for {id}");
+                            trace!("waiting for {id}");
                             while !thread.page_update_queue.lock().is_empty() {
                                 crate::arch::spin();
                             }
+
+                            release_page_update_lock();
                         }
                     }
                 }
@@ -238,6 +281,8 @@ pub fn update_page(entry: PageUpdateEntry) {
                     for (thread_num, thread) in core.threads.iter().enumerate() {
                         if (thread_id.core != core_num || thread_id.thread != thread_num) && thread.has_started()
                             && let Some(current_id) = thread.task_queue.lock().current().map(|c| c.id()) && current_id.process == process_id {
+                            take_page_update_lock(thread_id);
+
                             thread.page_update_queue.lock().insert(entry);
 
                             let id = cpu::ThreadID { core: core_num, thread: thread_num };
@@ -245,10 +290,12 @@ pub fn update_page(entry: PageUpdateEntry) {
                             assert!(crate::arch::send_interrupt_to_cpu(id, crate::arch::PAGE_REFRESH_INT), "failed to send interrupt");
 
                             // inefficient and slow :(
-                            //debug!("waiting for {id}");
+                            trace!("waiting for {id}");
                             while !thread.page_update_queue.lock().is_empty() {
                                 crate::arch::spin();
                             }
+
+                            release_page_update_lock();
                         }
                     }
                 }

@@ -7,7 +7,7 @@ fn main() {
 
     cc::Build::new().file("src/platform/ibmpc/boot.S").compile("boot");
 
-    println!("cargo:rerun-if-changed=../target/cpu_bootstrap.on");
+    println!("cargo:rerun-if-changed=../target/cpu_bootstrap.o");
     println!("cargo:rerun-if-changed=../target/cpu_bootstrap.bin");
     println!("cargo:rerun-if-changed=src/arch/i586/cpu_bootstrap.S");
 

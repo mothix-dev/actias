@@ -9,7 +9,7 @@ use crate::{
     mm::{
         bump_alloc::{bump_alloc, init_bump_alloc},
         heap::ALLOCATOR,
-        paging::{get_page_manager, set_page_manager, PageDirectory, PageManager},
+        paging::{get_page_manager, set_page_manager, PageDirectory, PageFrame, PageManager},
     },
     util::{
         array::BitSet,
@@ -170,7 +170,19 @@ pub fn kmain() {
             page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
         }
 
-        manager.alloc_frame(&mut page_dir, addr, false, true, false).unwrap();
+        let phys_addr = manager.alloc_frame().unwrap();
+
+        page_dir
+            .set_page(
+                addr,
+                Some(PageFrame {
+                    addr: phys_addr,
+                    present: true,
+                    writable: true,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
     }
 
     // let go of our lock on the global page manager, since it would likely cause problems with the allocator
@@ -326,6 +338,9 @@ pub fn kmain() {
 
     // set the global kernel page directory
     crate::mm::paging::set_kernel_page_dir(unsafe { PAGE_DIR.take().unwrap() });
+
+    // add shared memory area for video memory
+    crate::mm::shared::share_area(&(0xb8000..0xb8000 + 32 * 1024).step_by(PAGE_SIZE).collect::<Vec<u64>>()).unwrap();
 
     // arch code takes over here
     crate::arch::init(cmdline, modules);

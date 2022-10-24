@@ -1,6 +1,6 @@
 use super::paging::{PageDirectory, PageFrame, PagingError};
 use crate::{arch::KERNEL_PAGE_DIR_SPLIT, task::queue::PageUpdateEntry};
-use log::debug;
+use log::{debug, trace};
 use spin::{Mutex, MutexGuard};
 
 pub struct PageDirSync<'kernel, D: PageDirectory> {
@@ -8,6 +8,7 @@ pub struct PageDirSync<'kernel, D: PageDirectory> {
     pub task: D,
     pub process_id: u32,
     pub kernel_space_updates: usize,
+    pub should_update_pages: bool,
 }
 
 impl<D: PageDirectory> PageDirectory for PageDirSync<'_, D> {
@@ -23,15 +24,25 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<'_, D> {
 
     fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
         if addr >= KERNEL_PAGE_DIR_SPLIT {
+            trace!("(process {}) setting page {addr:#x} in task directory", self.process_id);
             self.task.set_page(addr, page)?;
+
+            trace!("(process {}) setting page {addr:#x} in kernel directory", self.process_id);
+            while self.kernel.is_locked() {
+                crate::task::process_page_updates(crate::arch::get_thread_id());
+                crate::arch::spin();
+            }
             self.kernel.lock().set_page(addr, page)?;
             self.kernel_space_updates = self.kernel_space_updates.wrapping_add(1);
 
+            trace!("(process {}) sending page update", self.process_id);
             crate::task::update_page(PageUpdateEntry::Kernel { addr });
         } else {
             self.task.set_page(addr, page)?;
 
-            crate::task::update_page(PageUpdateEntry::Task { process_id: self.process_id, addr });
+            if self.should_update_pages {
+                crate::task::update_page(PageUpdateEntry::Task { process_id: self.process_id, addr });
+            }
         }
 
         Ok(())
@@ -47,10 +58,6 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<'_, D> {
 
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         self.task.virt_to_phys(virt)
-    }
-
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        self.task.find_hole(start, end, size)
     }
 }
 
@@ -127,10 +134,6 @@ impl<D: PageDirectory> PageDirectory for PageDirTracker<D> {
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         self.page_dir.virt_to_phys(virt)
     }
-
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        self.page_dir.find_hole(start, end, size)
-    }
 }
 
 impl<D: PageDirectory> PageDirTracker<D> {
@@ -181,20 +184,8 @@ impl<D: PageDirectory> PageDirectory for GuardedPageDir<'_, D> {
         self.0.is_unused(addr)
     }
 
-    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        self.0.copy_from(dir, from, to, num)
-    }
-
-    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        self.0.copy_on_write_from(dir, from, to, num)
-    }
-
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         self.0.virt_to_phys(virt)
-    }
-
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        self.0.find_hole(start, end, size)
     }
 }
 
@@ -220,20 +211,8 @@ impl<D: PageDirectory> PageDirectory for MutexedPageDir<'_, D> {
         self.lock().is_unused(addr)
     }
 
-    fn copy_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        self.lock().copy_from(dir, from, to, num)
-    }
-
-    fn copy_on_write_from(&mut self, dir: &mut impl PageDirectory, from: usize, to: usize, num: usize) -> Result<(), PagingError> {
-        self.lock().copy_on_write_from(dir, from, to, num)
-    }
-
     fn virt_to_phys(&self, virt: usize) -> Option<u64> {
         self.lock().virt_to_phys(virt)
-    }
-
-    fn find_hole(&self, start: usize, end: usize, size: usize) -> Option<usize> {
-        self.lock().find_hole(start, end, size)
     }
 }
 

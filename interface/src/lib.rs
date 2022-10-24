@@ -1,6 +1,6 @@
 #![no_std]
 
-use common::types::{Errno, MmapArguments, MmapFlags, MmapProtection, ProcessID, Result, Syscalls, UnmapArguments};
+use common::types::{Errno, MmapArguments, MmapFlags, MmapProtection, ProcessID, Result, Syscalls};
 use core::arch::asm;
 
 #[inline]
@@ -127,14 +127,8 @@ pub fn mmap(id: u32, addr_hint: *mut u8, length: usize, protection: MmapProtecti
 
     let addr = &mut args as *mut _ as usize;
 
-    #[cfg(target_pointer_width = "64")]
     unsafe {
-        syscall_2_args(Syscalls::Mmap, (addr >> 32) as u32, addr as u32 & u32::MAX)?;
-    }
-
-    #[cfg(target_pointer_width = "32")]
-    unsafe {
-        syscall_1_args(Syscalls::Mmap, addr as u32)?;
+        syscall_1_args(Syscalls::Mmap, addr.try_into().map_err(|_| Errno::ValueOverflow)?)?;
     }
 
     let res: usize = unsafe { core::ptr::read_volatile(&args.address) }.try_into().map_err(|_| Errno::ValueOverflow)?;
@@ -142,21 +136,12 @@ pub fn mmap(id: u32, addr_hint: *mut u8, length: usize, protection: MmapProtecti
 }
 
 pub fn unmap(addr_hint: *mut u8, length: usize) -> Result<()> {
-    let args = UnmapArguments {
-        address: addr_hint as u64,
-        length: length as u64,
-    };
-
-    let addr = &args as *const _ as usize;
-
-    #[cfg(target_pointer_width = "64")]
     unsafe {
-        syscall_2_args(Syscalls::Unmap, (addr >> 32) as u32, addr as u32 & u32::MAX)?;
-    }
-
-    #[cfg(target_pointer_width = "32")]
-    unsafe {
-        syscall_1_args(Syscalls::Unmap, addr as u32)?;
+        syscall_2_args(
+            Syscalls::Unmap,
+            (addr_hint as usize).try_into().map_err(|_| Errno::ValueOverflow)?,
+            length.try_into().map_err(|_| Errno::ValueOverflow)?,
+        )?;
     }
 
     Ok(())
@@ -167,15 +152,15 @@ pub fn get_process_id() -> Result<ProcessID> {
 
     let addr = &mut pid as *mut _ as usize;
 
-    #[cfg(target_pointer_width = "64")]
     unsafe {
-        syscall_2_args(Syscalls::GetProcessID, (addr >> 32) as u32, addr as u32 & u32::MAX)?;
-    }
-
-    #[cfg(target_pointer_width = "32")]
-    unsafe {
-        syscall_1_args(Syscalls::GetProcessID, addr as u32)?;
+        syscall_1_args(Syscalls::GetProcessID, addr.try_into().map_err(|_| Errno::ValueOverflow)?)?;
     }
 
     Ok(unsafe { core::ptr::read_volatile(&pid) })
+}
+
+pub fn share_memory(addr: *const u8, length: usize) -> Result<u32> {
+    unsafe {
+        syscall_2_args(Syscalls::ShareMemory, (addr as usize).try_into().map_err(|_| Errno::ValueOverflow)?, length.try_into().map_err(|_| Errno::ValueOverflow)?)
+    }
 }

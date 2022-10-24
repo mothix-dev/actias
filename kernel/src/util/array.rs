@@ -332,25 +332,37 @@ impl<T> ConsistentIndexArray<T> {
         self.array[index] = Some(item);
         self.bit_set.set(index);
 
-        Ok(index)
+        Ok(index + 1)
     }
 
     pub fn get(&self, index: usize) -> Option<&T> {
-        self.array.get(index).and_then(|i| i.as_ref())
+        if index == 0 {
+            None
+        } else {
+            self.array.get(index - 1).and_then(|i| i.as_ref())
+        }
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        self.array.get_mut(index).and_then(|i| i.as_mut())
+        if index == 0 {
+            None
+        } else {
+            self.array.get_mut(index - 1).and_then(|i| i.as_mut())
+        }
     }
 
     pub fn remove(&mut self, index: usize) {
-        if index < self.array.len() {
-            self.array[index] = None;
-            self.bit_set.clear(index);
-        }
+        if index > 0 {
+            let index = index - 1;
 
-        while !self.array.is_empty() && self.array[self.array.len() - 1].is_none() {
-            self.array.pop();
+            if index < self.array.len() {
+                self.array[index] = None;
+                self.bit_set.clear(index);
+            }
+
+            while !self.array.is_empty() && self.array[self.array.len() - 1].is_none() {
+                self.array.pop();
+            }
         }
     }
 
