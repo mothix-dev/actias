@@ -59,15 +59,24 @@ fn _context_switch(timer_num: usize, cpu: Option<ThreadID>, regs: &mut Registers
             let thread = process.threads.get_mut(id.thread as usize)?;
             regs.task_sanity_check().expect("registers failed sanity check");
 
-            thread.registers.transfer(regs);
+            thread.register_queue.current_mut().registers.transfer(regs);
 
             // todo: saving of other registers (x87, MMX, SSE, etc.)
 
             if !thread.is_blocked {
                 match mode {
-                    ContextSwitchMode::Normal => return Some((current.id(), thread.priority)),
-                    ContextSwitchMode::Block => thread.is_blocked = true,
-                    ContextSwitchMode::Remove => remove_id = Some(current.id()),
+                    ContextSwitchMode::Normal => {
+                        thread.cpu = Some(cpu);
+                        return Some((current.id(), thread.priority));
+                    }
+                    ContextSwitchMode::Block => {
+                        thread.cpu = None;
+                        thread.is_blocked = true;
+                    }
+                    ContextSwitchMode::Remove => {
+                        thread.cpu = None;
+                        remove_id = Some(current.id());
+                    }
                 }
             }
 
@@ -90,9 +99,9 @@ fn _context_switch(timer_num: usize, cpu: Option<ThreadID>, regs: &mut Registers
                             continue;
                         }
 
-                        thread.registers.task_sanity_check().expect("thread registers failed sanity check");
+                        //thread.registers.task_sanity_check().expect("thread registers failed sanity check");
 
-                        regs.transfer(&thread.registers);
+                        regs.transfer(&thread.register_queue.current().registers);
 
                         // todo: loading of other registers (x87, MMX, SSE, etc.)
 
@@ -160,9 +169,6 @@ fn _context_switch(timer_num: usize, cpu: Option<ThreadID>, regs: &mut Registers
         .add_timer_in(timer.hz() / CPU_TIME_SLICE, context_switch_timer)
         .expect("unable to add timer callback for next context switch");
     queue.timer = Some(expires);
-
-    // release lock on queue
-    drop(queue);
 }
 
 /// timer callback run every time we want to perform a context switch
@@ -179,18 +185,17 @@ pub fn manual_context_switch(timer_num: usize, cpu: Option<ThreadID>, regs: &mut
 pub fn wait_for_context_switch(timer_num: usize, cpu: ThreadID) {
     let thread = get_cpus().expect("CPUs not initialized").get_thread(cpu).expect("couldn't get CPU thread object");
 
-    // get the task queue for this CPU
-    let mut queue = thread.task_queue.lock();
+    {
+        // get the task queue for this CPU
+        let mut queue = thread.task_queue.lock();
 
-    // queue timer
-    let timer = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
-    let expires = timer
-        .add_timer_in(timer.hz() / CPU_TIME_SLICE, context_switch_timer)
-        .expect("unable to add timer callback for next context switch");
-    queue.timer = Some(expires);
-
-    // release lock on queue
-    drop(queue);
+        // queue timer
+        let timer = crate::timer::get_timer(timer_num).expect("unable to get timer for next context switch");
+        let expires = timer
+            .add_timer_in(timer.hz() / CPU_TIME_SLICE, context_switch_timer)
+            .expect("unable to add timer callback for next context switch");
+        queue.timer = Some(expires);
+    }
 
     thread.leave_kernel();
 

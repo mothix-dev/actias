@@ -10,8 +10,8 @@ use alloc::{
     collections::BTreeMap,
     vec::Vec,
 };
-use core::fmt;
 use common::types::Errno;
+use core::fmt;
 use lazy_static::lazy_static;
 use log::{debug, error, trace};
 use spin::{Mutex, MutexGuard};
@@ -36,6 +36,15 @@ impl fmt::Debug for PagingError {
             Self::BadFrame => "bad frame",
             Self::BadAddress => "address not mapped",
         })
+    }
+}
+
+impl From<PagingError> for Errno {
+    fn from(err: PagingError) -> Errno {
+        match err {
+            PagingError::BadAddress => Errno::BadAddress,
+            _ => Errno::OutOfMemory,
+        }
     }
 }
 
@@ -180,8 +189,14 @@ where O: FnOnce(&mut [u8]) -> R {
 
     // get physical addresses of this region
     for i in (start..=end).step_by(page_size) {
-        let phys_addr = match from.virt_to_phys(i) {
-            Some(a) => a,
+        let phys_addr = match from.get_page(i) {
+            Some(page) => {
+                if !page.writable && page.copy_on_write && page.referenced {
+                    copy_on_write(from, addr, page)?.addr
+                } else {
+                    page.addr
+                }
+            }
             None => {
                 debug!("couldn't get phys addr for virt {i:#x}");
 
@@ -506,11 +521,24 @@ pub fn get_page_manager() -> MutexGuard<'static, PageManager> {
     unsafe {
         let manager = PAGE_MANAGER.as_ref().expect("page manager not initialized");
 
-        if manager.is_locked() {
-            debug!("warning (cpu {}): page manager is locked", crate::arch::get_thread_id());
-        }
+        let thread_id = crate::arch::get_thread_id();
+        let mut has_warned = false;
 
-        manager.lock()
+        loop {
+            match manager.try_lock() {
+                Some(guard) => return guard,
+                None => {
+                    if !has_warned {
+                        debug!("warning (cpu {}): page manager is locked", thread_id);
+                        has_warned = true;
+                    }
+
+                    // if the page manager is locked, we're likely waiting for a page update
+                    // we can try to process urgent messages here in case we're waiting for this cpu to handle a page update so we don't deadlock
+                    crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap().process_urgent_messages();
+                }
+            }
+        }
     }
 }
 
@@ -744,10 +772,98 @@ pub fn free_page_dir<D: PageDirectory>(dir: &D) {
     }
 }
 
-pub fn copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<bool, Errno> {
+pub fn copy_on_write(page_dir: &mut impl PageDirectory, addr: usize, mut page: PageFrame) -> Result<PageFrame, PagingError> {
+    let page_size = crate::arch::PageDirectory::PAGE_SIZE;
+
+    if PAGE_REF_COUNTER.lock().get_references_for(page.addr) > 1 {
+        debug!("copying page {addr:#x} (phys {:#x})", page.addr);
+
+        unsafe {
+            let copied_layout = Layout::from_size_align(page_size, page_size).unwrap();
+            let copied_area = alloc(copied_layout);
+
+            let copied_slice = core::slice::from_raw_parts_mut(copied_area, page_size);
+            let copybara = core::slice::from_raw_parts_mut(addr as *mut u8, page_size);
+
+            trace!("copying");
+            copied_slice.copy_from_slice(copybara);
+
+            let original_page = page;
+
+            {
+                match page_dir.virt_to_phys(copied_area as usize) {
+                    Some(new) => page.addr = new,
+                    None => {
+                        dealloc(copied_area, copied_layout);
+
+                        return Err(PagingError::BadAddress);
+                    }
+                }
+                page.writable = true;
+                page.copy_on_write = false;
+                page.referenced = false;
+
+                trace!("updating page");
+                if let Err(err) = page_dir.set_page(addr, Some(page)) {
+                    dealloc(copied_area, copied_layout);
+
+                    return Err(err);
+                }
+            }
+
+            trace!("cleaning up");
+
+            // allocate a new page for the heap
+            trace!("allocating new page");
+            let phys_addr = match get_page_manager().alloc_frame() {
+                Ok(addr) => addr,
+                Err(err) => {
+                    page_dir.set_page(addr, Some(original_page)).expect("copy on write cleanup failed");
+                    dealloc(copied_area, copied_layout);
+
+                    return Err(err);
+                }
+            };
+
+            let new_page = PageFrame {
+                addr: phys_addr,
+                present: true,
+                writable: true,
+                ..Default::default()
+            };
+
+            trace!("replacing new page");
+            page_dir.set_page(copied_area as usize, Some(new_page)).expect("couldn't set page in copy on write cleanup"); // if we can't set this page we're fucked tbqh
+
+            trace!("freeing area");
+            dealloc(copied_area, copied_layout);
+
+            PAGE_REF_COUNTER.lock().remove_reference(original_page.addr);
+
+            trace!("copied");
+
+            Ok(new_page)
+        }
+    } else {
+        debug!("page {addr:#x} (phys {:#x}) isn't referenced by anything else, not copying", page.addr);
+
+        // we can just update writable here, keeping the copy on write flag set means it'll be deallocated thru the page reference counter
+        page.writable = true;
+
+        page_dir.set_page(addr, Some(page))?;
+
+        Ok(page)
+    }
+}
+
+pub fn try_copy_on_write(thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<bool, Errno> {
     let current_id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
 
-    let mut page = crate::task::get_process(current_id.process).ok_or(Errno::NoSuchProcess)?.page_directory.get_page(addr).ok_or(Errno::BadAddress)?;
+    let page = crate::task::get_process(current_id.process)
+        .ok_or(Errno::NoSuchProcess)?
+        .page_directory
+        .get_page(addr)
+        .ok_or(Errno::BadAddress)?;
 
     let page_size = crate::arch::PageDirectory::PAGE_SIZE;
 
@@ -755,103 +871,7 @@ pub fn copy_on_write(thread_id: crate::task::cpu::ThreadID, thread: &crate::task
     let addr = (addr / page_size) * page_size;
 
     if !page.writable && page.copy_on_write && page.referenced {
-        if PAGE_REF_COUNTER.lock().get_references_for(page.addr) > 1 {
-            debug!("(CPU {thread_id}) copying page {addr:#x} (phys {:#x})", page.addr);
-
-            unsafe {
-                let copied_layout = Layout::from_size_align(page_size, page_size).unwrap();
-                let copied_area = alloc(copied_layout);
-
-                let copied_slice = core::slice::from_raw_parts_mut(copied_area, page_size);
-                let copybara = core::slice::from_raw_parts_mut(addr as *mut u8, page_size);
-
-                trace!("(CPU {thread_id}) copying");
-                copied_slice.copy_from_slice(copybara);
-
-                let original_page = page;
-
-                // we can't lock this any earlier since that'll deadlock in alloc() if the heap needs expanding
-                let mut process = crate::task::get_process(current_id.process).ok_or(Errno::NoSuchProcess)?;
-
-                match process.page_directory.virt_to_phys(copied_area as usize) {
-                    Some(new) => page.addr = new,
-                    None => {
-                        error!("copy on write failed: couldn't get physical address for {copied_area:?}");
-
-                        dealloc(copied_area, copied_layout);
-
-                        return Err(Errno::BadAddress);
-                    }
-                }
-                page.writable = true;
-                page.copy_on_write = false;
-                page.referenced = false;
-
-                trace!("(CPU {thread_id}) updating page");
-                if let Err(err) = process.page_directory.set_page(addr, Some(page)) {
-                    error!("copy on write failed: {err:?}");
-
-                    dealloc(copied_area, copied_layout);
-
-                    return Err(Errno::OutOfMemory);
-                }
-
-                drop(process);
-
-                trace!("(CPU {thread_id}) cleaning up");
-
-                // allocate a new page for the heap
-                trace!("(CPU {thread_id}) allocating new page");
-                let phys_addr = match get_page_manager().alloc_frame() {
-                    Ok(addr) => addr,
-                    Err(err) => {
-                        error!("copy on write failed: {err:?}");
-
-                        crate::task::get_process(current_id.process)
-                            .expect("copy on write cleanup failed")
-                            .page_directory
-                            .set_page(addr, Some(original_page))
-                            .expect("copy on write cleanup failed");
-                        dealloc(copied_area, copied_layout);
-
-                        return Err(Errno::OutOfMemory);
-                    }
-                };
-
-                trace!("(CPU {thread_id}) replacing new page");
-                crate::task::get_process(current_id.process)
-                    .expect("couldn't get process we're currently in???")
-                    .page_directory
-                    .set_page(
-                        copied_area as usize,
-                        Some(PageFrame {
-                            addr: phys_addr,
-                            present: true,
-                            writable: true,
-                            ..Default::default()
-                        }),
-                    )
-                    .expect("couldn't set page in copy on write cleanup"); // if we can't set this page we're fucked tbqh
-
-                trace!("(CPU {thread_id}) freeing area");
-                dealloc(copied_area, copied_layout);
-
-                PAGE_REF_COUNTER.lock().remove_reference(original_page.addr);
-
-                trace!("(CPU {thread_id}) copied");
-            }
-        } else {
-            debug!("page {addr:#x} (phys {:#x}) isn't referenced by anything else, not copying", page.addr);
-
-            // we can just update writable here, keeping the copy on write flag set means it'll be deallocated thru the page reference counter
-            page.writable = true;
-
-            if let Err(err) = crate::task::get_process(current_id.process).ok_or(Errno::NoSuchProcess)?.page_directory.set_page(addr, Some(page)) {
-                error!("copy on write failed: {err:?}");
-
-                return Err(Errno::OutOfMemory);
-            }
-        }
+        copy_on_write(&mut ProcessOrKernelPageDir::Process(current_id.process), addr, page)?;
 
         Ok(true)
     } else {

@@ -12,25 +12,9 @@ pub enum Syscalls {
     Unmap,
     GetProcessID,
     ShareMemory,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct MmapArguments {
-    /// the ID of this mapping, if it's shared memory
-    pub id: u32,
-
-    /// a hint of where the mapping should start, unless the Fixed or FixedNoReplace flags are set
-    pub address: u64,
-
-    /// the length of the mapping. this will be rounded up to the next page boundary
-    pub length: u64,
-
-    /// flags describing how pages in this mapping can be accessed
-    pub protection: MmapProtection,
-
-    /// flags describing how this mapping should work
-    pub flags: MmapFlags,
+    SendMessage,
+    MessageHandler,
+    ExitMessageHandler,
 }
 
 #[bitmask(u8)]

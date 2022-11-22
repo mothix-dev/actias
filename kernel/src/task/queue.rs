@@ -1,6 +1,5 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use common::types::{Errno, Result};
-use log::trace;
 
 /// a per-CPU task queue
 #[derive(Debug)]
@@ -38,10 +37,22 @@ impl TaskQueue {
     /// inserts a task into the queue
     pub fn insert(&mut self, entry: TaskQueueEntry) -> Result<()> {
         self.try_reserve(1)?;
-        match self.queue.iter().position(|e| entry.full_priority() > e.full_priority()) {
+
+        let mut insert_position = None;
+
+        for (idx, item) in self.queue.iter().enumerate() {
+            if item.id == entry.id {
+                return Err(Errno::Exists);
+            } else if insert_position.is_none() && entry.full_priority() > item.full_priority() {
+                insert_position = Some(idx);
+            }
+        }
+
+        match insert_position {
             Some(index) => self.queue.insert(index, entry),
             None => self.queue.push_back(entry),
         }
+
         Ok(())
     }
 
@@ -130,54 +141,5 @@ impl TaskQueueEntry {
     /// gets the task id that this task queue entry represents
     pub fn id(&self) -> super::ProcessID {
         self.id
-    }
-}
-
-#[derive(Debug)]
-pub struct PageUpdateQueue {
-    queue: VecDeque<PageUpdateEntry>,
-}
-
-impl PageUpdateQueue {
-    pub fn new() -> Self {
-        Self { queue: VecDeque::new() }
-    }
-
-    pub fn process(&mut self, process_id: Option<super::ProcessID>) {
-        while let Some(entry) = self.queue.pop_front() {
-            entry.process(process_id);
-        }
-    }
-
-    pub fn insert(&mut self, entry: PageUpdateEntry) {
-        self.queue.push_back(entry);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-}
-
-impl Default for PageUpdateQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum PageUpdateEntry {
-    Task { process_id: u32, addr: usize },
-    Kernel { addr: usize },
-}
-
-impl PageUpdateEntry {
-    pub fn process(&self, process_id: Option<super::ProcessID>) {
-        trace!("processing {self:?}");
-        match self {
-            Self::Task { process_id: id, addr } => if let Some(pid) = process_id && *id == pid.process {
-                crate::arch::refresh_page(*addr);
-            },
-            Self::Kernel { addr } => crate::arch::refresh_page(*addr),
-        }
     }
 }

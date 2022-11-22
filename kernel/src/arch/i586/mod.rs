@@ -12,7 +12,7 @@ use crate::{
     },
     task::{
         cpu::{ThreadID, CPU},
-        get_process, set_cpus,
+        get_process, queue_process, set_cpus,
     },
 };
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
@@ -366,8 +366,7 @@ pub fn refresh_page(addr: usize) {
     }
 }
 
-pub const PAGE_REFRESH_INT: usize = 0x31;
-pub const KILL_PROCESS_INT: usize = 0x32;
+pub const MESSAGE_INT: usize = 0x31;
 pub const SYSCALL_INT: usize = 0x80;
 
 pub fn safely_halt_cpu(regs: &mut Registers) {
@@ -494,28 +493,28 @@ pub fn init_alloc() {
                         }
                     }
 
-                    // allocate page directory for task
-                    trace!("getting task page directory");
-                    let mut process = get_process(current.id().process).unwrap();
+                    {
+                        // allocate page directory for task
+                        trace!("getting task page directory");
+                        let mut process = get_process(current.id().process).unwrap();
 
-                    if !process.page_directory.task.has_page_table(addr.try_into().unwrap()) {
-                        trace!("allocating new page table (task)");
+                        if !process.page_directory.task.has_page_table(addr.try_into().unwrap()) {
+                            trace!("allocating new page table (task)");
 
-                        let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
-                            Ok(ptr) => ptr,
-                            Err(()) => return Ok(addr), // fail gracefully if we can't allocate
-                        };
-                        let phys = process.page_directory.task.virt_to_phys(virt as usize).ok_or(())?;
+                            let virt = match alloc(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()) {
+                                Ok(ptr) => ptr,
+                                Err(()) => return Ok(addr), // fail gracefully if we can't allocate
+                            };
+                            let phys = process.page_directory.task.virt_to_phys(virt as usize).ok_or(())?;
 
-                        unsafe {
-                            process
-                                .page_directory
-                                .task
-                                .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                            unsafe {
+                                process
+                                    .page_directory
+                                    .task
+                                    .add_page_table(addr.try_into().unwrap(), &mut *(virt as *mut PageTable), phys.try_into().unwrap(), true);
+                            }
                         }
                     }
-
-                    drop(process);
 
                     trace!("allocating page");
                     let phys_addr = get_page_manager().alloc_frame().map_err(|err| {
@@ -651,19 +650,10 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
     let init_name = args.as_ref().and_then(|a| a.get("init").cloned()).unwrap_or(DEFAULT_INIT);
     let init_data = modules.get(init_name).unwrap_or_else(|| modules.get(DEFAULT_INIT).expect("couldn't find init in modules"));
 
-    let process = crate::task::create_process(paging::PageDir::new()).unwrap();
+    let process = crate::task::create_process(paging::PageDir::new()).expect("failed to create process for init");
     crate::task::exec::exec_as::<paging::PageDir>(None, &mut crate::task::get_process(process).unwrap(), init_data).expect("failed to exec init");
 
-    let cpus = crate::task::get_cpus().expect("CPUs not initialized");
-
-    let thread_id = cpus.find_thread_to_add_to().unwrap();
-
-    cpus.get_thread(thread_id)
-        .unwrap()
-        .task_queue
-        .lock()
-        .insert(crate::task::queue::TaskQueueEntry::new(common::types::ProcessID { process, thread: 1 }, 0))
-        .unwrap();
+    queue_process(common::types::ProcessID { process, thread: 1 }).expect("failed to queue init on a cpu");
 
     start_context_switching();
 }

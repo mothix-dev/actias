@@ -3,8 +3,8 @@
 use crate::util::array::ConsistentIndexArray;
 use alloc::{collections::BTreeMap, vec::Vec};
 use common::types::{Errno, Result};
-use spin::Mutex;
 use log::trace;
+use spin::Mutex;
 
 pub const MAX_SHARED_IDS: u32 = u32::pow(2, 31) - 2;
 

@@ -97,8 +97,6 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
     } else {
         let mut process_page_dir = FreeablePageDir::new(crate::arch::PageDirectory::new());
 
-        let mut lowest_addr = usize::MAX;
-
         let thread_id = crate::arch::get_thread_id();
 
         // assemble program in memory
@@ -118,9 +116,12 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                         return Err(Errno::ValueOverflow);
                     }
 
-                    debug!("data @ {:#x} - {:#x}", ph.p_vaddr, ph.p_vaddr + memsz as u64);
+                    debug!("data @ {:#x} - {:#x} (filesz {:#x})", ph.p_vaddr, ph.p_vaddr + memsz as u64, filesz);
 
-                    for addr in ((vaddr / D::PAGE_SIZE) * D::PAGE_SIZE..=((vaddr + memsz) / D::PAGE_SIZE) * D::PAGE_SIZE).step_by(D::PAGE_SIZE) {
+                    let addr_start = (vaddr / D::PAGE_SIZE) * D::PAGE_SIZE;
+                    let addr_end = ((vaddr + memsz) / D::PAGE_SIZE) * D::PAGE_SIZE + (D::PAGE_SIZE - 1);
+
+                    for addr in (addr_start..=addr_end).step_by(D::PAGE_SIZE) {
                         if process_page_dir.get_page(addr).is_none() {
                             let phys = get_page_manager().alloc_frame().map_err(|_| Errno::OutOfMemory)?;
 
@@ -165,9 +166,9 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                             let op = |s: &mut [u8]| s.clone_from_slice(&data[file_start..file_end]);
 
                             if let Some(dir) = kernel_page_dir.as_mut() {
-                                map_memory_from(*dir, &mut process_page_dir, vaddr, memsz, op).map_err(|_| Errno::OutOfMemory)?;
+                                map_memory_from(*dir, &mut process_page_dir, vaddr, filesz, op).map_err(|_| Errno::OutOfMemory)?;
                             } else {
-                                map_memory_from(&mut get_page_dir(Some(thread_id)), &mut process_page_dir, vaddr, memsz, op).map_err(|_| Errno::OutOfMemory)?;
+                                map_memory_from(&mut get_page_dir(Some(thread_id)), &mut process_page_dir, vaddr, filesz, op).map_err(|_| Errno::OutOfMemory)?;
                             }
                         }
                     }
@@ -178,10 +179,6 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
                             page.writable = false;
                             process_page_dir.set_page(addr, Some(page)).unwrap();
                         }
-                    }
-
-                    if vaddr < lowest_addr {
-                        lowest_addr = vaddr;
                     }
                 }
                 PT_INTERP => {
@@ -320,7 +317,7 @@ pub fn exec_as<D: PageDirectory>(mut kernel_page_dir: Option<&mut D>, process: &
         process.remove_all_threads();
         process
             .add_thread(crate::task::Thread {
-                registers: crate::arch::Registers::new_task(entry_point, stack_end),
+                register_queue: super::RegisterQueue::new(super::RegisterQueueEntry::from_registers(crate::arch::Registers::new_task(entry_point, stack_end))),
                 priority: 0,
                 cpu: None,
                 is_blocked: false,

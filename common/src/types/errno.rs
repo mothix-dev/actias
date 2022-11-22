@@ -5,9 +5,9 @@ use num_enum::FromPrimitive;
 
 /// error number and message
 #[repr(u32)]
-#[derive(Copy, Clone, PartialEq, Eq, FromPrimitive)]
+#[derive(Copy, Clone, PartialEq, Eq, FromPrimitive, Default)]
 pub enum Errno {
-    #[num_enum(default)]
+    #[default]
     None = 0, // No error (:
     TooBig,                // E2BIG
     PermissionDenied,      // EACCES

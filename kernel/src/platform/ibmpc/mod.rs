@@ -12,6 +12,7 @@ use crate::{
         paging::{get_page_manager, set_page_manager, PageDirectory, PageFrame, PageManager},
     },
     util::{
+        abi::ABI,
         array::BitSet,
         debug::DebugArray,
         tar::{EntryKind, TarIterator},
@@ -34,6 +35,8 @@ pub const HEAP_START: usize = LINKED_BASE + 0x01000000;
 pub const KHEAP_INITIAL_SIZE: usize = 0x100000;
 pub const KHEAP_MAX_SIZE: usize = 0xffff000;
 pub const HEAP_MIN_SIZE: usize = 0x70000;
+
+pub const PLATFORM_ABI: ABI = ABI::Fastcall;
 
 //static mut PAGE_MANAGER: Option<PageManager<PageDir>> = None;
 static mut PAGE_DIR: Option<PageDir> = None;
@@ -121,72 +124,71 @@ pub fn kmain() {
         PAGE_SIZE,
     ));
 
-    // grab a reference to the page manager so we don't have to continuously lock and unlock it while we're doing initial memory allocations
-    let mut manager = get_page_manager();
-
     // page directory for kernel
     let mut page_dir = PageDir::bump_allocate();
 
-    let kernel_start = LINKED_BASE + 0x100000;
+    {
+        // grab a reference to the page manager so we don't have to continuously lock and unlock it while we're doing initial memory allocations
+        let mut manager = get_page_manager();
 
-    // allocate pages
-    debug!("mapping kernel ({kernel_start:#x} - {kernel_end_pos:#x})");
+        let kernel_start = LINKED_BASE + 0x100000;
 
-    for addr in (kernel_start..kernel_end_pos).step_by(PAGE_SIZE) {
-        if !page_dir.has_page_table(addr.try_into().unwrap()) {
-            debug!("allocating new page table");
-            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
-            page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+        // allocate pages
+        debug!("mapping kernel ({kernel_start:#x} - {kernel_end_pos:#x})");
+
+        for addr in (kernel_start..kernel_end_pos).step_by(PAGE_SIZE) {
+            if !page_dir.has_page_table(addr.try_into().unwrap()) {
+                debug!("allocating new page table");
+                let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
+                page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+            }
+
+            manager.alloc_frame_at(&mut page_dir, addr, (addr - LINKED_BASE) as u64, false, true, true).unwrap();
         }
 
-        manager.alloc_frame_at(&mut page_dir, addr, (addr - LINKED_BASE) as u64, false, true, true).unwrap();
-    }
+        // free the page below the stack, to catch stack overflow
+        debug!("stack @ {stack_base_pos:#x} - {stack_end_pos:#x}");
+        manager.free_frame(&mut page_dir, stack_base_pos - PAGE_SIZE).unwrap();
 
-    // free the page below the stack, to catch stack overflow
-    debug!("stack @ {stack_base_pos:#x} - {stack_end_pos:#x}");
-    manager.free_frame(&mut page_dir, stack_base_pos - PAGE_SIZE).unwrap();
+        debug!("interrupt stack @ {int_stack_base_pos:#x} - {int_stack_end_pos:#x}");
+        manager.free_frame(&mut page_dir, int_stack_base_pos - PAGE_SIZE).unwrap();
 
-    debug!("interrupt stack @ {int_stack_base_pos:#x} - {int_stack_end_pos:#x}");
-    manager.free_frame(&mut page_dir, int_stack_base_pos - PAGE_SIZE).unwrap();
+        // set aside some memory for bootstrapping other CPUs
+        //let bootstrap_addr = manager.first_available_frame().unwrap();
+        let bootstrap_addr = 0x1000;
+        manager.set_frame_used(bootstrap_addr);
 
-    // set aside some memory for bootstrapping other CPUs
-    //let bootstrap_addr = manager.first_available_frame().unwrap();
-    let bootstrap_addr = 0x1000;
-    manager.set_frame_used(bootstrap_addr);
+        debug!("bootstrap code @ {bootstrap_addr:#x}");
 
-    debug!("bootstrap code @ {bootstrap_addr:#x}");
-
-    unsafe {
-        BOOTSTRAP_ADDR = bootstrap_addr;
-    }
-
-    let heap_init_end = HEAP_START + HEAP_MIN_SIZE;
-    debug!("mapping heap ({HEAP_START:#x} - {heap_init_end:#x})");
-
-    for addr in (HEAP_START..heap_init_end).step_by(PAGE_SIZE) {
-        if !page_dir.has_page_table(addr.try_into().unwrap()) {
-            debug!("allocating new page table");
-            let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
-            page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+        unsafe {
+            BOOTSTRAP_ADDR = bootstrap_addr;
         }
 
-        let phys_addr = manager.alloc_frame().unwrap();
+        let heap_init_end = HEAP_START + HEAP_MIN_SIZE;
+        debug!("mapping heap ({HEAP_START:#x} - {heap_init_end:#x})");
 
-        page_dir
-            .set_page(
-                addr,
-                Some(PageFrame {
-                    addr: phys_addr,
-                    present: true,
-                    writable: true,
-                    ..Default::default()
-                }),
-            )
-            .unwrap();
+        for addr in (HEAP_START..heap_init_end).step_by(PAGE_SIZE) {
+            if !page_dir.has_page_table(addr.try_into().unwrap()) {
+                debug!("allocating new page table");
+                let ptr = unsafe { bump_alloc::<PageTable>(Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap()).unwrap() };
+                page_dir.add_page_table(addr.try_into().unwrap(), unsafe { &mut *ptr.pointer }, ptr.phys_addr.try_into().unwrap(), false);
+            }
+
+            let phys_addr = manager.alloc_frame().unwrap();
+
+            page_dir
+                .set_page(
+                    addr,
+                    Some(PageFrame {
+                        addr: phys_addr,
+                        present: true,
+                        writable: true,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+        }
     }
-
-    // let go of our lock on the global page manager, since it would likely cause problems with the allocator
-    drop(manager);
 
     // switch to our new page directory so all the pages we've just mapped will be accessible
     unsafe {

@@ -1,13 +1,12 @@
-use super::{
-    queue::{PageUpdateQueue, TaskQueue},
-    ProcessID,
-};
+use super::{queue::TaskQueue, ProcessID};
 use crate::arch::ThreadInfo;
 use alloc::{collections::VecDeque, vec::Vec};
+use common::types::{Errno, Result};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
 };
+use log::trace;
 use spin::Mutex;
 
 /// describes a CPU and its layout of cores and threads
@@ -149,17 +148,29 @@ impl CPUCore {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum KillQueueEntry {
-    Thread(ProcessID),
-    Process(u32),
+#[derive(Debug, Copy, Clone)]
+pub enum UrgentMessage {
+    /// update a page in the current task's address space
+    TaskPageUpdate { process_id: u32, addr: usize },
+
+    /// update a page in the kernel's address space
+    KernelPageUpdate { addr: usize },
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum Message {
+    /// kill the specified thread
+    KillThread(ProcessID),
+
+    /// kill all threads of the specified process
+    KillProcess(u32),
 }
 
 #[derive(Debug)]
 pub struct CPUThread {
     pub task_queue: Mutex<TaskQueue>,
-    pub page_update_queue: Mutex<PageUpdateQueue>,
-    pub kill_queue: Mutex<VecDeque<KillQueueEntry>>,
+    pub urgent_message_queue: Mutex<VecDeque<UrgentMessage>>,
+    pub message_queue: Mutex<VecDeque<Message>>,
     pub timer: usize,
     pub info: ThreadInfo,
     in_kernel: AtomicBool,
@@ -170,8 +181,8 @@ impl CPUThread {
     pub fn new(info: ThreadInfo, timer: usize) -> Self {
         Self {
             task_queue: Mutex::new(TaskQueue::new()),
-            page_update_queue: Mutex::new(PageUpdateQueue::new()),
-            kill_queue: Mutex::new(VecDeque::new()),
+            urgent_message_queue: Mutex::new(VecDeque::new()),
+            message_queue: Mutex::new(VecDeque::new()),
             timer,
             info,
             in_kernel: AtomicBool::new(true),
@@ -179,22 +190,48 @@ impl CPUThread {
         }
     }
 
-    pub fn process_page_updates(&self) {
-        self.page_update_queue.lock().process(self.task_queue.lock().current().map(|c| c.id()));
+    pub fn send_urgent_message(&self, message: UrgentMessage) -> Result<()> {
+        let mut queue = self.urgent_message_queue.lock();
+        queue.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        queue.push_back(message);
+        Ok(())
     }
 
-    pub fn process_kill_queue(&self, cpu: ThreadID, regs: &mut crate::arch::Registers) {
-        let mut queue = self.kill_queue.lock();
-
-        while let Some(entry) = queue.pop_front() {
+    pub fn process_urgent_messages(&self) {
+        while let Some(entry) = self.urgent_message_queue.lock().pop_front() {
+            trace!("processing {entry:?}");
             match entry {
-                KillQueueEntry::Thread(id) => {
+                UrgentMessage::TaskPageUpdate { process_id: id, addr } => {
+                    let queue_lock = self.task_queue.lock(); // hold queue lock for as long as this TLB flush takes, not sure whether a race condition here would be bad or not
+
+                    let process_id = queue_lock.current().map(|c| c.id());
+                    if let Some(pid) = process_id && id == pid.process {
+                        crate::arch::refresh_page(addr);
+                    }
+                }
+                UrgentMessage::KernelPageUpdate { addr } => crate::arch::refresh_page(addr),
+            }
+        }
+    }
+
+    pub fn send_message(&self, message: Message) -> Result<()> {
+        let mut queue = self.message_queue.lock();
+        queue.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        queue.push_back(message);
+        Ok(())
+    }
+
+    pub fn process_messages(&self, cpu: ThreadID, regs: &mut crate::arch::Registers) {
+        while let Some(entry) = self.message_queue.lock().pop_front() {
+            trace!("processing {entry:?}");
+            match entry {
+                Message::KillThread(id) => {
                     self.task_queue.lock().remove_thread(id);
                     if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id == id {
                         super::switch::manual_context_switch(self.timer, Some(cpu), regs, super::switch::ContextSwitchMode::Remove);
                     }
                 }
-                KillQueueEntry::Process(id) => {
+                Message::KillProcess(id) => {
                     self.task_queue.lock().remove_process(id);
                     if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id.process == id {
                         super::switch::manual_context_switch(self.timer, Some(cpu), regs, super::switch::ContextSwitchMode::Remove);

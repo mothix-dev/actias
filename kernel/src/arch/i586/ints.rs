@@ -233,6 +233,12 @@ pub struct InterruptRegisters {
     pub ss: u32,
 }
 
+impl InterruptRegisters {
+    pub fn stack_pointer(&self) -> usize {
+        self.useresp as usize
+    }
+}
+
 pub enum TaskSanityError {
     StackInKernel(u32),
 }
@@ -279,9 +285,9 @@ impl InterruptRegisters {
         *self = *other;
     }
 
-    pub fn syscall_return(&mut self, result: Result<u32>) {
+    pub fn syscall_return(&mut self, result: Result<usize>) {
         trace!("syscall returned {result:?}");
-        match result {
+        match result.and_then(|a| a.try_into().map_err(|_| Errno::ValueOverflow)) {
             Ok(num) => {
                 self.eax = num;
                 self.ebx = 0;
@@ -291,6 +297,29 @@ impl InterruptRegisters {
                 self.ebx = num as u32;
             }
         }
+    }
+
+    pub fn call(&mut self, args: &crate::util::abi::BuiltCallArguments) -> Result<()> {
+        if let Some(n) = args.registers.get(0).cloned().and_then(|n| n) {
+            self.eax = n.try_into().map_err(|_| Errno::ValueOverflow)?;
+        }
+        if let Some(n) = args.registers.get(1).cloned().and_then(|n| n) {
+            self.ebx = n.try_into().map_err(|_| Errno::ValueOverflow)?;
+        }
+        if let Some(n) = args.registers.get(2).cloned().and_then(|n| n) {
+            self.ecx = n.try_into().map_err(|_| Errno::ValueOverflow)?;
+        }
+        if let Some(n) = args.registers.get(3).cloned().and_then(|n| n) {
+            self.edx = n.try_into().map_err(|_| Errno::ValueOverflow)?;
+        }
+        if let Some(n) = args.registers.get(4).cloned().and_then(|n| n) {
+            self.esi = n.try_into().map_err(|_| Errno::ValueOverflow)?;
+        }
+        if let Some(n) = args.registers.get(5).cloned().and_then(|n| n) {
+            self.edi = n.try_into().map_err(|_| Errno::ValueOverflow)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -465,11 +494,13 @@ unsafe extern "x86-interrupt" fn page_fault_handler(regs: &mut InterruptRegister
 
         nmi_all_other_cpus();
         halt();
-    } else if regs.error_code & 0x7 != 0x7 || !crate::mm::paging::copy_on_write(thread_id, thread, address as usize).unwrap_or_else(|err| {
-        error!("copy on write failed: {err:?}");
+    } else if regs.error_code & 0x7 != 0x7
+        || !crate::mm::paging::try_copy_on_write(thread, address as usize).unwrap_or_else(|err| {
+            error!("copy on write failed: {err:?}");
 
-        false
-    }) {
+            false
+        })
+    {
         error!(
             "page fault in process {} @ {:#x} (accessed {:#x}), error code {:#x}",
             task_id.unwrap(),
@@ -834,26 +865,13 @@ unsafe fn apic_spurious_handler(_regs: &mut InterruptRegisters) {
 }
 
 #[interrupt(x86)]
-unsafe fn page_refresh_handler(_regs: &mut InterruptRegisters) {
+unsafe fn message_handler(regs: &mut InterruptRegisters) {
     let thread_id = super::get_thread_id();
     let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
     let was_in_kernel = thread.enter_kernel();
 
-    crate::task::process_page_updates(thread_id);
-
-    if !was_in_kernel {
-        thread.leave_kernel();
-    }
-    super::apic::get_local_apic().expect("local APIC not mapped").eoi();
-}
-
-#[interrupt(x86)]
-unsafe fn kill_process_handler(regs: &mut InterruptRegisters) {
-    let thread_id = super::get_thread_id();
-    let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
-    let was_in_kernel = thread.enter_kernel();
-
-    thread.process_kill_queue(thread_id, regs);
+    thread.process_urgent_messages();
+    thread.process_messages(thread_id, regs);
 
     if !was_in_kernel {
         thread.leave_kernel();
@@ -863,7 +881,7 @@ unsafe fn kill_process_handler(regs: &mut InterruptRegisters) {
 
 #[interrupt(x86)]
 unsafe fn syscall_handler(regs: &mut InterruptRegisters) {
-    crate::task::syscalls::syscall_handler(regs, regs.eax, regs.ebx as usize, regs.ecx as usize, regs.edx as usize);
+    crate::task::syscalls::syscall_handler(regs, regs.eax, regs.ebx as usize, regs.ecx as usize, regs.edx as usize, regs.edi as usize);
 }
 
 /// how many entries do we want in our IDT
@@ -942,9 +960,8 @@ pub unsafe fn init() {
     // APIC spurious interrupt
     IDT[0xf0] = IDTEntry::new(apic_spurious_handler as *const (), IDTFlags::Interrupt);
 
-    // page refresh interrupt
-    IDT[super::PAGE_REFRESH_INT] = IDTEntry::new(page_refresh_handler as *const (), IDTFlags::Interrupt);
-    IDT[super::KILL_PROCESS_INT] = IDTEntry::new(kill_process_handler as *const (), IDTFlags::Interrupt);
+    // inter-processor message interrupt
+    IDT[super::MESSAGE_INT] = IDTEntry::new(message_handler as *const (), IDTFlags::Interrupt);
 
     IDT[super::SYSCALL_INT] = IDTEntry::new(syscall_handler as *const (), IDTFlags::Call);
 

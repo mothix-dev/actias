@@ -1,5 +1,5 @@
 use super::paging::{PageDirectory, PageFrame, PagingError};
-use crate::{arch::KERNEL_PAGE_DIR_SPLIT, task::queue::PageUpdateEntry};
+use crate::arch::KERNEL_PAGE_DIR_SPLIT;
 use log::{debug, trace};
 use spin::{Mutex, MutexGuard};
 
@@ -28,20 +28,24 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<'_, D> {
             self.task.set_page(addr, page)?;
 
             trace!("(process {}) setting page {addr:#x} in kernel directory", self.process_id);
+            let thread_id = crate::arch::get_thread_id();
             while self.kernel.is_locked() {
-                crate::task::process_page_updates(crate::arch::get_thread_id());
+                // process urgent messages (like page updates) to prevent deadlocks here
+                if let Some(thread) = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id) {
+                    thread.process_urgent_messages();
+                }
                 crate::arch::spin();
             }
             self.kernel.lock().set_page(addr, page)?;
             self.kernel_space_updates = self.kernel_space_updates.wrapping_add(1);
 
             trace!("(process {}) sending page update", self.process_id);
-            crate::task::update_page(PageUpdateEntry::Kernel { addr });
+            crate::task::update_kernel_page(addr);
         } else {
             self.task.set_page(addr, page)?;
 
             if self.should_update_pages {
-                crate::task::update_page(PageUpdateEntry::Task { process_id: self.process_id, addr });
+                crate::task::update_task_page(self.process_id, addr);
             }
         }
 
@@ -117,7 +121,7 @@ impl<D: PageDirectory> PageDirectory for PageDirTracker<D> {
         self.page_dir.set_page(addr, page)?;
 
         if self.is_kernel && addr > KERNEL_PAGE_DIR_SPLIT {
-            crate::task::update_page(PageUpdateEntry::Kernel { addr });
+            crate::task::update_kernel_page(addr);
         }
 
         Ok(())
