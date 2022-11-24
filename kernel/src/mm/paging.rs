@@ -650,6 +650,14 @@ impl PageRefCounter {
         }
     }
 
+    pub fn remove_reference_no_free(&mut self, phys: u64) {
+        if let Some(reference) = self.references.get_mut(&phys) {
+            if reference.references > 1 {
+                reference.references -= 1;
+            }
+        }
+    }
+
     pub fn remove_reference(&mut self, phys: u64) {
         if let Some(reference) = self.references.get_mut(&phys) {
             if reference.references > 1 {

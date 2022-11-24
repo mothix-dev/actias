@@ -139,7 +139,7 @@ pub struct RegisterQueueEntry {
     pub message_num: Option<u32>,
 
     /// message data associated with this entry if it's been created for a message handler
-    pub message_data: Option<(usize, usize)>,
+    pub message_data: Option<u32>,
 }
 
 impl RegisterQueueEntry {

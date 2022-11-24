@@ -342,7 +342,13 @@ pub fn kmain() {
     crate::mm::paging::set_kernel_page_dir(unsafe { PAGE_DIR.take().unwrap() });
 
     // add shared memory area for video memory
-    crate::mm::shared::share_area(&(0xb8000..0xb8000 + 32 * 1024).step_by(PAGE_SIZE).collect::<Vec<u64>>()).unwrap();
+    let start = 0xb8000;
+    let end = start + 32 * 1024;
+    let mut temp = crate::mm::shared::TempMemoryShare::new(Default::default(), start, end - 1).unwrap();
+    for i in (start..end).step_by(PAGE_SIZE) {
+        temp.add_reserved(i as u64);
+    }
+    temp.share().unwrap();
 
     // arch code takes over here
     crate::arch::init(cmdline, modules);
