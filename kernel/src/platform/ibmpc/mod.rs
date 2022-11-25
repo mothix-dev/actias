@@ -348,7 +348,7 @@ pub fn kmain() {
     for i in (start..end).step_by(PAGE_SIZE) {
         temp.add_reserved(i as u64);
     }
-    temp.share().unwrap();
+    temp.share(Default::default()).unwrap();
 
     // arch code takes over here
     crate::arch::init(cmdline, modules);

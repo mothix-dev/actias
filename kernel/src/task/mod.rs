@@ -341,7 +341,7 @@ fn release_page_update_lock() {
 pub fn update_kernel_page(addr: usize) {
     let thread_id = crate::arch::get_thread_id();
 
-    debug!("(CPU {thread_id}) updating page @ {addr:?}");
+    debug!("(CPU {thread_id}) updating page @ {addr:#x}");
 
     if let Some(cpus) = get_cpus() {
         for (core_num, core) in cpus.cores.iter().enumerate() {

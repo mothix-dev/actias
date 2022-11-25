@@ -3,7 +3,7 @@
 use super::paging::{get_page_manager, PageDirectory, PageFrame};
 use crate::{task::get_process, util::array::ConsistentIndexArray};
 use alloc::{collections::BTreeMap, vec::Vec};
-use common::types::{Errno, ProcessID, Result};
+use common::types::{Errno, ProcessID, Result, MmapAccess};
 use log::{error, trace};
 use spin::Mutex;
 
@@ -15,6 +15,7 @@ pub static PHYS_TO_SHARED: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new(
 pub struct SharedMemoryArea {
     pub physical_addresses: Vec<u64>,
     pub references: usize,
+    pub access: MmapAccess,
 }
 
 pub fn free_shared_reference(addr: u64) -> bool {
@@ -47,6 +48,29 @@ pub fn free_shared_reference(addr: u64) -> bool {
     }
 
     true
+}
+
+pub fn release_shared_area(id: u32) -> Result<()> {
+    let mut shm_lock = SHARED_MEMORY_AREAS.lock();
+    let area = shm_lock.get_mut(id as usize).ok_or(Errno::InvalidArgument)?;
+
+    if area.physical_addresses.len() >= area.references {
+        // remove the area and free pages if there aren't any remaining references to it
+
+        trace!("no more references, freeing shared memory area {id}");
+
+        // free pages
+        for phys_addr in area.physical_addresses.iter() {
+            super::paging::PAGE_REF_COUNTER.lock().remove_reference(*phys_addr);
+        }
+
+        // remove area
+        shm_lock.remove(id as usize);
+    } else {
+        area.references -= area.physical_addresses.len();
+    }
+
+    Ok(())
 }
 
 enum FreeMode {
@@ -149,7 +173,7 @@ impl TempMemoryShare {
     }
 
     /// finishes building this shared memory region and returns its id
-    pub fn share(mut self) -> Result<u32> {
+    pub fn share(mut self, access: MmapAccess) -> Result<u32> {
         let mut new_phys_addrs = Vec::new();
         new_phys_addrs.try_reserve_exact(self.phys_addresses.len()).map_err(|_| Errno::OutOfMemory)?;
         for entry in self.phys_addresses.iter() {
@@ -162,26 +186,28 @@ impl TempMemoryShare {
             .add(SharedMemoryArea {
                 physical_addresses: new_phys_addrs,
                 references: self.phys_addresses.len(),
+                access,
             })
             .map_err(|_| Errno::OutOfMemory)?;
 
         if id >= MAX_SHARED_IDS as usize {
             shm_lock.remove(id);
 
-            Err(Errno::TryAgain)
-        } else {
-            drop(shm_lock);
-
-            // TODO: if an error occurs here, just remove the shared memory area like above
-            let id = id as u32;
-            let mut mapping = PHYS_TO_SHARED.lock();
-            for entry in self.phys_addresses.iter() {
-                mapping.insert(entry.phys_addr, id);
-            }
-            self.finished = true;
-
-            Ok(id)
+            return Err(Errno::TryAgain)
         }
+
+        drop(shm_lock);
+        let id = id as u32;
+
+        // TODO: if an error occurs here, just remove the shared memory area like above
+        let mut mapping = PHYS_TO_SHARED.lock();
+        for entry in self.phys_addresses.iter() {
+            mapping.insert(entry.phys_addr, id);
+        }
+
+        self.finished = true;
+
+        Ok(id)
     }
 }
 

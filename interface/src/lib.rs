@@ -1,6 +1,6 @@
 #![no_std]
 
-use common::types::{Errno, MmapFlags, MmapProtection, ProcessID, Result, Syscalls};
+use common::types::{Errno, MmapFlags, MmapAccess, ProcessID, Result, Syscalls};
 use core::arch::asm;
 
 #[inline]
@@ -139,7 +139,7 @@ pub fn fork() -> Result<u32> {
     unsafe { syscall_0_args(Syscalls::Fork) }
 }
 
-pub fn mmap(id: u32, addr_hint: *mut u8, length: usize, protection: MmapProtection, flags: MmapFlags) -> Result<*mut u8> {
+pub fn mmap(id: u32, addr_hint: *mut u8, length: usize, protection: MmapAccess, flags: MmapFlags) -> Result<*mut u8> {
     unsafe {
         syscall_4_args(
             Syscalls::Mmap,
@@ -205,7 +205,7 @@ pub fn send_message(target: u32, message: u32, data: Option<&[u8]>) -> Result<()
     Ok(())
 }
 
-pub fn set_message_handler(message: u32, priority: u8, handler: extern "fastcall" fn(u32)) -> Result<()> {
+pub fn set_message_handler(message: u32, priority: u8, handler: extern "fastcall" fn(u32, u32)) -> Result<()> {
     unsafe {
         syscall_3_args(Syscalls::MessageHandler, message, priority as u32, handler as u32)?;
     }

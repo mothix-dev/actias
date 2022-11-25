@@ -13,7 +13,7 @@ use crate::{
     task::RegisterQueueEntry,
 };
 use alloc::vec::Vec;
-use common::types::{Errno, MmapFlags, MmapProtection, Result, Syscalls};
+use common::types::{Errno, MmapFlags, MmapAccess, Result, Syscalls};
 use core::mem::size_of;
 use log::{debug, error, trace, warn};
 
@@ -205,7 +205,21 @@ pub const MINIMUM_MAPPING_ADDR: usize = 0x4000;
 
 fn syscall_mmap(thread: &CPUThread, shm_id: usize, mut start_addr: usize, mut length: usize, flags: usize) -> Result<usize> {
     let page_size = crate::arch::PageDirectory::PAGE_SIZE;
-    let protection = MmapProtection::from((flags >> 8) as u8);
+
+    if (flags >> 8) & 7 == 0 {
+        // having neither read nor write nor execute set is completely pointless
+        return Err(Errno::InvalidArgument);
+    }
+
+    let protection = {
+        let mut prot = MmapAccess::from((flags >> 8) as u8); // prot /ref
+
+        if (flags & MmapFlags::CopyOnWrite.bits() as usize) > 0 {
+            prot &= !MmapAccess::Write;
+        }
+
+        prot
+    };
     let flags = MmapFlags::from(flags as u8);
 
     if (flags & MmapFlags::Anonymous).bits() == 0 && length == 0 {
@@ -286,11 +300,11 @@ fn syscall_mmap(thread: &CPUThread, shm_id: usize, mut start_addr: usize, mut le
                         addr: physical_addresses[index],
                         present: true,
                         user_mode: true,
-                        writable: (protection & MmapProtection::Write).bits() > 0,
-                        executable: (protection & MmapProtection::Execute).bits() > 0,
+                        writable: (protection & MmapAccess::Write).bits() > 0,
+                        copy_on_write: (flags & MmapFlags::CopyOnWrite).bits() > 0,
+                        executable: (protection & MmapAccess::Execute).bits() > 0,
                         referenced: shared,
                         shared,
-                        ..Default::default()
                     }),
                 )
                 .map_err(|_| Errno::OutOfMemory)?;
@@ -329,9 +343,45 @@ fn syscall_mmap(thread: &CPUThread, shm_id: usize, mut start_addr: usize, mut le
         for i in slice.iter_mut() {
             *i = 0;
         }
+    } else if (flags & MmapFlags::CopyOnWrite).bits() > 0 && (flags & MmapFlags::Fixed).bits() > 0 {
+        // copy on write and fixed flags are set, mark this mapping as copy on write and unmap the pages that existed there beforehand
+
+        let mut original_pages = Vec::new();
+
+        {
+            let process = get_process(id.process).ok_or(Errno::NoSuchProcess)?;
+
+            for addr in (start_addr..=end_addr).step_by(page_size) {
+                if let Some(page) = process.page_directory.get_page(addr) {
+                    original_pages.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+                    original_pages.push(page);
+                }
+            }
+        }
+
+        let mut shm_lock = crate::mm::shared::SHARED_MEMORY_AREAS.lock();
+        let shm = shm_lock.get_mut(shm_id).ok_or(Errno::InvalidArgument)?;
+
+        // check to see if protection flags are valid
+        if (!shm.access & protection).bits() > 0 {
+            return Err(Errno::PermissionDenied);
+        }
+
+        map_memory(&shm.physical_addresses, true)?;
+
+        shm.references += num_pages;
+
+        for page in original_pages {
+            crate::mm::paging::free_page(page);
+        }
     } else {
         let mut shm_lock = crate::mm::shared::SHARED_MEMORY_AREAS.lock();
         let shm = shm_lock.get_mut(shm_id).ok_or(Errno::InvalidArgument)?;
+
+        // check to see if protection flags are valid
+        if (!shm.access & protection).bits() > 0 {
+            return Err(Errno::PermissionDenied);
+        }
 
         map_memory(&shm.physical_addresses, true)?;
 
@@ -391,7 +441,7 @@ fn syscall_getpid(thread_id: ThreadID, thread: &CPUThread, addr: usize) -> Resul
     }
 }
 
-fn syscall_share_memory(thread: &CPUThread, address: usize, length: usize) -> Result<usize> {
+fn syscall_share_memory(thread: &CPUThread, address: usize, length: usize, access: usize) -> Result<usize> {
     let page_size = crate::arch::PageDirectory::PAGE_SIZE;
 
     // validate arguments
@@ -399,6 +449,13 @@ fn syscall_share_memory(thread: &CPUThread, address: usize, length: usize) -> Re
         trace!("share_memory: addr {address:#x} + length {length:#x} would overflow");
         return Err(Errno::InvalidArgument);
     }
+
+    if access & 7 == 0 {
+        // having neither read nor write nor execute set is completely pointless
+        return Err(Errno::InvalidArgument);
+    }
+
+    let access = MmapAccess::from(access as u8);
 
     let start_addr = (address / page_size) * page_size;
     let end_addr = ((address + (length - 1)) / page_size) * page_size + (page_size - 1);
@@ -416,7 +473,7 @@ fn syscall_share_memory(thread: &CPUThread, address: usize, length: usize) -> Re
         entries.add_addr(addr)?;
     }
 
-    entries.share().map(|id| id as usize)
+    entries.share(access).map(|id| id as usize)
 }
 
 fn syscall_send_message(thread_id: ThreadID, cpu_thread: &CPUThread, target: usize, message: usize, data_start: usize, data_len: usize) -> Result<()> {
@@ -444,43 +501,48 @@ fn syscall_send_message(thread_id: ThreadID, cpu_thread: &CPUThread, target: usi
         stack_pointer = thread.register_queue.current().registers.stack_pointer();
     }
 
+    // TODO: properly handle copy on write for original pages
     let shm_id = if data_start > 0 && data_len > 0 {
         // we have data- create a shared memory region for it
 
         let current_id = cpu_thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
-
         let page_size = crate::arch::PageDirectory::PAGE_SIZE;
-        let data_end = data_start + data_len;
-        let start = (data_start / page_size) * page_size;
-        let end = (data_end / page_size) * page_size + page_size;
 
-        // TODO: handle data slice overflow
-
-        if start >= KERNEL_PAGE_DIR_SPLIT || end >= KERNEL_PAGE_DIR_SPLIT {
+        if usize::MAX - data_start < data_len {
+            trace!("send_message: addr {data_start:#x} + length {data_len:#x} would overflow");
+            return Err(Errno::InvalidArgument);
+        }
+    
+        let data_end = data_start + (data_len - 1);
+        let start_addr = (data_start / page_size) * page_size;
+        let end_addr = (data_end / page_size) * page_size + (page_size - 1);
+    
+        if start_addr >= KERNEL_PAGE_DIR_SPLIT || end_addr >= KERNEL_PAGE_DIR_SPLIT {
+            trace!("send_message: aligned area ({start_addr:#x} - {end_addr:#x}) is in kernel memory");
             return Err(Errno::InvalidArgument);
         }
 
-        let mut entries = TempMemoryShare::new(current_id, start, end - 1)?;
+        let mut entries = TempMemoryShare::new(current_id, start_addr, end_addr)?;
 
         let mut page_dir = get_page_dir(Some(thread_id));
 
-        if end == start + page_size {
+        if end_addr == start_addr + (page_size - 1) {
             // data only takes up one page
 
-            match page_dir.get_page(start) {
+            match page_dir.get_page(start_addr) {
                 Some(page) => {
-                    if data_start != start || data_end != end {
+                    if data_start != start_addr || data_end != end_addr {
                         let addr = get_page_manager().alloc_frame().map_err(|_| Errno::OutOfMemory)?;
                         entries.add_new(addr);
 
                         unsafe {
                             crate::mm::paging::map_memory(&mut page_dir, &[addr], |s| {
-                                let s = &mut s[data_start - start..data_end - start];
+                                let s = &mut s[data_start - start_addr..(data_end - start_addr) + 1];
                                 s.copy_from_slice(core::slice::from_raw_parts(data_start as *const u8, data_len));
                             })?;
                         }
                     } else {
-                        entries.add_page(start, page)?;
+                        entries.add_page(start_addr, page)?;
                     };
                 }
                 None => return Err(Errno::BadAddress),
@@ -489,55 +551,55 @@ fn syscall_send_message(thread_id: ThreadID, cpu_thread: &CPUThread, target: usi
             // data takes up multiple pages
 
             // share or copy the first page
-            match page_dir.get_page(start) {
+            match page_dir.get_page(start_addr) {
                 Some(page) => {
-                    if data_start != start {
+                    if data_start != start_addr {
                         let addr = get_page_manager().alloc_frame().map_err(|_| Errno::OutOfMemory)?;
                         entries.add_new(addr);
 
                         unsafe {
                             crate::mm::paging::map_memory(&mut page_dir, &[addr], |s| {
-                                let s = &mut s[data_start - start..];
+                                let s = &mut s[data_start - start_addr..];
                                 s.copy_from_slice(core::slice::from_raw_parts(data_start as *const u8, s.len()));
                             })?;
                         }
                     } else {
-                        entries.add_page(start, page)?;
+                        entries.add_page(start_addr, page)?;
                     }
                 }
                 None => return Err(Errno::BadAddress),
             }
 
             // share the middle pages, if there are any
-            for addr in (start + page_size..end - page_size).step_by(page_size) {
+            for addr in (start_addr + page_size..end_addr - page_size + 1).step_by(page_size) {
                 match page_dir.get_page(addr) {
-                    Some(page) => entries.add_page(start, page)?, // TODO: somehow make this copy on write?
+                    Some(page) => entries.add_page(start_addr, page)?, // TODO: somehow make this page copy on write?
                     None => return Err(Errno::BadAddress),
                 }
             }
 
             // share or copy the last page
-            match page_dir.get_page(end) {
+            match page_dir.get_page(end_addr) {
                 Some(page) => {
-                    if data_end != end {
+                    if data_end != end_addr {
                         let addr = get_page_manager().alloc_frame().map_err(|_| Errno::OutOfMemory)?;
                         entries.add_new(addr);
 
                         unsafe {
                             crate::mm::paging::map_memory(&mut page_dir, &[addr], |s| {
-                                let s = &mut s[..data_end - (end - page_size)];
+                                let s = &mut s[..(data_end - (end_addr - page_size)) + 1];
                                 s.copy_from_slice(core::slice::from_raw_parts(data_start as *const u8, s.len()));
                             })?;
                         }
                     } else {
-                        entries.add_page(start, page)?;
+                        entries.add_page(start_addr, page)?;
                     }
                 }
                 None => return Err(Errno::BadAddress),
             }
         }
 
-        Some(entries.share()?)
+        Some(entries.share(MmapAccess::Read)?)
     } else {
         // we don't have data, just return 0
         None
@@ -635,8 +697,13 @@ fn syscall_exit_message_handler(thread: &CPUThread, regs: &mut crate::arch::Regi
     let mut process = get_process(current_pid.process).ok_or(Errno::NoSuchProcess)?;
     let thread = process.threads.get_mut(current_pid.thread as usize).ok_or(Errno::NoSuchProcess)?;
 
-    thread.register_queue.pop().ok_or(Errno::TryAgain)?;
-    // TODO: remove kernel's references to shared memory for data so it'll be cleaned up when we don't need it anymore
+    let entry = thread.register_queue.pop().ok_or(Errno::TryAgain)?;
+
+    if let Some(shm_id) = entry.message_data {
+        if let Err(err) = crate::mm::shared::release_shared_area(shm_id) {
+            warn!("failed to release shared memory area when leaving message handler: {err:?}");
+        }
+    }
 
     regs.transfer(&thread.register_queue.current().registers);
 
@@ -693,7 +760,7 @@ pub fn syscall_handler(regs: &mut crate::arch::Registers, num: u32, arg0: usize,
         Ok(Syscalls::Mmap) => regs.syscall_return(syscall_mmap(thread, arg0, arg1, arg2, arg3)),
         Ok(Syscalls::Unmap) => regs.syscall_return(syscall_unmap(thread, arg0, arg1)),
         Ok(Syscalls::GetProcessID) => regs.syscall_return(syscall_getpid(thread_id, thread, arg0)),
-        Ok(Syscalls::ShareMemory) => regs.syscall_return(syscall_share_memory(thread, arg0, arg1)),
+        Ok(Syscalls::ShareMemory) => regs.syscall_return(syscall_share_memory(thread, arg0, arg1, arg2)),
         Ok(Syscalls::SendMessage) => regs.syscall_return(syscall_send_message(thread_id, thread, arg0, arg1, arg2, arg3).map(|_| 0)),
         Ok(Syscalls::MessageHandler) => regs.syscall_return(syscall_set_message_handler(thread_id, thread, arg0, arg1 as isize, arg2).map(|_| 0)),
         Ok(Syscalls::ExitMessageHandler) => {

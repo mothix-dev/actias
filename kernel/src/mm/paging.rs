@@ -780,6 +780,7 @@ pub fn free_page_dir<D: PageDirectory>(dir: &D) {
     }
 }
 
+/// given a page directory, address, and the page frame at that address, copy its contents to a new page and replace the existing page with the new one, freeing the old page in the process
 pub fn copy_on_write(page_dir: &mut impl PageDirectory, addr: usize, mut page: PageFrame) -> Result<PageFrame, PagingError> {
     let page_size = crate::arch::PageDirectory::PAGE_SIZE;
 
@@ -846,7 +847,7 @@ pub fn copy_on_write(page_dir: &mut impl PageDirectory, addr: usize, mut page: P
             trace!("freeing area");
             dealloc(copied_area, copied_layout);
 
-            PAGE_REF_COUNTER.lock().remove_reference(original_page.addr);
+            free_page(original_page);
 
             trace!("copied");
 
@@ -864,6 +865,9 @@ pub fn copy_on_write(page_dir: &mut impl PageDirectory, addr: usize, mut page: P
     }
 }
 
+/// used in page fault exception handlers to check whether to copy on write and do so if required
+/// 
+/// returns true if a copy was successful and false if it's not marked for copy on write
 pub fn try_copy_on_write(thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<bool, Errno> {
     let current_id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
 
