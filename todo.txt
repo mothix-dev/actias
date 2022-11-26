@@ -1,0 +1,52 @@
+things i need to get done, how to do them, and various architecture ideas (in no particular order), broken up into smaller parts when possible so that my neurodivergent ass can actually get things done
+
+ - cpu ids need to be linear for much faster lookup, we only care about topology sometimes in the scheduler
+    - make cpu ids linear, if cpu id to apic id (for example) isn't linear use a lookup table
+    - switch cpu list to a vec
+    - store topology information in a separate tree for simplicity's sake
+
+ - locks may need to be somewhat less granular and easier to manage
+    - maybe have various objects for different areas of the kernel that can be locked, and have associated methods in a class that's returned when the lock is acquired
+       - dispatch waiting tasks when locks are released, maybe do some basic cooperative multitasking for the kernel itself?
+       - if no items are in the queue, the first waiting task can spin, if a task is already spinning other tasks can add themselves to the queue, when tasks finish the next one can start spinning, etc
+         (idea literally just stolen from linux lmao)
+
+ - need to rethink how interrupts are handled- maybe add interrupt handlers to a list and immediately eoi so interrupt priority can be a thing? will probably let me abstract interrupts even more
+
+ - timer code needs to support tickless operation and automatic calibration so we don't have to deal with that bullshit
+    - add tickless support to the timer subsystem itself
+    - figure out how to detect apic timer frequency without counting it since that's So Fucking Painful and Very Slow
+
+ - better message handling
+    - have send_message queue messages with lower priority
+    - have send_message pick a thread to put messages on based on priority and how many messages are in the queue
+
+ - better process exception handling (effectively implement unix signals with the current message system)
+    - have reserved messages for a few signals, run message handlers when exceptions happen or fall back to default behavior (i.e. do nothing or kill the process)
+
+ - consider not bothering trying to double check validity of memory regions in syscall handlers and just shitting the page fault back out to userspace if it can be done with no kernel corruption risk?
+
+ - userspace hardware access
+    - userspace port access server
+    - userspace reserved memory access server
+
+ - exec syscall
+    - allow init to register a privileged process for handling exec calls, which can load process images from wherever and hand them off to the kernel when requested
+    - queue up exec calls if the exec handler is busy, if it dies or whatever it can just be loaded again automatically and be re-blessed by init
+
+ - initial process handling
+   keep init detection and stuff as is, since init will have special permissions (blessing exec, swap, etc handlers)
+   either load all binaries we can find in modules provided by the bootloader, or allow init to exec modules as processes
+   module exec could be done by having a default exec handler with all the modules mapped in? would probably cause problems if the exec handler is switched and then the new one dies
+   may be better to just find all binaries in discovered modules and execute them, restarting any that die
+   should there be an option on the kernel command line to specify modules to exec?
+
+ - better syscall handling
+    - load syscall shim into address spaces of all processes to handle syscalls
+    - disallow any syscalls originating from elsewhere
+    - switch syscall modes and shims based on the fastest method available
+       - (x86) add call gate support for faster syscalls
+       - (x86) add sysenter/sysexit support for faster syscalls on some cpus
+       - (x86) add syscall/sysret support for faster syscalls on some cpus
+
+ - Comment the Fucking Code Better you Idiot
