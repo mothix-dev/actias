@@ -7,7 +7,7 @@ pub mod queue;
 pub mod switch;
 pub mod syscalls;
 
-use crate::{arch::Registers, mm::sync::PageDirSync, util::array::ConsistentIndexArray};
+use crate::{arch::{Registers, get_thread_id}, mm::sync::PageDirSync, util::array::ConsistentIndexArray};
 use alloc::{collections::BTreeMap, vec::Vec};
 use common::types::{Errno, ProcessID, Result};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +30,9 @@ pub struct MessageHandler {
 
     /// the priority of this message handler, allows it to run before or after other processes with the same priority level
     pub priority: i8,
+
+    /// whether or not this message handler accepts data
+    pub has_data: bool,
 }
 
 pub struct Process {
@@ -139,7 +142,7 @@ pub struct RegisterQueueEntry {
     pub message_num: Option<u32>,
 
     /// message data associated with this entry if it's been created for a message handler
-    pub message_data: Option<u32>,
+    pub message_data: Option<usize>,
 }
 
 impl RegisterQueueEntry {
@@ -185,7 +188,22 @@ fn release_processes_lock() {
 pub fn get_process(id: u32) -> Option<spin::MutexGuard<'static, Process>> {
     take_processes_lock();
 
-    let res = unsafe { PROCESSES.get(id as usize).map(|p| p.lock()) };
+    let res = unsafe { PROCESSES.get(id as usize).map(|p| {
+        let thread_id = get_thread_id();
+        let mut has_warned = false;
+
+        loop {
+            match p.try_lock() {
+                Some(guard) => return guard,
+                None => {
+                    if !has_warned {
+                        debug!("warning (cpu {thread_id}): process {id} is locked");
+                        has_warned = true;
+                    }
+                }
+            }
+        }
+    }) };
 
     release_processes_lock();
 

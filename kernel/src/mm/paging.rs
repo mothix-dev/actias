@@ -529,7 +529,7 @@ pub fn get_page_manager() -> MutexGuard<'static, PageManager> {
                 Some(guard) => return guard,
                 None => {
                     if !has_warned {
-                        debug!("warning (cpu {}): page manager is locked", thread_id);
+                        debug!("warning (cpu {thread_id}): page manager is locked");
                         has_warned = true;
                     }
 
@@ -866,7 +866,7 @@ pub fn copy_on_write(page_dir: &mut impl PageDirectory, addr: usize, mut page: P
 }
 
 /// used in page fault exception handlers to check whether to copy on write and do so if required
-/// 
+///
 /// returns true if a copy was successful and false if it's not marked for copy on write
 pub fn try_copy_on_write(thread: &crate::task::cpu::CPUThread, addr: usize) -> Result<bool, Errno> {
     let current_id = thread.task_queue.lock().current().ok_or(Errno::NoSuchProcess)?.id();
@@ -889,4 +889,18 @@ pub fn try_copy_on_write(thread: &crate::task::cpu::CPUThread, addr: usize) -> R
     } else {
         Ok(false)
     }
+}
+
+pub fn validate_region(page_dir: &impl PageDirectory, start: usize, len: usize) -> bool {
+    let page_size = crate::arch::PageDirectory::PAGE_SIZE;
+    let start = (start / page_size) * page_size;
+    let end = ((start + len) / page_size) * page_size + page_size;
+
+    for addr in (start..end).step_by(page_size) {
+        if page_dir.get_page(addr).is_none() {
+            return false;
+        }
+    }
+
+    true
 }

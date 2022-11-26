@@ -870,8 +870,12 @@ unsafe fn message_handler(regs: &mut InterruptRegisters) {
     let thread = crate::task::get_cpus().expect("CPUs not initialized").get_thread(thread_id).unwrap();
     let was_in_kernel = thread.enter_kernel();
 
+    trace!("cpu {thread_id} processing messages");
+
     thread.process_urgent_messages();
     thread.process_messages(thread_id, regs);
+
+    trace!("cpu {thread_id} finished processing messages");
 
     if !was_in_kernel {
         thread.leave_kernel();

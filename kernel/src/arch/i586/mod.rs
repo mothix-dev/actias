@@ -497,6 +497,7 @@ pub fn init_alloc() {
                         // allocate page directory for task
                         trace!("getting task page directory");
                         let mut process = get_process(current.id().process).unwrap();
+                        trace!("got task page directory");
 
                         if !process.page_directory.task.has_page_table(addr.try_into().unwrap()) {
                             trace!("allocating new page table (task)");
@@ -570,6 +571,9 @@ pub fn init_alloc() {
     ALLOCATOR.set_expand_callback(&expand);
 }
 
+static mut BROUGHT_UP_CPUS: usize = 1;
+static mut CAN_START_CTX_SWITCHING: bool = false;
+
 pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'static [u8]>) {
     unsafe {
         ints::init_irqs();
@@ -616,9 +620,20 @@ pub fn init(args: Option<BTreeMap<&str, &str>>, modules: BTreeMap<String, &'stat
             }
         }
 
+        // we have multiple cpus running, so it's fine to spin lock the heap
+        crate::mm::heap::ALLOCATOR.set_can_spin(true);
+
         // bring up CPUs
         if apic_ids.len() > 1 {
             apic::bring_up_cpus(&apic_ids);
+        }
+
+        unsafe {
+            while BROUGHT_UP_CPUS < apic_ids.len() {
+                spin();
+            }
+
+            CAN_START_CTX_SWITCHING = true;
         }
     } else if cpuid.get_feature_info().map(|i| i.has_apic()).unwrap_or(false) {
         // we don't have ACPI but CPUID reports an APIC

@@ -719,6 +719,14 @@ unsafe extern "C" fn cpu_entry_point() {
 
     local_apic.check_error().unwrap();
 
+    unsafe {
+        super::BROUGHT_UP_CPUS += 1;
+
+        while !super::CAN_START_CTX_SWITCHING {
+            super::spin();
+        }
+    }
+
     super::start_context_switching();
 }
 

@@ -3,7 +3,7 @@
 use super::paging::{get_page_manager, PageDirectory, PageFrame};
 use crate::{task::get_process, util::array::ConsistentIndexArray};
 use alloc::{collections::BTreeMap, vec::Vec};
-use common::types::{Errno, ProcessID, Result, MmapAccess};
+use common::types::{Errno, MmapAccess, ProcessID, Result};
 use log::{error, trace};
 use spin::Mutex;
 
@@ -193,7 +193,7 @@ impl TempMemoryShare {
         if id >= MAX_SHARED_IDS as usize {
             shm_lock.remove(id);
 
-            return Err(Errno::TryAgain)
+            return Err(Errno::TryAgain);
         }
 
         drop(shm_lock);

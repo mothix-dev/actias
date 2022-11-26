@@ -36,11 +36,11 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
     };
 
     if let Some(m) = info.message() {
-        error!("PANIC (CPU {thread_id}): {m} @ {file}:{line}");
+        error!("CPU {thread_id} panicked at \"{m}\", {file}:{line}");
     } else if let Some(m) = info.payload().downcast_ref::<&str>() {
-        error!("PANIC (CPU {thread_id}): {m} @ {file}:{line}");
+        error!("CPU {thread_id} panicked at \"{m}\", {file}:{line}");
     } else {
-        error!("PANIC (CPU {thread_id}) @ {file}:{line}");
+        error!("CPU {thread_id} panicked at {file}:{line}");
     }
 
     // send NMI to all other CPUs, which should halt them

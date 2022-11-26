@@ -6,7 +6,7 @@ use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
 };
-use log::trace;
+use log::{trace, warn};
 use spin::Mutex;
 
 /// describes a CPU and its layout of cores and threads
@@ -164,6 +164,12 @@ pub enum Message {
 
     /// kill all threads of the specified process
     KillProcess(u32),
+
+    SendMessage {
+        process: u32,
+        message: u32,
+        data: Option<(u64, usize)>,
+    },
 }
 
 #[derive(Debug)]
@@ -235,6 +241,13 @@ impl CPUThread {
                     self.task_queue.lock().remove_process(id);
                     if let Some(current_id) = self.task_queue.lock().current().map(|c| c.id()) && current_id.process == id {
                         super::switch::manual_context_switch(self.timer, Some(cpu), regs, super::switch::ContextSwitchMode::Remove);
+                    }
+                }
+                Message::SendMessage { process, message, data } => {
+                    match super::ipc::send_message(cpu, self, regs, process, message, data) {
+                        Ok(_) => (),
+                        Err(Errno::NoSuchProcess) => (), // process doesn't exist, do nothing here since it probably exited
+                        Err(err) => warn!("(CPU {cpu}) couldn't send_message: {err:?}"),
                     }
                 }
             }
