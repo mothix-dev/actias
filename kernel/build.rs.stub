@@ -1,0 +1,1 @@
+vergen::vergen(vergen::Config::default()).unwrap();

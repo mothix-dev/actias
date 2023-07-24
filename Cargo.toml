@@ -1,0 +1,3 @@
+[workspace]
+members = [ "common", "kernel", "interface" ]
+resolver = "2"
