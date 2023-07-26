@@ -1,4 +1,4 @@
-use crate::{ArchProperties, ContiguousRegion};
+use super::{ArchProperties, ContiguousRegion};
 
 const SPLIT_ADDR: usize = 0xe0000000;
 
