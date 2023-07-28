@@ -3,7 +3,7 @@
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     array::BitSet,
-    mm::PageManager,
+    mm::{AllocState, PageDirectory, PageManager, ALLOCATOR},
 };
 use core::{alloc::Layout, ptr::NonNull};
 use log::debug;
@@ -122,10 +122,80 @@ impl BumpAllocator {
     }
 }
 
+struct InitPageDirReserved;
+
+impl super::ReservedMemory for InitPageDirReserved {
+    fn allocate() -> Result<Self, super::PagingError> {
+        unimplemented!();
+    }
+}
+
+/// used for virt_to_phys lookups when initializing the kernel page directory
+struct InitPageDir {
+    kernel_virt_addr: usize,
+    kernel_phys_addr: PhysicalAddress,
+    kernel_len: usize,
+    alloc_virt_addr: usize,
+    alloc_phys_addr: PhysicalAddress,
+    alloc_len: usize,
+}
+
+impl super::PageDirectory for InitPageDir {
+    const PAGE_SIZE: usize = 0;
+    type Reserved = InitPageDirReserved;
+
+    fn new(_current_dir: &impl super::PageDirectory) -> Result<Self, super::PagingError> {
+        unimplemented!();
+    }
+
+    fn get_page(&self, _addr: usize) -> Option<super::PageFrame> {
+        unimplemented!();
+    }
+
+    fn set_page(&mut self, _current_dir: &impl super::PageDirectory, _addr: usize, _page: Option<super::PageFrame>) -> Result<(), super::PagingError> {
+        unimplemented!();
+    }
+
+    fn set_page_no_alloc(
+        &mut self,
+        _current_dir: &impl super::PageDirectory,
+        _addr: usize,
+        _page: Option<super::PageFrame>,
+        _reserved_memory: Option<Self::Reserved>,
+    ) -> Result<(), super::PagingError> {
+        unimplemented!();
+    }
+
+    unsafe fn switch_to(&self) {
+        unimplemented!();
+    }
+
+    fn virt_to_phys(&self, virt: usize) -> Option<PhysicalAddress> {
+        if virt >= self.kernel_virt_addr && virt < self.kernel_virt_addr + self.kernel_len {
+            Some((virt - self.kernel_virt_addr) as PhysicalAddress + self.kernel_phys_addr)
+        } else if virt >= self.alloc_virt_addr && virt < self.alloc_virt_addr + self.alloc_len {
+            Some((virt - self.alloc_virt_addr) as PhysicalAddress + self.alloc_phys_addr)
+        } else {
+            None
+        }
+    }
+}
+
 /// initializes memory management given the initial memory map of the kernel and a way to get the full memory map
 pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_map: InitMemoryMap, memory_map_entries: I) {
     let mut bump_alloc = crate::mm::BumpAllocator::new(init_memory_map.bump_alloc_area);
     let slice = bump_alloc.collect_iter(memory_map_entries).unwrap();
+
+    let init_page_dir = InitPageDir {
+        kernel_virt_addr: init_memory_map.kernel_area.as_ptr() as *const _ as usize,
+        kernel_phys_addr: init_memory_map.kernel_phys,
+        kernel_len: init_memory_map.kernel_area.len(),
+        alloc_virt_addr: bump_alloc.area().as_ptr() as *const _ as usize,
+        alloc_phys_addr: init_memory_map.bump_alloc_phys,
+        alloc_len: bump_alloc.area().len(),
+    };
+
+    *ALLOCATOR.0.lock() = AllocState::BumpAlloc(bump_alloc);
 
     debug!("got {} memory map entries:", slice.len());
 
@@ -142,7 +212,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let highest_page = (highest_available as usize + PROPERTIES.page_size - 1) / PROPERTIES.page_size;
     debug!("highest available @ {highest_available:#x} / page {highest_page:#x}");
 
-    let mut set = BitSet::bump_allocate(&mut bump_alloc, highest_page).unwrap();
+    let mut set = BitSet::new(highest_page).unwrap();
 
     // fill the set with true values
     for num in set.array.to_slice_mut().iter_mut() {
@@ -187,23 +257,87 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let num_reserved = set.bits_used;
     debug!("{num_reserved} pages ({}k) reserved", num_reserved * PROPERTIES.page_size / 1024);
 
-    set_used(&mut set, page_size, init_memory_map.bump_alloc_phys, bump_alloc.area().len().try_into().unwrap());
+    set_used(&mut set, page_size, init_memory_map.bump_alloc_phys, init_page_dir.alloc_len.try_into().unwrap());
 
     let mut manager = PageManager::new(set, PROPERTIES.page_size);
     manager.num_reserved = num_reserved;
 
     manager.print_free();
 
-    // do things with the bump allocator here...
+    // create the kernel's new primary page directory
+    let mut page_dir = crate::arch::PageDirectory::new(&init_page_dir).unwrap();
+
+    fn map(page_dir: &mut crate::arch::PageDirectory, current_dir: &InitPageDir, base: usize, phys_base: PhysicalAddress, length: usize, executable: bool) {
+        // align the base address down to the nearest page boundary so this entire region is covered
+        let page_size = PROPERTIES.page_size;
+        let base_aligned = (base / page_size) * page_size;
+        let offset = base - base_aligned;
+        let len_aligned = length + offset + page_size - 1;
+        let phys_base: PhysicalAddress = phys_base - offset as PhysicalAddress;
+
+        for i in (0..len_aligned).step_by(page_size) {
+            page_dir
+                .set_page(
+                    current_dir,
+                    base_aligned + i,
+                    Some(super::PageFrame {
+                        addr: phys_base + i as PhysicalAddress,
+                        present: true,
+                        executable,
+                        writable: true,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+        }
+    }
+
+    // map in the kernel area
+    map(
+        &mut page_dir,
+        &init_page_dir,
+        init_page_dir.kernel_virt_addr,
+        init_page_dir.kernel_phys_addr,
+        init_page_dir.kernel_len,
+        true,
+    );
+    map(
+        &mut page_dir,
+        &init_page_dir,
+        init_page_dir.alloc_virt_addr,
+        init_page_dir.alloc_phys_addr,
+        init_page_dir.alloc_len,
+        false,
+    );
+    // TODO: map in heap area and init heap
+
+    // reclaim bump allocator
+    let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), AllocState::None) {
+        AllocState::BumpAlloc(bump_alloc) => bump_alloc,
+        _ => unreachable!(),
+    };
 
     bump_alloc.print_free();
 
     // free any extra memory used by the bump allocator
     let freed_area = bump_alloc.shrink();
-    let offset = unsafe { freed_area.as_ptr().offset_from(bump_alloc.area().as_ptr()) };
-    let freed_phys = init_memory_map.bump_alloc_phys + offset as PhysicalAddress;
+    let freed_offset = unsafe { freed_area.as_ptr().offset_from(bump_alloc.area().as_ptr()) };
+    let freed_phys = init_memory_map.bump_alloc_phys + freed_offset as PhysicalAddress;
 
-    set_free(&mut manager.frame_set, page_size, freed_phys, freed_area.len().try_into().unwrap());
+    let base_page = (freed_phys + page_size - 1) / page_size;
+    let offset = (base_page * page_size) - freed_phys;
+    let len_pages = (freed_area.len() as PhysicalAddress - offset) / page_size;
+    let base_virt = freed_area.as_ptr() as *const _ as usize + offset as usize;
+
+    for i in 0..len_pages {
+        manager.frame_set.clear((base_page + i).try_into().unwrap());
+        // this is a problem! can't borrow twice
+        page_dir.set_page(&init_page_dir, base_virt + i as usize * PROPERTIES.page_size, None).unwrap();
+    }
 
     manager.print_free();
+
+    unsafe {
+        page_dir.switch_to();
+    }
 }

@@ -16,3 +16,6 @@ pub const PROPERTIES: ArchProperties = ArchProperties {
 ///
 /// since PAE is optional and for i686 and up, there's no point in using a full 64 bit pointer when the top 32 bits are irrelevant
 pub type PhysicalAddress = u32;
+
+/// the page directory type for this architecture
+pub type PageDirectory = paging::PageDir;

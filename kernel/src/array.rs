@@ -1,6 +1,5 @@
 //! array utilities
 
-use crate::mm::{BumpAllocError, BumpAllocator};
 use alloc::{
     alloc::{alloc, dealloc},
     vec::Vec,
@@ -8,10 +7,13 @@ use alloc::{
 use core::{
     alloc::Layout,
     fmt,
-    mem::{align_of, size_of},
+    mem::size_of,
     ops::{Drop, Index, IndexMut},
     slice,
 };
+
+#[derive(Debug)]
+pub struct PtrAllocError;
 
 /// raw pointer as array of unknown size
 #[derive(Debug)]
@@ -31,7 +33,7 @@ unsafe impl<T> Send for RawPtrArray<T> {}
 
 impl<T> RawPtrArray<T> {
     /// create new raw ptr array and allocate memory for it
-    pub fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Result<Self, PtrAllocError> {
         // get alignment for type
         let align = Layout::new::<T>().align();
 
@@ -41,6 +43,10 @@ impl<T> RawPtrArray<T> {
         // allocate memory
         let array = unsafe { alloc(layout) };
 
+        if array.is_null() {
+            return Err(PtrAllocError);
+        }
+
         // zero out array
         for i in 0..size * size_of::<T>() {
             unsafe {
@@ -48,11 +54,11 @@ impl<T> RawPtrArray<T> {
             }
         }
 
-        Self {
+        Ok(Self {
             array: array as *mut T,
             layout: Some(layout),
             size,
-        }
+        })
     }
 
     /// create new raw pointer array at provided address
@@ -123,20 +129,9 @@ pub struct BitSet {
 
 impl BitSet {
     /// create a bitset and allocate memory for it
-    pub fn new(size: usize) -> Self {
-        Self {
-            array: RawPtrArray::new((size + 31) / 32), // always round up
-            size,
-            bits_used: 0,
-        }
-    }
-
-    /// allocates memory for a bitset with the given bump allocator
-    pub fn bump_allocate(alloc: &mut BumpAllocator, size: usize) -> Result<Self, BumpAllocError> {
-        let u32_size = (size + 31) / 32;
-        let ptr = unsafe { alloc.alloc(Layout::from_size_align(u32_size * size_of::<u32>(), align_of::<u32>()).unwrap())? };
+    pub fn new(size: usize) -> Result<Self, PtrAllocError> {
         Ok(Self {
-            array: RawPtrArray::place_at(ptr.as_ptr() as *mut _, size),
+            array: RawPtrArray::new((size + 31) / 32)?, // always round up
             size,
             bits_used: 0,
         })

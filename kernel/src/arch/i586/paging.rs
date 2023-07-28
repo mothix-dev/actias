@@ -4,57 +4,55 @@ use super::{PAGE_SIZE, SPLIT_ADDR};
 use crate::{
     arch::PhysicalAddress,
     mm::{PageDirectory, PageFrame, PagingError, ReservedMemory},
-    FormatHex,
 };
-use alloc::alloc::{alloc, alloc_zeroed, dealloc, Layout};
+use alloc::boxed::Box;
 use bitmask_enum::bitmask;
-use core::{arch::asm, fmt, mem::size_of};
+use core::{arch::asm, fmt, pin::Pin};
 use log::{error, trace};
-use x86::tlb::flush;
 
 /// entry in a page table
 #[repr(transparent)]
 #[derive(Copy, Clone, Default)]
-pub struct PageTableEntry(u32);
+struct PageTableEntry(u32);
 
 impl PageTableEntry {
     /// create new page table entry
-    pub const fn new(addr: u32, flags: PageTableFlags) -> Self {
+    const fn new(addr: u32, flags: PageTableFlags) -> Self {
         Self((addr & 0xfffff000) | (flags.bits & 0x0fff) as u32)
     }
 
     /// create an unused page table entry
-    pub const fn new_unused() -> Self {
+    const fn new_unused() -> Self {
         Self(0)
     }
 
     /// set address of page table entry
-    pub fn set_address(&mut self, addr: u32) {
+    /*fn set_address(&mut self, addr: u32) {
         self.0 = (self.0 & 0x00000fff) | (addr & 0xfffff000);
-    }
+    }*/
 
     /// set flags of page table entry
-    pub fn set_flags(&mut self, flags: PageTableFlags) {
+    fn set_flags(&mut self, flags: PageTableFlags) {
         self.0 = (self.0 & 0xfffff000) | (flags.bits & 0x00000fff) as u32;
     }
 
     /// checks if this page table entry is unused
-    pub fn is_unused(&self) -> bool {
+    fn is_unused(&self) -> bool {
         self.0 == 0 // lol. lmao
     }
 
     /// set page as unused and clear its fields
-    pub fn set_unused(&mut self) {
+    /*fn set_unused(&mut self) {
         self.0 = 0;
-    }
+    }*/
 
     /// gets address of page table entry
-    pub fn get_address(&self) -> u32 {
+    fn get_address(&self) -> u32 {
         self.0 & 0xfffff000
     }
 
     /// gets flags of page table entry
-    pub fn get_flags(&self) -> u16 {
+    fn get_flags(&self) -> u16 {
         (self.0 & 0x00000fff) as u16
     }
 }
@@ -100,7 +98,7 @@ impl TryFrom<PageFrame> for PageTableEntry {
             flags |= PageTableFlags::Referenced;
         }
 
-        Ok(PageTableEntry::new(frame.addr.try_into().map_err(|_| ())?, flags))
+        Ok(PageTableEntry::new(frame.addr, flags))
     }
 }
 
@@ -115,7 +113,7 @@ impl fmt::Debug for PageTableEntry {
 
 /// page table entry flags
 #[bitmask(u16)]
-pub enum PageTableFlags {
+enum PageTableFlags {
     /// no flags?
     None = 0,
 
@@ -220,48 +218,48 @@ impl fmt::Display for PageTableFlags {
 /// entry in a page directory
 #[repr(transparent)]
 #[derive(Copy, Clone, Default)]
-pub struct PageDirEntry(u32);
+struct PageDirEntry(u32);
 
 impl PageDirEntry {
     /// create new page directory entry
-    pub const fn new(addr: u32, flags: PageDirFlags) -> Self {
+    const fn new(addr: u32, flags: PageDirFlags) -> Self {
         Self((addr & 0xfffff000) | (flags.bits & 0x0fff) as u32)
     }
 
-    /// create an unused page directory entry
-    pub const fn new_unused() -> Self {
+    /*/// create an unused page directory entry
+    const fn new_unused() -> Self {
         Self(0)
     }
 
     /// set address of page directory entry
-    pub fn set_address(&mut self, addr: u32) {
+    fn set_address(&mut self, addr: u32) {
         self.0 = (self.0 & 0x00000fff) | (addr & 0xfffff000);
     }
 
     /// set flags of page directory entry
-    pub fn set_flags(&mut self, flags: PageDirFlags) {
+    fn set_flags(&mut self, flags: PageDirFlags) {
         self.0 = (self.0 & 0xfffff000) | (flags.bits & 0x0fff) as u32;
     }
 
     /// checks if this page dir entry is unused
-    pub fn is_unused(&self) -> bool {
+    fn is_unused(&self) -> bool {
         self.0 == 0 // lol. lmao
     }
 
     /// set page dir as unused and clear its fields
-    pub fn set_unused(&mut self) {
+    fn set_unused(&mut self) {
         self.0 = 0;
     }
 
     /// gets address of page directory entry
-    pub fn get_address(&self) -> u32 {
+    fn get_address(&self) -> u32 {
         self.0 & 0xfffff000
     }
 
     /// gets flags of page directory entry
-    pub fn get_flags(&self) -> u16 {
+    fn get_flags(&self) -> u16 {
         (self.0 & 0x00000fff) as u16
-    }
+    }*/
 }
 
 impl fmt::Debug for PageDirEntry {
@@ -277,7 +275,7 @@ impl fmt::Debug for PageDirEntry {
 /// all absent flags override flags of children, i.e. not having the read write bit set prevents
 /// all page table entries in the page directory from being writable
 #[bitmask(u16)]
-pub enum PageDirFlags {
+enum PageDirFlags {
     /// no flags?
     None = 0,
 
@@ -379,12 +377,13 @@ impl fmt::Display for PageDirFlags {
 ///
 /// basically just a wrapper for the array lmao
 #[derive(Debug)]
-#[repr(transparent)]
-pub struct PageTable {
-    pub entries: [PageTableEntry; 1024],
+#[repr(C)]
+#[repr(align(4096))]
+struct InternalPageTable {
+    entries: [PageTableEntry; 1024],
 }
 
-impl Default for PageTable {
+impl Default for InternalPageTable {
     fn default() -> Self {
         Self {
             entries: [PageTableEntry::new_unused(); 1024],
@@ -392,81 +391,45 @@ impl Default for PageTable {
     }
 }
 
-/// wrapper for a reference to a page table to help us manage allocations
-///
-/// allows us to store whether this reference was automatically allocated so it can be freed when its page directory is dropped
+/// stores a heap-allocated page table
 #[repr(C)]
-pub struct TableRef<'a> {
-    /// reference to the page table
-    pub table: &'a mut PageTable,
+#[derive(Debug)]
+pub struct TableRef {
+    table: Pin<Box<InternalPageTable>>,
 }
 
-impl fmt::Debug for TableRef<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TableRef").field("table", &FormatHex(self.table as *const _ as usize)).finish()
+impl ReservedMemory for TableRef {
+    fn allocate() -> Result<Self, PagingError> {
+        Ok(Self {
+            table: unsafe { Box::into_pin(Box::<InternalPageTable>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init()) },
+        })
     }
+}
+
+#[derive(Debug)]
+#[repr(C)]
+#[repr(align(4096))]
+struct InternalPageDir {
+    tables: [PageDirEntry; 1024],
 }
 
 /// x86 non-PAE PageDirectory implementation
 #[repr(C)]
-pub struct PageDir<'a> {
+#[derive(Debug)]
+pub struct PageDir {
     /// pointers to page tables
-    pub tables: &'a mut [Option<TableRef<'a>>; 1024],
+    tables: Box<[Option<TableRef>; 1024]>,
 
     /// physical addresses of page tables
-    pub tables_physical: &'a mut [PageDirEntry; 1024],
+    tables_physical: Pin<Box<InternalPageDir>>,
 
     /// physical address of tables_physical
-    pub tables_physical_addr: u32,
+    tables_physical_addr: u32,
 }
 
-impl fmt::Debug for PageDir<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TableRef")
-            .field("tables", &FormatHex(&self.tables[0] as *const _ as usize))
-            .field("tables_physical", &FormatHex(&self.tables_physical[0] as *const _ as usize))
-            .field("tables_physical_addr", &self.tables_physical_addr)
-            .finish()
-    }
-}
-
-pub fn is_page_dir_current(page_dir: &PageDir) -> bool {
-    page_dir.tables_physical_addr == unsafe { x86::controlregs::cr3() as u32 }
-}
-
-impl<'a> PageDir<'a> {
-    /// constructs a new PageDir, allocating memory for it in the process
-    pub fn new() -> Self {
-        unsafe {
-            let tables = {
-                // alloc_zeroed prolly doesnt work for this
-                let allocated = &mut *(alloc(Layout::new::<[Option<TableRef<'a>>; 1024]>()) as *mut [Option<TableRef<'a>>; 1024]);
-                for table_ref in allocated.iter_mut() {
-                    *table_ref = None;
-                }
-                allocated
-            };
-
-            let tables_physical = alloc_zeroed(Layout::from_size_align(size_of::<[PageDirEntry; 1024]>(), Self::PAGE_SIZE).unwrap());
-
-            /*let tables_physical_addr = CURRENT_PAGE_DIR
-            .as_mut()
-            .expect("no current page directory")
-            .virt_to_phys(tables_physical as usize)
-            .expect("allocated memory not mapped into kernel memory");*/
-            panic!("current page table virt_to_phys unimplemented");
-            let tables_physical_addr = 0;
-
-            Self {
-                tables,
-                tables_physical: &mut *(tables_physical as *mut [PageDirEntry; 1024]),
-                tables_physical_addr: tables_physical_addr.try_into().unwrap(),
-            }
-        }
-    }
-
+impl PageDir {
     /// adds an existing top level page table to the page directory
-    pub fn add_page_table(&mut self, addr: u32, table: &'a mut PageTable, physical_addr: u32) {
+    fn add_page_table(&mut self, addr: u32, table: Pin<Box<InternalPageTable>>, physical_addr: u32) {
         //assert!(addr & ((1 << 22) - 1) == 0, "address is not page table aligned (22 bits)");
 
         let idx = (addr >> 22) as usize;
@@ -475,67 +438,69 @@ impl<'a> PageDir<'a> {
             error!("overwriting an existing page table at {:#x} ({:#x})", addr, idx);
         }
 
-        trace!("adding a new page table for virt {:#x} @ {:#x} (phys {:#x})", addr, table as *mut _ as usize, physical_addr);
+        trace!("adding a new page table for virt {:#x} @ {:#x} (phys {:#x})", addr, &*table as *const _ as usize, physical_addr);
 
         if idx >= SPLIT_ADDR / PAGE_SIZE / 1024 {
-            self.tables_physical[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor | PageDirFlags::Global);
+            self.tables_physical.tables[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor | PageDirFlags::Global);
         } else {
-            self.tables_physical[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor);
+            self.tables_physical.tables[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor);
         }
 
-        trace!("physical entry is {:#x} ({:?})", self.tables_physical[idx].0, self.tables_physical[idx]);
+        trace!("physical entry is {:#x} ({:?})", self.tables_physical.tables[idx].0, self.tables_physical.tables[idx]);
 
         self.tables[idx] = Some(TableRef { table });
     }
 
-    /// removes a top level page table from the page directory
-    pub fn remove_page_table(&mut self, addr: u32) {
-        //assert!(addr & ((1 << 22) - 1) == 0, "address is not page table aligned (22 bits)");
+    fn insert_page(&mut self, page: Option<PageFrame>, addr: usize, table_idx: usize) -> Result<(), PagingError> {
+        let mut entry = if let Some(page) = page {
+            page.try_into().map_err(|_| PagingError::BadFrame)?
+        } else {
+            PageTableEntry::new_unused()
+        };
 
-        let idx = (addr >> 22) as usize;
-        let table = &mut self.tables[idx];
+        if addr >= SPLIT_ADDR {
+            entry.set_flags(PageTableFlags {
+                bits: entry.get_flags() | PageTableFlags::Global.bits,
+            });
+        }
 
-        if let Some(table_ref) = table.as_mut() {
-            // get pointer to page table
-            let ptr = table_ref.table as *mut PageTable as *mut u8;
+        self.tables[table_idx].as_mut().unwrap().table.entries[addr % 1024] = entry;
 
-            // mark page table as unused
-            *table = None;
-            self.tables_physical[idx].set_unused();
+        Ok(())
+    }
+}
 
-            // free page table
-            unsafe {
-                dealloc(ptr, Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap());
-            }
+impl PageDirectory for PageDir {
+    const PAGE_SIZE: usize = PAGE_SIZE;
+    type Reserved = TableRef;
+
+    fn new(current_dir: &impl PageDirectory) -> Result<Self, PagingError> {
+        unsafe {
+            let tables = {
+                // assume_init() is required here since otherwise there's no way to initialize the array without an expensive stack copy
+                let mut allocated: Box<[Option<TableRef>; 1024]> = Box::try_new_uninit().map_err(|_| PagingError::AllocError)?.assume_init();
+
+                for table_ref in allocated.iter_mut() {
+                    *table_ref = None;
+                }
+
+                allocated
+            };
+
+            // assume_init() is ok here because PageDirEntry is transparent and needs to be zeroed out
+            let tables_physical = Box::into_pin(Box::<InternalPageDir>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init());
+
+            let tables_physical_addr = current_dir
+                .virt_to_phys(&*tables_physical as *const _ as usize)
+                .expect("allocated memory not mapped into kernel memory");
+
+            Ok(Self {
+                tables,
+                tables_physical,
+                tables_physical_addr,
+            })
         }
     }
-
-    /// checks whether we have a page table for this address already, or whether we have to allocate one
-    pub fn has_page_table(&self, addr: u32) -> bool {
-        //assert!(addr & ((1 << 22) - 1) == 0, "address is not page table aligned (22 bits)");
-
-        let idx = (addr >> 22) as usize;
-        self.tables[idx].is_some()
-    }
-}
-
-impl<'a> Default for PageDir<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct PageDirReserved {}
-
-impl ReservedMemory for PageDirReserved {
-    fn allocate() -> Self {
-        Self {}
-    }
-}
-
-impl<'a> PageDirectory for PageDir<'a> {
-    const PAGE_SIZE: usize = PAGE_SIZE;
-    type Reserved = PageDirReserved;
 
     fn get_page(&self, mut addr: usize) -> Option<PageFrame> {
         addr /= PAGE_SIZE;
@@ -585,66 +550,50 @@ impl<'a> PageDirectory for PageDir<'a> {
         }
     }
 
-    fn set_page(&mut self, mut addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
+    fn set_page(&mut self, current_dir: &impl PageDirectory, mut addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
         addr /= PAGE_SIZE;
 
         let table_idx = addr / 1024;
 
         if self.tables[table_idx].is_none() {
-            // allocate memory for a new page-aligned page table
-            let layout = Layout::from_size_align(size_of::<PageTable>(), PAGE_SIZE).unwrap();
-            let ptr = unsafe { alloc_zeroed(layout) };
-
-            if ptr.is_null() {
-                Err(PagingError::AllocError)?;
+            if page.is_none() {
+                return Ok(());
             }
 
-            // make sure this newly allocated page table is located in kernel memory so its reference will be valid as long as our current page directory has an up to date copy of the kernel's page directory
-            assert!(ptr as usize >= SPLIT_ADDR, "new page table isn't in kernel memory");
+            // allocate memory for a new page-aligned page table
+            let table = unsafe { Box::into_pin(Box::<InternalPageTable>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init()) };
 
             // get the physical address of our new page table
-            /*let phys = unsafe {
-                CURRENT_PAGE_DIR
-                    .as_ref()
-                    .expect("no reference to current page directory")
-                    .virt_to_phys(ptr as usize)
-                    .expect("new page table isn't mapped into kernel memory")
-            };*/
-            panic!("current page table virt_to_phys unimplemented");
-            let phys = 0;
+            let phys = current_dir.virt_to_phys(&*table as *const _ as usize).expect("new page table isn't mapped into kernel memory");
 
-            self.add_page_table((addr * PAGE_SIZE).try_into().unwrap(), unsafe { &mut *(ptr as *mut PageTable) }, phys.try_into().unwrap());
+            self.add_page_table((addr * PAGE_SIZE).try_into().unwrap(), table, phys);
         }
 
-        let mut entry = if let Some(page) = page {
-            page.try_into().map_err(|_| PagingError::BadFrame)?
-        } else {
-            PageTableEntry::new_unused()
-        };
-
-        if addr >= SPLIT_ADDR {
-            entry.set_flags(PageTableFlags {
-                bits: entry.get_flags() | PageTableFlags::Global.bits,
-            });
-        }
-
-        self.tables[table_idx].as_mut().unwrap().table.entries[addr % 1024] = entry;
-
-        //trace!("table is now {:?}", self.tables[table_idx].as_mut().unwrap().table.entries[(addr % 1024) as usize]);
-
-        // invalidate this page in the tlb if we're modifying the current page directory
-        if is_page_dir_current(self) {
-            trace!("flushing {:#x} in tlb", addr * PAGE_SIZE);
-            unsafe {
-                flush(addr * PAGE_SIZE);
-            }
-        }
-
-        Ok(())
+        self.insert_page(page, addr, table_idx)
     }
 
-    fn set_page_no_alloc(&mut self, _addr: usize, _page: Option<PageFrame>, _reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError> {
-        todo!();
+    fn set_page_no_alloc(&mut self, current_dir: &impl PageDirectory, mut addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError> {
+        addr /= PAGE_SIZE;
+
+        let table_idx = addr / 1024;
+
+        if self.tables[table_idx].is_none() {
+            if page.is_none() {
+                return Ok(());
+            }
+
+            let table = match reserved_memory {
+                Some(reserved) => reserved.table,
+                None => return Err(PagingError::AllocError),
+            };
+
+            // get the physical address of our new page table
+            let phys = current_dir.virt_to_phys(&*table as *const _ as usize).expect("new page table isn't mapped into kernel memory");
+
+            self.add_page_table((addr * PAGE_SIZE).try_into().unwrap(), table, phys);
+        }
+
+        self.insert_page(page, addr, table_idx)
     }
 
     unsafe fn switch_to(&self) {
@@ -657,19 +606,5 @@ impl<'a> PageDirectory for PageDir<'a> {
             "mov cr3, {0}",
             in(reg) self.tables_physical_addr,
         );
-    }
-}
-
-impl<'a> Drop for PageDir<'a> {
-    fn drop(&mut self) {
-        // free any allocated page tables
-        for i in 0..1024 {
-            self.remove_page_table(i << 22);
-        }
-
-        unsafe {
-            dealloc(self.tables as *mut [Option<TableRef<'a>>; 1024] as *mut u8, Layout::new::<[Option<TableRef<'a>>; 1024]>());
-            dealloc(self.tables_physical as *mut [PageDirEntry; 1024] as *mut u8, Layout::new::<[PageDirEntry; 1024]>());
-        }
     }
 }

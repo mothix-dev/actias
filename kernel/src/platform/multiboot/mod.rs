@@ -5,8 +5,7 @@ use core::ptr::addr_of_mut;
 
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
-    array::BitSet,
-    mm::{MemoryRegion, PageManager},
+    mm::MemoryRegion,
 };
 
 /// the address the kernel is linked at

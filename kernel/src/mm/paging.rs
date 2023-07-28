@@ -166,7 +166,8 @@ impl core::fmt::Debug for PageFrame {
 /// if any allocations are made in types implementing this trait, they must be freed when it is dropped in order to prevent memory leaks.
 pub trait ReservedMemory {
     /// creates a new instance of this type and allocates memory for it
-    fn allocate() -> Self;
+    fn allocate() -> Result<Self, PagingError>
+    where Self: Sized;
 }
 
 /// safe abstraction layer for page directories. allows a consistent interface to page directories of multiple architectures
@@ -180,6 +181,14 @@ pub trait PageDirectory {
 
     /* -= Required functions -= */
 
+    /// creates a new instance of this page directory, allocating any necessary memory for it in the process
+    ///
+    /// # Arguments
+    ///
+    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations
+    fn new(current_dir: &impl PageDirectory) -> Result<Self, PagingError>
+    where Self: Sized;
+
     /// given a virtual address, gets the page that contains it from this directory in a hardware agnostic form
     fn get_page(&self, addr: usize) -> Option<PageFrame>;
 
@@ -187,9 +196,10 @@ pub trait PageDirectory {
     ///
     /// # Arguments
     ///
+    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations
     /// * `addr` - the virtual address to insert the page frame at
     /// * `page` - the page frame to insert
-    fn set_page(&mut self, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError>;
+    fn set_page(&mut self, current_dir: &impl PageDirectory, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError>;
 
     /// inserts a page frame into this page directory **without allocating memory**, using the reserved memory type given as a substitute for any allocations that may be
     /// made.
@@ -199,10 +209,11 @@ pub trait PageDirectory {
     ///
     /// # Arguments
     ///
+    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations
     /// * `addr` - the virtual address to insert the page frame at
     /// * `page` - the page frame to insert
     /// * `reserved_memory` - the region of memory reserved for storing any allocations that may need to happen while inserting a page
-    fn set_page_no_alloc(&mut self, addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError>;
+    fn set_page_no_alloc(&mut self, current_dir: &impl PageDirectory, addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError>;
 
     /// switch the mmu to this page directory
     ///

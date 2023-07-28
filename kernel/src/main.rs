@@ -1,8 +1,10 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+#![feature(allocator_api)]
 #![feature(generators)]
 #![feature(iter_from_generator)]
+#![feature(new_uninit)]
 #![feature(panic_info_message)]
 #![feature(pointer_byte_offsets)]
 
