@@ -6,7 +6,7 @@ use core::ptr::addr_of_mut;
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     array::BitSet,
-    mm::PageManager,
+    mm::{MemoryRegion, PageManager},
 };
 
 /// the address the kernel is linked at
@@ -51,7 +51,7 @@ pub fn kmain() {
     let mboot_ptr = unsafe { bootloader::mboot_ptr.byte_add(LINKED_BASE) };
 
     // create initial memory map based on where the kernel is loaded into memory
-    let memory_map = unsafe {
+    let init_memory_map = unsafe {
         let start_ptr = addr_of_mut!(kernel_start);
         let end_ptr = addr_of_mut!(kernel_end);
         let map_end = (LINKED_BASE + 1024 * PROPERTIES.page_size) as *const u8;
@@ -75,7 +75,7 @@ pub fn kmain() {
     };
 
     use log::debug;
-    debug!("kernel {}k, alloc {}k", memory_map.kernel_area.len() / 1024, memory_map.bump_alloc_area.len() / 1024);
+    debug!("kernel {}k, alloc {}k", init_memory_map.kernel_area.len() / 1024, init_memory_map.bump_alloc_area.len() / 1024);
 
     // create proper memory map from multiboot info
     let mmap_buf = unsafe {
@@ -89,7 +89,7 @@ pub fn kmain() {
         core::slice::from_raw_parts(mmap_addr as *const u8, info.mmap_length as usize)
     };
 
-    let entries = core::iter::from_generator(|| {
+    let memory_map_entries = core::iter::from_generator(|| {
         let mut offset = 0;
         while offset + core::mem::size_of::<bootloader::MemMapEntry>() <= mmap_buf.len() {
             let entry = unsafe { &*(&mmap_buf[offset] as *const _ as *const bootloader::MemMapEntry) };
@@ -97,92 +97,13 @@ pub fn kmain() {
                 break;
             }
 
-            yield entry;
+            yield MemoryRegion::from(entry);
 
             offset += entry.size as usize + 4; // the size field isn't counted towards size for some reason?? common gnu L
         }
     });
 
-    // refactor starting here into generic code for all platforms
-    let mut bump_alloc = crate::mm::BumpAllocator::new(memory_map.bump_alloc_area);
-    let slice = bump_alloc.collect_iter(entries.map(crate::mm::MemoryRegion::from)).unwrap();
-
-    debug!("got {} memory map entries:", slice.len());
-
-    // find highest available available address
-    let mut highest_available = 0;
-    for region in slice.iter() {
-        debug!("    {region:?}");
-        if region.kind == crate::mm::MemoryKind::Available {
-            highest_available = region.base.saturating_add(region.length);
-        }
-    }
-
-    // round up to nearest page boundary
-    let highest_page = (highest_available as usize + PROPERTIES.page_size - 1) / PROPERTIES.page_size;
-    debug!("highest available @ {highest_available:#x} / page {highest_page:#x}");
-
-    let mut set = BitSet::bump_allocate(&mut bump_alloc, highest_page).unwrap();
-
-    // fill the set with true values
-    for num in set.array.to_slice_mut().iter_mut() {
-        *num = 0xffffffff;
-    }
-    set.bits_used = set.size;
-
-    let page_size = PROPERTIES.page_size as PhysicalAddress;
-
-    fn set_used(set: &mut BitSet, page_size: PhysicalAddress, base: PhysicalAddress, length: PhysicalAddress) {
-        // align the base address down to the nearest page boundary so this entire region is covered
-        let base_page = base / page_size;
-        let offset = base - (base_page * page_size);
-        let len_pages = (length + offset + page_size - 1) / page_size;
-
-        for i in 0..len_pages {
-            set.set((base_page + i).try_into().unwrap());
-        }
-    }
-
-    fn set_free(set: &mut BitSet, page_size: PhysicalAddress, base: PhysicalAddress, length: PhysicalAddress) {
-        // align the base address up to the nearest page boundary to avoid overlapping with any unavailable regions
-        let base_page = (base + page_size - 1) / page_size;
-        let offset = (base_page * page_size) - base;
-        let len_pages = (length - offset) / page_size;
-
-        for i in 0..len_pages {
-            set.clear((base_page + i).try_into().unwrap());
-        }
-    }
-
-    // mark all available memory regions from the memory map
-    for region in slice.iter() {
-        if region.kind == crate::mm::MemoryKind::Available {
-            set_free(&mut set, page_size, region.base, region.length);
-        }
-    }
-
-    debug!("{} pages ({}k) reserved", set.bits_used, set.bits_used * PROPERTIES.page_size / 1024);
-
-    // mark the kernel and bump alloc areas as used
-    set_used(&mut set, page_size, memory_map.kernel_phys, memory_map.kernel_area.len().try_into().unwrap());
-    set_used(&mut set, page_size, memory_map.bump_alloc_phys, bump_alloc.area().len().try_into().unwrap());
-
-    let mut manager = PageManager::new(set, PROPERTIES.page_size);
-
-    manager.print_free();
-
-    // do things with the bump allocator here...
-
-    bump_alloc.print_free();
-
-    // free any extra memory used by the bump allocator
-    let freed_area = bump_alloc.shrink();
-    let offset = unsafe { freed_area.as_ptr().offset_from(bump_alloc.area().as_ptr()) };
-    let freed_phys = memory_map.bump_alloc_phys + offset as PhysicalAddress;
-
-    set_free(&mut manager.frame_set, page_size, freed_phys, freed_area.len().try_into().unwrap());
-
-    manager.print_free();
+    crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
 
     unsafe {
         use core::arch::asm;

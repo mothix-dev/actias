@@ -1,9 +1,9 @@
 mod init;
-mod paged;
+mod paging;
 mod regions;
 
 pub use init::*;
-pub use paged::*;
+pub use paging::*;
 pub use regions::*;
 
 use alloc::alloc::{GlobalAlloc, Layout};

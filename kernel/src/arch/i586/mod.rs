@@ -1,9 +1,13 @@
+pub mod paging;
+
 use super::{ArchProperties, ContiguousRegion};
 
 const SPLIT_ADDR: usize = 0xe0000000;
 
+const PAGE_SIZE: usize = 0x1000;
+
 pub const PROPERTIES: ArchProperties = ArchProperties {
-    page_size: 0x1000,
+    page_size: PAGE_SIZE,
     userspace_region: ContiguousRegion::new(0, SPLIT_ADDR),
     kernel_region: ContiguousRegion::new(SPLIT_ADDR, usize::MAX),
 };

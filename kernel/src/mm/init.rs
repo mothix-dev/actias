@@ -1,6 +1,10 @@
 //! code to handle memory management initialization
 
-use crate::arch::PhysicalAddress;
+use crate::{
+    arch::{PhysicalAddress, PROPERTIES},
+    array::BitSet,
+    mm::PageManager,
+};
 use core::{alloc::Layout, ptr::NonNull};
 use log::debug;
 
@@ -109,6 +113,97 @@ impl BumpAllocator {
     }
 
     pub fn print_free(&self) {
-        debug!("bump allocator: {}k/{}k used, {}% usage", self.position / 1024, self.area.len() / 1024, (self.position * 100) / self.area.len());
+        debug!(
+            "bump allocator: {}k/{}k used, {}% usage",
+            self.position / 1024,
+            self.area.len() / 1024,
+            (self.position * 100) / self.area.len()
+        );
     }
+}
+
+/// initializes memory management given the initial memory map of the kernel and a way to get the full memory map
+pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_map: InitMemoryMap, memory_map_entries: I) {
+    let mut bump_alloc = crate::mm::BumpAllocator::new(init_memory_map.bump_alloc_area);
+    let slice = bump_alloc.collect_iter(memory_map_entries).unwrap();
+
+    debug!("got {} memory map entries:", slice.len());
+
+    // find highest available available address
+    let mut highest_available = 0;
+    for region in slice.iter() {
+        debug!("    {region:?}");
+        if region.kind == crate::mm::MemoryKind::Available {
+            highest_available = region.base.saturating_add(region.length);
+        }
+    }
+
+    // round up to nearest page boundary
+    let highest_page = (highest_available as usize + PROPERTIES.page_size - 1) / PROPERTIES.page_size;
+    debug!("highest available @ {highest_available:#x} / page {highest_page:#x}");
+
+    let mut set = BitSet::bump_allocate(&mut bump_alloc, highest_page).unwrap();
+
+    // fill the set with true values
+    for num in set.array.to_slice_mut().iter_mut() {
+        *num = 0xffffffff;
+    }
+    set.bits_used = set.size;
+
+    let page_size = PROPERTIES.page_size as PhysicalAddress;
+
+    fn set_used(set: &mut BitSet, page_size: PhysicalAddress, base: PhysicalAddress, length: PhysicalAddress) {
+        // align the base address down to the nearest page boundary so this entire region is covered
+        let base_page = base / page_size;
+        let offset = base - (base_page * page_size);
+        let len_pages = (length + offset + page_size - 1) / page_size;
+
+        for i in 0..len_pages {
+            set.set((base_page + i).try_into().unwrap());
+        }
+    }
+
+    fn set_free(set: &mut BitSet, page_size: PhysicalAddress, base: PhysicalAddress, length: PhysicalAddress) {
+        // align the base address up to the nearest page boundary to avoid overlapping with any unavailable regions
+        let base_page = (base + page_size - 1) / page_size;
+        let offset = (base_page * page_size) - base;
+        let len_pages = (length - offset) / page_size;
+
+        for i in 0..len_pages {
+            set.clear((base_page + i).try_into().unwrap());
+        }
+    }
+
+    // mark all available memory regions from the memory map
+    for region in slice.iter() {
+        if region.kind == crate::mm::MemoryKind::Available {
+            set_free(&mut set, page_size, region.base, region.length);
+        }
+    }
+
+    // mark the kernel and bump alloc areas as used
+    set_used(&mut set, page_size, init_memory_map.kernel_phys, init_memory_map.kernel_area.len().try_into().unwrap());
+
+    let num_reserved = set.bits_used;
+    debug!("{num_reserved} pages ({}k) reserved", num_reserved * PROPERTIES.page_size / 1024);
+
+    set_used(&mut set, page_size, init_memory_map.bump_alloc_phys, bump_alloc.area().len().try_into().unwrap());
+
+    let mut manager = PageManager::new(set, PROPERTIES.page_size);
+    manager.num_reserved = num_reserved;
+
+    manager.print_free();
+
+    // do things with the bump allocator here...
+
+    bump_alloc.print_free();
+
+    // free any extra memory used by the bump allocator
+    let freed_area = bump_alloc.shrink();
+    let offset = unsafe { freed_area.as_ptr().offset_from(bump_alloc.area().as_ptr()) };
+    let freed_phys = init_memory_map.bump_alloc_phys + offset as PhysicalAddress;
+
+    set_free(&mut manager.frame_set, page_size, freed_phys, freed_area.len().try_into().unwrap());
+
+    manager.print_free();
 }
