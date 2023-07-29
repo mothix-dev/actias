@@ -429,16 +429,24 @@ pub struct PageDir {
 
 impl PageDir {
     /// adds an existing top level page table to the page directory
-    fn add_page_table(&mut self, addr: u32, table: Pin<Box<InternalPageTable>>, physical_addr: u32) {
+    fn add_page_table(&mut self, addr: usize, table: TableRef, current_dir: Option<&impl PageDirectory>) {
         //assert!(addr & ((1 << 22) - 1) == 0, "address is not page table aligned (22 bits)");
 
-        let idx = (addr >> 22) as usize;
+        // get the physical address of our new page table
+        let virt = &*table.table as *const _ as usize;
+        let physical_addr = match current_dir {
+            Some(dir) => dir.virt_to_phys(virt),
+            None => self.virt_to_phys(virt),
+        }
+        .expect("new page table isn't mapped into kernel memory");
+
+        let idx = addr >> 22;
 
         if self.tables[idx].is_some() {
             error!("overwriting an existing page table at {:#x} ({:#x})", addr, idx);
         }
 
-        trace!("adding a new page table for virt {:#x} @ {:#x} (phys {:#x})", addr, &*table as *const _ as usize, physical_addr);
+        trace!("adding a new page table for virt {:#x} @ {:#x} (phys {:#x})", addr, virt, physical_addr);
 
         if idx >= SPLIT_ADDR / PAGE_SIZE / 1024 {
             self.tables_physical.tables[idx] = PageDirEntry::new(physical_addr, PageDirFlags::Present | PageDirFlags::ReadWrite | PageDirFlags::UserSupervisor | PageDirFlags::Global);
@@ -448,7 +456,7 @@ impl PageDir {
 
         trace!("physical entry is {:#x} ({:?})", self.tables_physical.tables[idx].0, self.tables_physical.tables[idx]);
 
-        self.tables[idx] = Some(TableRef { table });
+        self.tables[idx] = Some(table);
     }
 
     fn insert_page(&mut self, page: Option<PageFrame>, addr: usize, table_idx: usize) -> Result<(), PagingError> {
@@ -550,7 +558,8 @@ impl PageDirectory for PageDir {
         }
     }
 
-    fn set_page(&mut self, current_dir: &impl PageDirectory, mut addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
+    fn set_page(&mut self, current_dir: Option<&impl PageDirectory>, mut addr: usize, page: Option<PageFrame>) -> Result<(), PagingError> {
+        let orig_addr = addr;
         addr /= PAGE_SIZE;
 
         let table_idx = addr / 1024;
@@ -560,19 +569,14 @@ impl PageDirectory for PageDir {
                 return Ok(());
             }
 
-            // allocate memory for a new page-aligned page table
-            let table = unsafe { Box::into_pin(Box::<InternalPageTable>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init()) };
-
-            // get the physical address of our new page table
-            let phys = current_dir.virt_to_phys(&*table as *const _ as usize).expect("new page table isn't mapped into kernel memory");
-
-            self.add_page_table((addr * PAGE_SIZE).try_into().unwrap(), table, phys);
+            self.add_page_table(orig_addr, TableRef::allocate()?, current_dir);
         }
 
         self.insert_page(page, addr, table_idx)
     }
 
-    fn set_page_no_alloc(&mut self, current_dir: &impl PageDirectory, mut addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError> {
+    fn set_page_no_alloc(&mut self, current_dir: Option<&impl PageDirectory>, mut addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError> {
+        let orig_addr = addr;
         addr /= PAGE_SIZE;
 
         let table_idx = addr / 1024;
@@ -582,15 +586,7 @@ impl PageDirectory for PageDir {
                 return Ok(());
             }
 
-            let table = match reserved_memory {
-                Some(reserved) => reserved.table,
-                None => return Err(PagingError::AllocError),
-            };
-
-            // get the physical address of our new page table
-            let phys = current_dir.virt_to_phys(&*table as *const _ as usize).expect("new page table isn't mapped into kernel memory");
-
-            self.add_page_table((addr * PAGE_SIZE).try_into().unwrap(), table, phys);
+            self.add_page_table(orig_addr, reserved_memory.ok_or(PagingError::AllocError)?, current_dir);
         }
 
         self.insert_page(page, addr, table_idx)

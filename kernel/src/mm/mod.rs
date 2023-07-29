@@ -1,19 +1,22 @@
+mod heap;
 mod init;
 mod paging;
 mod regions;
 
+pub use heap::*;
 pub use init::*;
-use log::error;
 pub use paging::*;
 pub use regions::*;
 
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ops::DerefMut;
+use log::error;
 use spin::Mutex;
 
 pub enum AllocState {
     None,
     BumpAlloc(BumpAllocator),
+    Heap(HeapAllocator<<crate::arch::PageDirectory as paging::PageDirectory>::Reserved>),
 }
 
 pub struct CustomAlloc(pub Mutex<AllocState>);
@@ -27,11 +30,20 @@ unsafe impl GlobalAlloc for CustomAlloc {
                 Ok(ptr) => ptr.as_ptr(),
                 Err(_) => core::ptr::null_mut(),
             },
+            AllocState::Heap(allocator) => match allocator.alloc(layout) {
+                Ok(ptr) => ptr.as_ptr(),
+                Err(_) => core::ptr::null_mut(),
+            },
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        error!("can't free ({layout:?} @ {ptr:?})");
+        let mut state = self.0.lock();
+        match state.deref_mut() {
+            AllocState::Heap(allocator) => allocator.dealloc(ptr, layout),
+            _ => error!("can't free ({layout:?} @ {ptr:?})"),
+        }
+        
     }
 }
 

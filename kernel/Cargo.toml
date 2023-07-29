@@ -11,6 +11,7 @@ log = "0.4"
 x86 = "0.52"
 bitmask-enum = "2"
 spin = "0.9"
+linked_list_allocator = "0.10"
 
 [build-dependencies]
 cc = "1"

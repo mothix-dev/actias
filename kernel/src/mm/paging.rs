@@ -196,10 +196,11 @@ pub trait PageDirectory {
     ///
     /// # Arguments
     ///
-    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations
+    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations.
+    /// if this is None then address translations must be done in the page directory this is called on
     /// * `addr` - the virtual address to insert the page frame at
     /// * `page` - the page frame to insert
-    fn set_page(&mut self, current_dir: &impl PageDirectory, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError>;
+    fn set_page(&mut self, current_dir: Option<&impl PageDirectory>, addr: usize, page: Option<PageFrame>) -> Result<(), PagingError>;
 
     /// inserts a page frame into this page directory **without allocating memory**, using the reserved memory type given as a substitute for any allocations that may be
     /// made.
@@ -209,11 +210,12 @@ pub trait PageDirectory {
     ///
     /// # Arguments
     ///
-    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations
+    /// * `current_dir` - the currently active page directory, used for virtual to physical address translations.
+    /// if this is None then address translations must be done in the page directory this is called on
     /// * `addr` - the virtual address to insert the page frame at
     /// * `page` - the page frame to insert
     /// * `reserved_memory` - the region of memory reserved for storing any allocations that may need to happen while inserting a page
-    fn set_page_no_alloc(&mut self, current_dir: &impl PageDirectory, addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError>;
+    fn set_page_no_alloc(&mut self, current_dir: Option<&impl PageDirectory>, addr: usize, page: Option<PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), PagingError>;
 
     /// switch the mmu to this page directory
     ///

@@ -1,124 +1,13 @@
 //! array utilities
 
-use alloc::{
-    alloc::{alloc, dealloc},
-    vec::Vec,
-};
-use core::{
-    alloc::Layout,
-    fmt,
-    mem::size_of,
-    ops::{Drop, Index, IndexMut},
-    slice,
-};
-
-#[derive(Debug)]
-pub struct PtrAllocError;
-
-/// raw pointer as array of unknown size
-#[derive(Debug)]
-#[repr(C)]
-pub struct RawPtrArray<T> {
-    /// raw pointer to memory
-    array: *mut T,
-
-    /// layout used when allocating our array, optional since we may not have allocated
-    layout: Option<Layout>,
-
-    /// size of array
-    pub size: usize,
-}
-
-unsafe impl<T> Send for RawPtrArray<T> {}
-
-impl<T> RawPtrArray<T> {
-    /// create new raw ptr array and allocate memory for it
-    pub fn new(size: usize) -> Result<Self, PtrAllocError> {
-        // get alignment for type
-        let align = Layout::new::<T>().align();
-
-        // create layout to allocate with
-        let layout = Layout::from_size_align(size * size_of::<T>(), align).unwrap();
-
-        // allocate memory
-        let array = unsafe { alloc(layout) };
-
-        if array.is_null() {
-            return Err(PtrAllocError);
-        }
-
-        // zero out array
-        for i in 0..size * size_of::<T>() {
-            unsafe {
-                (*array.add(i)) = 0;
-            }
-        }
-
-        Ok(Self {
-            array: array as *mut T,
-            layout: Some(layout),
-            size,
-        })
-    }
-
-    /// create new raw pointer array at provided address
-    pub fn place_at(addr: *mut T, size: usize) -> Self {
-        // zero out array
-        for i in 0..size * size_of::<T>() {
-            unsafe {
-                (*(addr as *mut u8).add(i)) = 0;
-            }
-        }
-
-        Self { array: addr, layout: None, size }
-    }
-
-    /// returns a slice representation of this array
-    pub fn to_slice(&self) -> &[T] {
-        unsafe { slice::from_raw_parts(self.array, self.size) }
-    }
-
-    /// returns a mutable slice representation of this array
-    pub fn to_slice_mut(&mut self) -> &mut [T] {
-        unsafe { slice::from_raw_parts_mut(self.array, self.size) }
-    }
-}
-
-impl<T> Index<usize> for RawPtrArray<T> {
-    type Output = T;
-    fn index(&self, i: usize) -> &T {
-        if i >= self.size {
-            panic!("attempted to index outside of array");
-        }
-        unsafe { &*self.array.add(i) }
-    }
-}
-
-impl<T> IndexMut<usize> for RawPtrArray<T> {
-    fn index_mut(&mut self, i: usize) -> &mut T {
-        if i >= self.size {
-            panic!("attempted to index outside of array");
-        }
-        unsafe { &mut *self.array.add(i) }
-    }
-}
-
-impl<T> Drop for RawPtrArray<T> {
-    fn drop(&mut self) {
-        // deallocate our memory if necessary
-        if let Some(layout) = self.layout {
-            unsafe {
-                dealloc(self.array as *mut u8, layout);
-            }
-        }
-    }
-}
+use alloc::{boxed::Box, vec::Vec};
+use core::fmt;
 
 /// simple bitset, acts sorta like an array but you access single bits
 #[repr(C)]
 pub struct BitSet {
     /// array of bytes that the bitset uses
-    pub array: RawPtrArray<u32>,
+    pub array: Box<[u32]>,
 
     /// amount of bits we can set
     pub size: usize,
@@ -129,9 +18,14 @@ pub struct BitSet {
 
 impl BitSet {
     /// create a bitset and allocate memory for it
-    pub fn new(size: usize) -> Result<Self, PtrAllocError> {
+    pub fn new(size: usize) -> Result<Self, alloc::collections::TryReserveError> {
+        let mut array = Vec::new();
+        let u32_size = (size + 31) / 32;
+        array.try_reserve_exact(u32_size)?;
+        array.resize(u32_size, 0);
+
         Ok(Self {
-            array: RawPtrArray::new((size + 31) / 32)?, // always round up
+            array: array.into_boxed_slice(), // always round up
             size,
             bits_used: 0,
         })
@@ -171,7 +65,7 @@ impl BitSet {
 
     /// clear all the bits in the set
     pub fn clear_all(&mut self) {
-        for i in 0..self.array.size {
+        for i in 0..self.array.len() {
             self.array[i] = 0;
         }
         self.bits_used = 0;
@@ -190,7 +84,7 @@ impl BitSet {
 
     /// gets first unset bit
     pub fn first_unset(&self) -> Option<usize> {
-        for i in 0..self.array.size {
+        for i in 0..self.array.len() {
             let f = self.array[i];
             if f != 0xffffffff {
                 // only test individual bits if there are bits to be tested

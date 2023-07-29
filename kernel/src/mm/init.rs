@@ -152,13 +152,13 @@ impl super::PageDirectory for InitPageDir {
         unimplemented!();
     }
 
-    fn set_page(&mut self, _current_dir: &impl super::PageDirectory, _addr: usize, _page: Option<super::PageFrame>) -> Result<(), super::PagingError> {
+    fn set_page(&mut self, _current_dir: Option<&impl super::PageDirectory>, _addr: usize, _page: Option<super::PageFrame>) -> Result<(), super::PagingError> {
         unimplemented!();
     }
 
     fn set_page_no_alloc(
         &mut self,
-        _current_dir: &impl super::PageDirectory,
+        _current_dir: Option<&impl super::PageDirectory>,
         _addr: usize,
         _page: Option<super::PageFrame>,
         _reserved_memory: Option<Self::Reserved>,
@@ -215,7 +215,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let mut set = BitSet::new(highest_page).unwrap();
 
     // fill the set with true values
-    for num in set.array.to_slice_mut().iter_mut() {
+    for num in set.array.iter_mut() {
         *num = 0xffffffff;
     }
     set.bits_used = set.size;
@@ -267,7 +267,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     // create the kernel's new primary page directory
     let mut page_dir = crate::arch::PageDirectory::new(&init_page_dir).unwrap();
 
-    fn map(page_dir: &mut crate::arch::PageDirectory, current_dir: &InitPageDir, base: usize, phys_base: PhysicalAddress, length: usize, executable: bool) {
+    fn map(page_dir: &mut crate::arch::PageDirectory, current_dir: Option<&InitPageDir>, base: usize, phys_base: PhysicalAddress, length: usize, executable: bool) {
         // align the base address down to the nearest page boundary so this entire region is covered
         let page_size = PROPERTIES.page_size;
         let base_aligned = (base / page_size) * page_size;
@@ -295,7 +295,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     // map in the kernel area
     map(
         &mut page_dir,
-        &init_page_dir,
+        Some(&init_page_dir),
         init_page_dir.kernel_virt_addr,
         init_page_dir.kernel_phys_addr,
         init_page_dir.kernel_len,
@@ -303,7 +303,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     );
     map(
         &mut page_dir,
-        &init_page_dir,
+        Some(&init_page_dir),
         init_page_dir.alloc_virt_addr,
         init_page_dir.alloc_phys_addr,
         init_page_dir.alloc_len,
@@ -331,8 +331,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
     for i in 0..len_pages {
         manager.frame_set.clear((base_page + i).try_into().unwrap());
-        // this is a problem! can't borrow twice
-        page_dir.set_page(&init_page_dir, base_virt + i as usize * PROPERTIES.page_size, None).unwrap();
+        page_dir.set_page(Some(&init_page_dir), base_virt + i as usize * PROPERTIES.page_size, None).unwrap();
     }
 
     manager.print_free();
