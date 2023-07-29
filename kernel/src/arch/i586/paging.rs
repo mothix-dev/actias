@@ -7,7 +7,7 @@ use crate::{
 };
 use alloc::boxed::Box;
 use bitmask_enum::bitmask;
-use core::{arch::asm, fmt, pin::Pin};
+use core::{arch::asm, fmt, mem::ManuallyDrop, pin::Pin};
 use log::{error, trace};
 
 /// entry in a page table
@@ -489,7 +489,8 @@ impl PageDirectory for PageDir {
                 let mut allocated: Box<[Option<TableRef>; 1024]> = Box::try_new_uninit().map_err(|_| PagingError::AllocError)?.assume_init();
 
                 for table_ref in allocated.iter_mut() {
-                    *table_ref = None;
+                    // assigning normally can cause the garbage initial values to be dropped, which is UB
+                    let _ = ManuallyDrop::new(table_ref.take());
                 }
 
                 allocated

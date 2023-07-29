@@ -186,7 +186,7 @@ impl super::PageDirectory for InitPageDir {
 /// initializes memory management given the initial memory map of the kernel and a way to get the full memory map
 pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_map: InitMemoryMap, memory_map_entries: I) {
     let mut bump_alloc = crate::mm::BumpAllocator::new(init_memory_map.bump_alloc_area);
-    let slice = bump_alloc.collect_iter(memory_map_entries).unwrap();
+    let slice = bump_alloc.collect_iter(memory_map_entries).expect("couldn't collect memory map entries");
 
     let init_page_dir = InitPageDir {
         kernel_region: init_memory_map.kernel_area.into(),
@@ -212,7 +212,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let highest_page = (highest_available as usize + PROPERTIES.page_size - 1) / PROPERTIES.page_size;
     debug!("highest available @ {highest_available:#x} / page {highest_page:#x}");
 
-    let mut set = BitSet::new(highest_page).unwrap();
+    let mut set = BitSet::new(highest_page).expect("couldn't create bitset for page allocation");
 
     // fill the set with true values
     for num in set.array.iter_mut() {
@@ -269,7 +269,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     manager.print_free();
 
     // create the kernel's new primary page directory
-    let mut page_dir = crate::arch::PageDirectory::new(&init_page_dir).unwrap();
+    let mut page_dir = crate::arch::PageDirectory::new(&init_page_dir).expect("couldn't create page directory for kernel");
 
     fn map(page_dir: &mut crate::arch::PageDirectory, current_dir: Option<&InitPageDir>, region: ContiguousRegion<usize>, phys_base: PhysicalAddress, executable: bool) {
         let page_size = PROPERTIES.page_size;
@@ -289,7 +289,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
                         ..Default::default()
                     }),
                 )
-                .unwrap();
+                .expect("couldn't set page");
         }
     }
 
@@ -321,12 +321,14 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
                     ..Default::default()
                 }),
             )
-            .unwrap();
+            .expect("couldn't set page");
         crate::arch::PageDirectory::flush_page(addr);
     }
 
     let heap = unsafe { HeapAllocator::new(PROPERTIES.heap_region.base as *mut u8, PROPERTIES.heap_init_size, PROPERTIES.heap_region.length) };
     let state = AllocState::Heap(heap);
+
+    manager.print_free();
 
     // reclaim bump allocator
     let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), state) {
@@ -348,7 +350,9 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
     for i in 0..len_pages {
         manager.frame_set.clear((base_page + i).try_into().unwrap());
-        page_dir.set_page(None::<&crate::arch::PageDirectory>, base_virt + i as usize * PROPERTIES.page_size, None).unwrap();
+        page_dir
+            .set_page(None::<&crate::arch::PageDirectory>, base_virt + i as usize * PROPERTIES.page_size, None)
+            .expect("couldn't set page");
     }
 
     manager.print_free();
