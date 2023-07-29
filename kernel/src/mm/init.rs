@@ -3,7 +3,7 @@
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     array::BitSet,
-    mm::{AllocState, PageDirectory, PageManager, ALLOCATOR},
+    mm::{AllocState, ContiguousRegion, HeapAllocator, PageDirectory, PageManager, ALLOCATOR},
 };
 use core::{alloc::Layout, ptr::NonNull};
 use log::debug;
@@ -132,12 +132,10 @@ impl super::ReservedMemory for InitPageDirReserved {
 
 /// used for virt_to_phys lookups when initializing the kernel page directory
 struct InitPageDir {
-    kernel_virt_addr: usize,
+    kernel_region: ContiguousRegion<usize>,
     kernel_phys_addr: PhysicalAddress,
-    kernel_len: usize,
-    alloc_virt_addr: usize,
+    alloc_region: ContiguousRegion<usize>,
     alloc_phys_addr: PhysicalAddress,
-    alloc_len: usize,
 }
 
 impl super::PageDirectory for InitPageDir {
@@ -171,13 +169,17 @@ impl super::PageDirectory for InitPageDir {
     }
 
     fn virt_to_phys(&self, virt: usize) -> Option<PhysicalAddress> {
-        if virt >= self.kernel_virt_addr && virt < self.kernel_virt_addr + self.kernel_len {
-            Some((virt - self.kernel_virt_addr) as PhysicalAddress + self.kernel_phys_addr)
-        } else if virt >= self.alloc_virt_addr && virt < self.alloc_virt_addr + self.alloc_len {
-            Some((virt - self.alloc_virt_addr) as PhysicalAddress + self.alloc_phys_addr)
+        if virt >= self.kernel_region.base && virt - self.kernel_region.base < self.kernel_region.length {
+            Some((virt - self.kernel_region.base) as PhysicalAddress + self.kernel_phys_addr)
+        } else if virt >= self.alloc_region.base && virt - self.alloc_region.base < self.alloc_region.length {
+            Some((virt - self.alloc_region.base) as PhysicalAddress + self.alloc_phys_addr)
         } else {
             None
         }
+    }
+
+    fn flush_page(_addr: usize) {
+        unimplemented!();
     }
 }
 
@@ -187,12 +189,10 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let slice = bump_alloc.collect_iter(memory_map_entries).unwrap();
 
     let init_page_dir = InitPageDir {
-        kernel_virt_addr: init_memory_map.kernel_area.as_ptr() as *const _ as usize,
+        kernel_region: init_memory_map.kernel_area.into(),
         kernel_phys_addr: init_memory_map.kernel_phys,
-        kernel_len: init_memory_map.kernel_area.len(),
-        alloc_virt_addr: bump_alloc.area().as_ptr() as *const _ as usize,
+        alloc_region: bump_alloc.area().into(),
         alloc_phys_addr: init_memory_map.bump_alloc_phys,
-        alloc_len: bump_alloc.area().len(),
     };
 
     *ALLOCATOR.0.lock() = AllocState::BumpAlloc(bump_alloc);
@@ -222,42 +222,46 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
     let page_size = PROPERTIES.page_size as PhysicalAddress;
 
-    fn set_used(set: &mut BitSet, page_size: PhysicalAddress, base: PhysicalAddress, length: PhysicalAddress) {
-        // align the base address down to the nearest page boundary so this entire region is covered
-        let base_page = base / page_size;
-        let offset = base - (base_page * page_size);
-        let len_pages = (length + offset + page_size - 1) / page_size;
+    fn set_used(set: &mut BitSet, page_size: PhysicalAddress, region: ContiguousRegion<PhysicalAddress>) {
+        let region = region.align_covering(page_size);
+        let start = region.base / page_size;
+        let end = start + region.length / page_size;
 
-        for i in 0..len_pages {
-            set.set((base_page + i).try_into().unwrap());
+        for i in start..end {
+            set.set(i.try_into().unwrap());
         }
     }
 
-    fn set_free(set: &mut BitSet, page_size: PhysicalAddress, base: PhysicalAddress, length: PhysicalAddress) {
-        // align the base address up to the nearest page boundary to avoid overlapping with any unavailable regions
-        let base_page = (base + page_size - 1) / page_size;
-        let offset = (base_page * page_size) - base;
-        let len_pages = (length - offset) / page_size;
+    fn set_free(set: &mut BitSet, page_size: PhysicalAddress, region: ContiguousRegion<PhysicalAddress>) {
+        let region = region.align_inside(page_size);
+        let start = region.base / page_size;
+        let end = start + region.length / page_size;
 
-        for i in 0..len_pages {
-            set.clear((base_page + i).try_into().unwrap());
+        for i in start..end {
+            set.clear(i.try_into().unwrap());
         }
     }
 
     // mark all available memory regions from the memory map
     for region in slice.iter() {
         if region.kind == crate::mm::MemoryKind::Available {
-            set_free(&mut set, page_size, region.base, region.length);
+            set_free(&mut set, page_size, (*region).into());
         }
     }
 
     // mark the kernel and bump alloc areas as used
-    set_used(&mut set, page_size, init_memory_map.kernel_phys, init_memory_map.kernel_area.len().try_into().unwrap());
+    set_used(&mut set, page_size, ContiguousRegion {
+        base: init_memory_map.kernel_phys,
+        length: init_memory_map.kernel_area.len().try_into().unwrap(),
+    });
 
     let num_reserved = set.bits_used;
     debug!("{num_reserved} pages ({}k) reserved", num_reserved * PROPERTIES.page_size / 1024);
 
-    set_used(&mut set, page_size, init_memory_map.bump_alloc_phys, init_page_dir.alloc_len.try_into().unwrap());
+    set_used(&mut set, page_size, ContiguousRegion {
+        base: init_memory_map.bump_alloc_phys,
+        length: init_page_dir.alloc_region.length.try_into().unwrap(),
+    });
 
     let mut manager = PageManager::new(set, PROPERTIES.page_size);
     manager.num_reserved = num_reserved;
@@ -267,19 +271,16 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     // create the kernel's new primary page directory
     let mut page_dir = crate::arch::PageDirectory::new(&init_page_dir).unwrap();
 
-    fn map(page_dir: &mut crate::arch::PageDirectory, current_dir: Option<&InitPageDir>, base: usize, phys_base: PhysicalAddress, length: usize, executable: bool) {
-        // align the base address down to the nearest page boundary so this entire region is covered
+    fn map(page_dir: &mut crate::arch::PageDirectory, current_dir: Option<&InitPageDir>, region: ContiguousRegion<usize>, phys_base: PhysicalAddress, executable: bool) {
         let page_size = PROPERTIES.page_size;
-        let base_aligned = (base / page_size) * page_size;
-        let offset = base - base_aligned;
-        let len_aligned = length + offset + page_size - 1;
-        let phys_base: PhysicalAddress = phys_base - offset as PhysicalAddress;
+        let new_region = region.align_covering(page_size);
+        let phys_base: PhysicalAddress = phys_base - (region.base - new_region.base) as PhysicalAddress;
 
-        for i in (0..len_aligned).step_by(page_size) {
+        for i in (0..new_region.length).step_by(page_size) {
             page_dir
                 .set_page(
                     current_dir,
-                    base_aligned + i,
+                    new_region.base + i,
                     Some(super::PageFrame {
                         addr: phys_base + i as PhysicalAddress,
                         present: true,
@@ -293,26 +294,42 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     }
 
     // map in the kernel area
-    map(
-        &mut page_dir,
-        Some(&init_page_dir),
-        init_page_dir.kernel_virt_addr,
-        init_page_dir.kernel_phys_addr,
-        init_page_dir.kernel_len,
-        true,
-    );
-    map(
-        &mut page_dir,
-        Some(&init_page_dir),
-        init_page_dir.alloc_virt_addr,
-        init_page_dir.alloc_phys_addr,
-        init_page_dir.alloc_len,
-        false,
-    );
-    // TODO: map in heap area and init heap
+    map(&mut page_dir, Some(&init_page_dir), init_page_dir.kernel_region, init_page_dir.kernel_phys_addr, true);
+    map(&mut page_dir, Some(&init_page_dir), init_page_dir.alloc_region, init_page_dir.alloc_phys_addr, false);
+
+    unsafe {
+        page_dir.switch_to();
+    }
+
+    // map in new memory for the heap
+    let heap_region = (ContiguousRegion {
+        base: PROPERTIES.heap_region.base,
+        length: PROPERTIES.heap_init_size,
+    })
+    .align_covering(PROPERTIES.page_size);
+
+    for i in (0..heap_region.length).step_by(PROPERTIES.page_size) {
+        let addr = heap_region.base + i;
+        page_dir
+            .set_page(
+                None::<&crate::arch::PageDirectory>,
+                addr,
+                Some(super::PageFrame {
+                    addr: manager.alloc_frame().expect("couldn't allocate memory for kernel heap"),
+                    present: true,
+                    writable: true,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        crate::arch::PageDirectory::flush_page(addr);
+    }
+
+    let heap = unsafe { HeapAllocator::new(PROPERTIES.heap_region.base as *mut u8, PROPERTIES.heap_init_size, PROPERTIES.heap_region.length) };
+    let state = AllocState::Heap(heap);
 
     // reclaim bump allocator
-    let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), AllocState::None) {
+    let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), state) {
         AllocState::BumpAlloc(bump_alloc) => bump_alloc,
         _ => unreachable!(),
     };
@@ -331,12 +348,8 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
     for i in 0..len_pages {
         manager.frame_set.clear((base_page + i).try_into().unwrap());
-        page_dir.set_page(Some(&init_page_dir), base_virt + i as usize * PROPERTIES.page_size, None).unwrap();
+        page_dir.set_page(None::<&crate::arch::PageDirectory>, base_virt + i as usize * PROPERTIES.page_size, None).unwrap();
     }
 
     manager.print_free();
-
-    unsafe {
-        page_dir.switch_to();
-    }
 }

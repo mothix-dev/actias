@@ -603,4 +603,10 @@ impl PageDirectory for PageDir {
             in(reg) self.tables_physical_addr,
         );
     }
+
+    fn flush_page(addr: usize) {
+        unsafe {
+            x86::tlb::flush(addr);
+        }
+    }
 }

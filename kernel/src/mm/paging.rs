@@ -225,6 +225,10 @@ pub trait PageDirectory {
     /// also, care must be taken to ensure that this page directory isn't dropped while active to prevent use-after-free.
     unsafe fn switch_to(&self);
 
+    /// when ran on the current page directory, flushes the entry for the given page in the TLB (or equivalent).
+    /// when ran on any page directory other than the current one, the behavior is undefined
+    fn flush_page(addr: usize);
+
     /* -= Non required functions =- */
 
     /// given an address, checks whether the page that contains it is unused and can be freely remapped

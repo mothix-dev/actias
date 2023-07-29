@@ -1,15 +1,22 @@
 pub mod paging;
 
-use super::{ArchProperties, ContiguousRegion};
+use super::ArchProperties;
+use crate::mm::ContiguousRegion;
 
 const SPLIT_ADDR: usize = 0xe0000000;
+const HEAP_ADDR: usize = SPLIT_ADDR + 0x01000000;
 
 const PAGE_SIZE: usize = 0x1000;
 
 pub const PROPERTIES: ArchProperties = ArchProperties {
     page_size: PAGE_SIZE,
-    userspace_region: ContiguousRegion::new(0, SPLIT_ADDR),
-    kernel_region: ContiguousRegion::new(SPLIT_ADDR, usize::MAX),
+    userspace_region: ContiguousRegion { base: 0, length: SPLIT_ADDR },
+    kernel_region: ContiguousRegion {
+        base: SPLIT_ADDR,
+        length: usize::MAX - SPLIT_ADDR + 1,
+    },
+    heap_region: ContiguousRegion { base: HEAP_ADDR, length: 0xffff000 },
+    heap_init_size: 0x100000,
 };
 
 /// the physical address size for this architecture

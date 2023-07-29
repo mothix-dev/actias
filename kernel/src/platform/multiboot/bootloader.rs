@@ -191,8 +191,7 @@ impl From<MappingKind> for MemoryKind {
     fn from(kind: MappingKind) -> Self {
         match kind {
             MappingKind::Unknown | MappingKind::BadRAM => MemoryKind::Bad,
-            MappingKind::Reserved | MappingKind::AcpiNVS => MemoryKind::Reserved,
-            MappingKind::AcpiReclaimable => MemoryKind::ReservedReclaimable,
+            MappingKind::Reserved | MappingKind::AcpiNVS | MappingKind::AcpiReclaimable => MemoryKind::Reserved,
             MappingKind::Available => MemoryKind::Available,
         }
     }

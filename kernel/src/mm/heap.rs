@@ -1,10 +1,7 @@
 //! heap and heap accessories
 
 use super::ReservedMemory;
-use core::{
-    alloc::Layout,
-    ptr::NonNull,
-};
+use core::{alloc::Layout, ptr::NonNull};
 use linked_list_allocator::Heap;
 use log::debug;
 
@@ -17,29 +14,23 @@ pub struct HeapAllocator<R: ReservedMemory> {
 
     /// area of memory that's reserved on the heap
     reserved_memory: Option<R>,
+
+    /// the maximum size that this heap is allowed to grow to
+    max_size: usize,
 }
 
 impl<R: ReservedMemory> HeapAllocator<R> {
     /// creates a new HeapAllocator, waiting for initialization
-    pub const fn new() -> Self {
-        Self {
-            heap: Heap::empty(),
-            reserved_memory: None,
-        }
-    }
-
-    /// initializes the heap in this HeapAllocator
-    /// 
+    ///
     /// # Safety
-    /// 
-    /// this function must only be called once on an uninitialized heap, and the base address plus the size must be valid
-    pub unsafe fn init(&mut self, base: *mut u8, size: usize) {
-        debug!("initializing heap @ {:?}, size {:#x}", base, size);
-
-        // init heap
-        self.heap.init(base, size);
-
-        self.reserved_memory = Some(R::allocate().unwrap());
+    ///
+    /// the provided base and length must point to a valid contiguous region in memory, and must be valid for the 'static lifetime
+    pub unsafe fn new(base: *mut u8, size: usize, max_size: usize) -> Self {
+        Self {
+            heap: Heap::new(base, size),
+            reserved_memory: Some(R::allocate().unwrap()),
+            max_size,
+        }
     }
 
     /// allocates memory from the heap
