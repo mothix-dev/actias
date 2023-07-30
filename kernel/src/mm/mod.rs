@@ -16,7 +16,7 @@ use spin::Mutex;
 pub enum AllocState {
     None,
     BumpAlloc(BumpAllocator),
-    Heap(HeapAllocator<<crate::arch::PageDirectory as paging::PageDirectory>::Reserved>),
+    Heap(HeapAllocator),
 }
 
 pub struct CustomAlloc(pub Mutex<AllocState>);
@@ -142,3 +142,34 @@ impl<T> From<&mut [T]> for ContiguousRegion<usize> {
         }
     }
 }
+
+pub struct InitDeref<T> {
+    t: Option<T>,
+}
+
+impl<T> InitDeref<T> {
+    pub const fn new() -> Self {
+        Self { t: None }
+    }
+
+    pub fn init(&mut self, t: T) {
+        self.t = Some(t);
+    }
+}
+
+impl<T> core::ops::Deref for InitDeref<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.t.as_ref().expect("uninitialized")
+    }
+}
+
+impl<T> core::ops::DerefMut for InitDeref<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.t.as_mut().expect("uninitialized")
+    }
+}
+
+pub static KERNEL_PAGE_DIR: Mutex<InitDeref<crate::arch::PageDirectory>> = Mutex::new(InitDeref::new());
+pub static KERNEL_PAGE_MANAGER: Mutex<InitDeref<PageManager>> = Mutex::new(InitDeref::new());

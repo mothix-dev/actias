@@ -157,7 +157,7 @@ impl core::fmt::Debug for PageFrame {
 }
 
 /// stores allocations necessary for inserting all necessary new page table levels for a worst case (i.e. requires the most possible new table level allocations)
-/// page insertion in kernel space.
+/// page insertion in kernel space. this type is *not* allocated itself, instead it must store allocations and free them when dropped
 ///
 /// this allocated memory is then used in the case when the kernel heap must be expanded, but inserting the newly allocated pages requires allocating more memory for
 /// new page table levels than there is space in the heap.
@@ -168,6 +168,8 @@ pub trait ReservedMemory {
     /// creates a new instance of this type and allocates memory for it
     fn allocate() -> Result<Self, PagingError>
     where Self: Sized;
+    /// gets a layout which will encompass all allocations made by allocate()
+    fn layout() -> core::alloc::Layout;
 }
 
 /// safe abstraction layer for page directories. allows a consistent interface to page directories of multiple architectures

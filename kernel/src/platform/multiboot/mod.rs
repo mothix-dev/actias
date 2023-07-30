@@ -105,6 +105,11 @@ pub fn kmain() {
     crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
 
     unsafe {
+        let uwu = alloc::alloc::alloc(alloc::alloc::Layout::from_size_align(0x1000 * 1024, 1).unwrap());
+        debug!("{uwu:?}");
+    }
+
+    unsafe {
         use core::arch::asm;
         asm!("cli; hlt");
     }

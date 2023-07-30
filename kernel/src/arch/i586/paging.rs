@@ -7,7 +7,13 @@ use crate::{
 };
 use alloc::boxed::Box;
 use bitmask_enum::bitmask;
-use core::{arch::asm, fmt, mem::ManuallyDrop, pin::Pin};
+use core::{
+    alloc::Layout,
+    arch::asm,
+    fmt,
+    mem::{align_of, size_of, ManuallyDrop},
+    pin::Pin,
+};
 use log::{error, trace};
 
 /// entry in a page table
@@ -403,6 +409,9 @@ impl ReservedMemory for TableRef {
         Ok(Self {
             table: unsafe { Box::into_pin(Box::<InternalPageTable>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init()) },
         })
+    }
+    fn layout() -> Layout {
+        Layout::from_size_align(size_of::<InternalPageTable>(), align_of::<InternalPageTable>()).unwrap()
     }
 }
 

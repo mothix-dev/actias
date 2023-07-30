@@ -3,7 +3,7 @@
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     array::BitSet,
-    mm::{AllocState, ContiguousRegion, HeapAllocator, PageDirectory, PageManager, ALLOCATOR},
+    mm::{AllocState, ContiguousRegion, HeapAllocator, PageDirectory, PageManager, ALLOCATOR, KERNEL_PAGE_DIR, KERNEL_PAGE_MANAGER},
 };
 use core::{alloc::Layout, ptr::NonNull};
 use log::debug;
@@ -12,10 +12,13 @@ use log::debug;
 pub struct InitMemoryMap {
     /// the region of memory containing kernel code and data. must be contiguous in both virtual and physical memory
     pub kernel_area: &'static mut [u8],
+
     /// the physical address of the start of the kernel_area slice
     pub kernel_phys: PhysicalAddress,
+
     /// the region of memory that bump allocations can happen in. must be contiguous in both virtual and physical memory
     pub bump_alloc_area: &'static mut [u8],
+
     /// the physical address of the start of the bump_alloc slice
     pub bump_alloc_phys: PhysicalAddress,
 }
@@ -126,6 +129,9 @@ struct InitPageDirReserved;
 
 impl super::ReservedMemory for InitPageDirReserved {
     fn allocate() -> Result<Self, super::PagingError> {
+        unimplemented!();
+    }
+    fn layout() -> core::alloc::Layout {
         unimplemented!();
     }
 }
@@ -329,6 +335,11 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let state = AllocState::Heap(heap);
 
     manager.print_free();
+
+    KERNEL_PAGE_DIR.lock().init(page_dir);
+    let mut page_dir = KERNEL_PAGE_DIR.lock();
+    KERNEL_PAGE_MANAGER.lock().init(manager);
+    let mut manager = KERNEL_PAGE_MANAGER.lock();
 
     // reclaim bump allocator
     let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), state) {
