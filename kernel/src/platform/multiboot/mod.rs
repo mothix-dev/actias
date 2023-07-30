@@ -107,9 +107,10 @@ pub fn kmain() {
     let mut manager = crate::arch::interrupts::InterruptManager::new();
 
     for i in 0..30 {
-        manager.register_interrupt(i, move |_| {
-            use log::error;
+        manager.register_interrupt(i, move |regs| {
+            use log::{error, info};
             error!("exception {i} :(");
+            info!("{regs:#?}");
     
             unsafe {
                 use core::arch::asm;
@@ -132,26 +133,23 @@ pub fn kmain() {
         debug!("got {uwu:?}");
     }
 
-    debug!("before breakpoint");
-
     unsafe {
         use core::arch::asm;
+        debug!("TEST: breakpoint exception");
         asm!("int3");
     }
 
-    debug!("after breakpoint");
-
-    debug!("before fault");
-
     #[allow(deref_nullptr)]
     unsafe {
+        debug!("TEST: page fault");
         *core::ptr::null_mut() = 0;
     }
 
-    debug!("after fault");
-
-    unsafe {
-        use core::arch::asm;
-        asm!("cli; hlt");
+    debug!("halting");
+    loop {
+        unsafe {
+            use core::arch::asm;
+            asm!("cli; hlt");
+        }
     }
 }

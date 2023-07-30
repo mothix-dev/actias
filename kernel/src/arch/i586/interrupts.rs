@@ -267,10 +267,7 @@ impl InterruptManager {
     }
 
     pub fn register_interrupt<F: FnMut(&mut InterruptRegisters) + 'static>(&mut self, num: usize, handler: F) {
-        let has_error_code = match num {
-            8 | 10..=14 | 17 | 21 | 29 | 30 => true,
-            _ => false,
-        };
+        let has_error_code = matches!(num, 8 | 10..=14 | 17 | 21 | 29 | 30);
         let data = Interrupt::new(handler, has_error_code);
         self.idt.entries[num] = IDTEntry::new(data.trampoline_ptr() as *const (), IDTFlags::Interrupt);
         self.data[num] = Some(data);
@@ -296,7 +293,7 @@ pub struct InterruptRegisters {
     pub edi: u32,
     pub esi: u32,
     pub ebp: u32,
-    pub esp: u32,
+    pub handler_esp: u32,
     pub ebx: u32,
     pub edx: u32,
     pub ecx: u32,
@@ -305,7 +302,7 @@ pub struct InterruptRegisters {
     pub eip: u32,
     pub cs: u32,
     pub eflags: u32,
-    pub useresp: u32,
+    pub esp: u32,
     pub ss: u32,
 }
 
@@ -316,7 +313,7 @@ impl core::fmt::Debug for InterruptRegisters {
             .field("edi", &FormatHex(self.edi))
             .field("esi", &FormatHex(self.esi))
             .field("ebp", &FormatHex(self.ebp))
-            .field("esp", &FormatHex(self.esp))
+            .field("handler_esp", &FormatHex(self.handler_esp))
             .field("ebx", &FormatHex(self.ebx))
             .field("edx", &FormatHex(self.edx))
             .field("ecx", &FormatHex(self.ecx))
@@ -325,7 +322,7 @@ impl core::fmt::Debug for InterruptRegisters {
             .field("eip", &FormatHex(self.eip))
             .field("cs", &FormatHex(self.cs))
             .field("eflags", &FormatHex(self.eflags))
-            .field("useresp", &FormatHex(self.useresp))
+            .field("esp", &FormatHex(self.esp))
             .field("ss", &FormatHex(self.ss))
             .finish()
     }
@@ -373,7 +370,7 @@ impl Interrupt {
 
         let handler_trampoline = if !has_error_code {
             let mut trampoline2 = vec![
-                0x66, 0x6a, 0x00, // pushw  0x0
+                0x6a, 0x00, // push   0x0
             ];
 
             trampoline2.append(&mut handler_trampoline);
