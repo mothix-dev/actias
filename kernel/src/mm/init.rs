@@ -128,7 +128,8 @@ impl BumpAllocator {
 struct InitPageDirReserved;
 
 impl super::ReservedMemory for InitPageDirReserved {
-    fn allocate() -> Result<Self, super::PagingError> {
+    fn allocate<F: FnMut(core::alloc::Layout) -> Result<NonNull<u8>, super::HeapAllocError>>(_alloc: F) -> Result<Self, super::PagingError>
+    where Self: Sized {
         unimplemented!();
     }
     fn layout() -> core::alloc::Layout {

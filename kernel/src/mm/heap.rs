@@ -7,7 +7,7 @@ use crate::{
 };
 use core::{alloc::Layout, ptr::NonNull};
 use linked_list_allocator::Heap;
-use log::{debug, trace, error};
+use log::{debug, error, trace};
 
 pub struct HeapAllocError;
 
@@ -32,11 +32,10 @@ impl HeapAllocator {
     ///
     /// the provided base and length must point to a valid contiguous region in memory, and must be valid for the 'static lifetime
     pub unsafe fn new(base: *mut u8, size: usize, max_size: usize) -> Self {
-        Self {
-            heap: Heap::new(base, size),
-            reserved_memory: Some(Reserved::allocate().unwrap()),
-            max_size,
-        }
+        let mut heap = Heap::new(base, size);
+        let reserved_memory = Some(Reserved::allocate(|layout| heap.allocate_first_fit(layout).map_err(|_| HeapAllocError)).unwrap());
+
+        Self { heap, reserved_memory, max_size }
     }
 
     /// allocates memory from the heap
@@ -104,7 +103,7 @@ impl HeapAllocator {
                                 page_manager.free_frame(page.addr);
 
                                 match page_dir.set_page_no_alloc(None::<&crate::arch::PageDirectory>, i, None, None) {
-                                    Ok(_) =>  crate::arch::PageDirectory::flush_page(i),
+                                    Ok(_) => crate::arch::PageDirectory::flush_page(i),
                                     Err(_) => error!("couldn't remove page when cleaning up failed heap expansion"),
                                 }
                             }
@@ -121,7 +120,7 @@ impl HeapAllocator {
                 trace!("heap is now {:?} - {:?}", self.heap.bottom(), self.heap.top());
 
                 if self.reserved_memory.is_none() {
-                    match Reserved::allocate() {
+                    match Reserved::allocate(|layout| self.heap.allocate_first_fit(layout).map_err(|_| HeapAllocError)) {
                         Ok(reserved) => self.reserved_memory = Some(reserved),
                         Err(err) => error!("failed to allocate reserved memory: {err:?}"),
                     }

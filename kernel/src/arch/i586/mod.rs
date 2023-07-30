@@ -1,3 +1,4 @@
+pub mod interrupts;
 pub mod paging;
 
 use super::ArchProperties;
@@ -16,7 +17,7 @@ pub const PROPERTIES: ArchProperties = ArchProperties {
         length: usize::MAX - SPLIT_ADDR + 1,
     },
     heap_region: ContiguousRegion { base: HEAP_ADDR, length: 0xffff000 },
-    heap_init_size: 0x1000, //0x100000,
+    heap_init_size: 0x100000,
 };
 
 /// the physical address size for this architecture

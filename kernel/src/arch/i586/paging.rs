@@ -405,9 +405,16 @@ pub struct TableRef {
 }
 
 impl ReservedMemory for TableRef {
-    fn allocate() -> Result<Self, PagingError> {
+    fn allocate<F: FnMut(core::alloc::Layout) -> Result<core::ptr::NonNull<u8>, crate::mm::HeapAllocError>>(mut alloc: F) -> Result<Self, PagingError>
+    where Self: Sized {
         Ok(Self {
-            table: unsafe { Box::into_pin(Box::<InternalPageTable>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init()) },
+            table: unsafe {
+                Box::into_pin(Box::from_raw(
+                    alloc(Layout::from_size_align(size_of::<InternalPageTable>(), align_of::<InternalPageTable>()).unwrap())
+                        .map_err(|_| PagingError::AllocError)?
+                        .as_ptr() as *mut _,
+                ))
+            },
         })
     }
     fn layout() -> Layout {
@@ -579,7 +586,8 @@ impl PageDirectory for PageDir {
                 return Ok(());
             }
 
-            self.add_page_table(orig_addr, TableRef::allocate()?, current_dir);
+            let table = unsafe { Box::into_pin(Box::<InternalPageTable>::try_new_zeroed().map_err(|_| PagingError::AllocError)?.assume_init()) };
+            self.add_page_table(orig_addr, TableRef { table }, current_dir);
         }
 
         self.insert_page(page, addr, table_idx)

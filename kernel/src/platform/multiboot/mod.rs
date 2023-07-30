@@ -104,10 +104,51 @@ pub fn kmain() {
 
     crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
 
-    unsafe {
-        let uwu = alloc::alloc::alloc(alloc::alloc::Layout::from_size_align(0x1000 * 1024, 1).unwrap());
-        debug!("{uwu:?}");
+    let mut manager = crate::arch::interrupts::InterruptManager::new();
+
+    for i in 0..30 {
+        manager.register_interrupt(i, move |_| {
+            use log::error;
+            error!("exception {i} :(");
+    
+            unsafe {
+                use core::arch::asm;
+                asm!("cli; hlt");
+            }
+        });
     }
+
+    manager.register_interrupt(crate::arch::interrupts::Exceptions::Breakpoint as usize, move |_| {
+        use log::info;
+        info!("breakpoint :333");
+    });
+
+    crate::arch::interrupts::init_pic();
+    manager.load_idt();
+
+    unsafe {
+        debug!("TEST: making huge allocation");
+        let uwu = alloc::alloc::alloc(alloc::alloc::Layout::from_size_align(0x1000 * 1024, 1).unwrap());
+        debug!("got {uwu:?}");
+    }
+
+    debug!("before breakpoint");
+
+    unsafe {
+        use core::arch::asm;
+        asm!("int3");
+    }
+
+    debug!("after breakpoint");
+
+    debug!("before fault");
+
+    #[allow(deref_nullptr)]
+    unsafe {
+        *core::ptr::null_mut() = 0;
+    }
+
+    debug!("after fault");
 
     unsafe {
         use core::arch::asm;
