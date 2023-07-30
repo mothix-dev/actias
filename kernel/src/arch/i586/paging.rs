@@ -383,8 +383,7 @@ impl fmt::Display for PageDirFlags {
 ///
 /// basically just a wrapper for the array lmao
 #[derive(Debug)]
-#[repr(C)]
-#[repr(align(4096))]
+#[repr(C, align(4096))]
 struct InternalPageTable {
     entries: [PageTableEntry; 1024],
 }

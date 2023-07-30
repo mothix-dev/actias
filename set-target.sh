@@ -17,7 +17,7 @@ cat > .cargo/config.toml <<EOF
 # if you need to make any changes, edit config.toml.stub instead and re-run set-target.sh
 
 build.target = "$ARCH-unknown-none.json"
-build.rustflags = [ "--cfg", "target_arch=\"$ARCH\"", "--cfg", "target_platform=\"$PLATFORM\"" ]
+build.rustflags = [ "--cfg", "target_arch=\"$ARCH\"", "--cfg", "target_platform=\"$PLATFORM\"", "--cfg", "crossbeam_no_atomic_64" ]
 EOF
 cat .cargo/config.toml.stub >> .cargo/config.toml
 

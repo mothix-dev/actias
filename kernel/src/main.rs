@@ -16,6 +16,7 @@ pub mod arch;
 pub mod array;
 pub mod mm;
 pub mod platform;
+pub mod tasks;
 
 use core::{fmt, fmt::LowerHex};
 use log::{error, info};
