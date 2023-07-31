@@ -1,12 +1,13 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use bitmask_enum::bitmask;
 use core::{ffi::c_void, pin::Pin};
+use num_enum::TryFromPrimitive;
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
     io::outb,
 };
 
-use crate::FormatHex;
+use crate::{arch::InterruptManager, FormatHex};
 
 /// IDT flags
 #[bitmask(u8)]
@@ -127,6 +128,8 @@ impl Default for IDT {
 }
 
 /// list of exceptions
+#[derive(Debug, TryFromPrimitive, Copy, Clone)]
+#[repr(usize)]
 pub enum Exceptions {
     /// divide-by-zero error
     DivideByZero = 0,
@@ -201,6 +204,38 @@ pub enum Exceptions {
     Security = 30,
 }
 
+impl core::fmt::Display for Exceptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match self {
+            Self::DivideByZero => "division by zero",
+            Self::Debug => "debug",
+            Self::NonMaskableInterrupt => "non-maskable interrupt",
+            Self::Breakpoint => "breakpoint",
+            Self::Overflow => "overflow",
+            Self::BoundRangeExceeded => "bound range exceeded",
+            Self::InvalidOpcode => "invalid opcode",
+            Self::DeviceNotAvailable => "device not available",
+            Self::DoubleFault => "double fault",
+            Self::CoprocessorSegmentOverrun => "coprocessor segment overrun",
+            Self::InvalidTSS => "invalid TSS",
+            Self::SegmentNotPresent => "segment not present",
+            Self::StackSegmentFault => "stack segment fault",
+            Self::GeneralProtectionFault => "general protection fault",
+            Self::PageFault => "page fault",
+            Self::FloatingPoint => "floating-point exception",
+            Self::AlignmentCheck => "alignment check",
+            Self::MachineCheck => "machine check",
+            Self::SIMDFloatingPoint => "SIMD floating-point exception",
+            Self::Virtualization => "virtualization exception",
+            Self::ControlProtection => "control protection exception",
+            Self::HypervisorInjection => "hypervisor injection exception",
+            Self::VMMCommunication => "VMM communication exception",
+            Self::Security => "security exception",
+        };
+        write!(f, "{name}")
+    }
+}
+
 /// page fault error code wrapper
 #[repr(transparent)]
 pub struct PageFaultErrorCode(u32);
@@ -251,13 +286,25 @@ impl core::fmt::Display for PageFaultErrorCode {
     }
 }
 
-pub struct InterruptManager {
+pub struct IntManager {
     idt: Pin<Box<IDT>>,
     data: Vec<Option<Interrupt>>,
 }
 
-impl InterruptManager {
-    pub fn new() -> Self {
+impl IntManager {
+    pub fn load_idt(&self) {
+        unsafe {
+            self.idt.load();
+        }
+    }
+}
+
+impl InterruptManager for IntManager {
+    type Registers = InterruptRegisters;
+    type ExceptionInfo = Exceptions;
+
+    fn new() -> Self
+    where Self: Sized {
         let mut data = Vec::with_capacity(256);
         for _i in 0..256 {
             data.push(None);
@@ -266,21 +313,39 @@ impl InterruptManager {
         Self { idt: Box::pin(IDT::new()), data }
     }
 
-    pub fn register_interrupt<F: FnMut(&mut InterruptRegisters) + 'static>(&mut self, num: usize, handler: F) {
-        let has_error_code = matches!(num, 8 | 10..=14 | 17 | 21 | 29 | 30);
+    fn register<F: FnMut(&mut Self::Registers) + 'static>(&mut self, interrupt_num: usize, handler: F) {
+        let has_error_code = matches!(interrupt_num, 8 | 10..=14 | 17 | 21 | 29 | 30);
         let data = Interrupt::new(handler, has_error_code);
-        self.idt.entries[num] = IDTEntry::new(data.trampoline_ptr() as *const (), IDTFlags::Interrupt);
-        self.data[num] = Some(data);
+        // TODO: clear interrupts while IDT is being modified
+        self.idt.entries[interrupt_num] = IDTEntry::new(data.trampoline_ptr() as *const (), IDTFlags::Interrupt);
+        self.data[interrupt_num] = Some(data);
     }
 
-    pub fn load_idt(&self) {
-        unsafe {
-            self.idt.load();
+    fn deregister(&mut self, interrupt_num: usize) {
+        // TODO: clear interrupts while IDT is being modified
+        self.idt.entries[interrupt_num] = IDTEntry::new_empty();
+        self.data[interrupt_num] = None;
+    }
+
+    fn register_aborts<F: Fn(&mut Self::Registers, Self::ExceptionInfo) + Clone + 'static>(&mut self, handler: F) {
+        for exception in [Exceptions::NonMaskableInterrupt, Exceptions::DoubleFault, Exceptions::MachineCheck] {
+            let handler = handler.clone();
+            self.register(exception as usize, move |regs| handler(regs, exception));
+        }
+    }
+
+    fn register_faults<F: Fn(&mut Self::Registers, Self::ExceptionInfo) + Clone + 'static>(&mut self, handler: F) {
+        for exception in (0..30)
+            .filter_map(|i| Exceptions::try_from(i).ok())
+            .filter(|exception| !matches!(exception, Exceptions::NonMaskableInterrupt | Exceptions::DoubleFault | Exceptions::MachineCheck))
+        {
+            let handler = handler.clone();
+            self.register(exception as usize, move |regs| handler(regs, exception));
         }
     }
 }
 
-impl Default for InterruptManager {
+impl Default for IntManager {
     fn default() -> Self {
         Self::new()
     }
@@ -333,6 +398,7 @@ impl core::fmt::Debug for InterruptRegisters {
 struct Interrupt {
     _handler: Pin<Box<dyn FnMut(&mut InterruptRegisters)>>,
     trampoline: Pin<Box<[u8]>>,
+    offset: usize,
 }
 
 impl Interrupt {
@@ -343,7 +409,8 @@ impl Interrupt {
         let trampoline_addr = (trampoline::<F> as *const () as u32).to_ne_bytes();
 
         #[rustfmt::skip]
-        let mut handler_trampoline = vec![
+        let handler_trampoline = vec![
+            0x6a, 0x00,                     // push   0x0
             0x60,                           // pusha
             0x66, 0x8c, 0xd8,               // mov    ax,ds
             0x50,                           // push   eax
@@ -368,26 +435,15 @@ impl Interrupt {
             0xcf,                           // iret 
         ];
 
-        let handler_trampoline = if !has_error_code {
-            let mut trampoline2 = vec![
-                0x6a, 0x00, // push   0x0
-            ];
-
-            trampoline2.append(&mut handler_trampoline);
-
-            trampoline2
-        } else {
-            handler_trampoline
-        };
-
         Self {
             _handler: handler,
             trampoline: Box::into_pin(handler_trampoline.into_boxed_slice()),
+            offset: if has_error_code { 2 } else { 0 },
         }
     }
 
     fn trampoline_ptr(&self) -> *const u8 {
-        self.trampoline.as_ptr()
+        unsafe { self.trampoline.as_ptr().byte_add(self.offset) }
     }
 }
 

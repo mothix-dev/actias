@@ -40,6 +40,7 @@ pub extern "C" fn x86_prep_page_table(buf: &mut [u32; 1024]) {
 pub fn kmain() {
     logger::init().unwrap();
     crate::init_message();
+    crate::arch::interrupts::init_pic();
 
     unsafe {
         if bootloader::mboot_sig != 0x2badb002 {
@@ -104,28 +105,23 @@ pub fn kmain() {
 
     crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
 
-    let mut manager = crate::arch::interrupts::InterruptManager::new();
+    use crate::arch::{interrupts::Exceptions, InterruptManager};
+    let mut manager = crate::arch::interrupts::IntManager::new();
+    manager.load_idt();
 
-    for i in 0..30 {
-        manager.register_interrupt(i, move |regs| {
-            use log::{error, info};
-            error!("exception {i} :(");
-            info!("{regs:#?}");
-    
-            unsafe {
-                use core::arch::asm;
-                asm!("cli; hlt");
-            }
-        });
-    }
-
-    manager.register_interrupt(crate::arch::interrupts::Exceptions::Breakpoint as usize, move |_| {
-        use log::info;
-        info!("breakpoint :333");
+    use log::{error, info};
+    manager.register_faults(|regs, info| {
+        error!("exception in kernel mode: {info}");
+        info!("register dump: {regs:#?}");
+        panic!("exception in kernel mode");
+    });
+    manager.register_aborts(|regs, info| {
+        error!("unrecoverable exception: {info}");
+        info!("register dump: {regs:#?}");
+        panic!("unrecoverable exception");
     });
 
-    crate::arch::interrupts::init_pic();
-    manager.load_idt();
+    manager.register(Exceptions::Breakpoint as usize, move |_| info!("breakpoint :333"));
 
     unsafe {
         debug!("TEST: making huge allocation");
@@ -139,10 +135,9 @@ pub fn kmain() {
         asm!("int3");
     }
 
-    #[allow(deref_nullptr)]
     unsafe {
         debug!("TEST: page fault");
-        *core::ptr::null_mut() = 0;
+        *(1 as *mut u8) = 0;
     }
 
     debug!("halting");

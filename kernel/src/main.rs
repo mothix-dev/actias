@@ -9,6 +9,7 @@
 #![feature(new_uninit)]
 #![feature(panic_info_message)]
 #![feature(pointer_byte_offsets)]
+#![feature(trait_alias)]
 
 extern crate alloc;
 

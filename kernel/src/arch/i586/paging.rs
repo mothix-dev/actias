@@ -404,7 +404,7 @@ pub struct TableRef {
 }
 
 impl ReservedMemory for TableRef {
-    fn allocate<F: FnMut(core::alloc::Layout) -> Result<core::ptr::NonNull<u8>, crate::mm::HeapAllocError>>(mut alloc: F) -> Result<Self, PagingError>
+    fn allocate<F: crate::mm::AllocCallback>(mut alloc: F) -> Result<Self, PagingError>
     where Self: Sized {
         Ok(Self {
             table: unsafe {

@@ -158,6 +158,9 @@ impl core::fmt::Debug for PageFrame {
     }
 }
 
+/// callback used when allocating reserved memory, wrapper around internal allocator state
+pub trait AllocCallback = FnMut(core::alloc::Layout) -> Result<NonNull<u8>, super::HeapAllocError>;
+
 /// stores allocations necessary for inserting all necessary new page table levels for a worst case (i.e. requires the most possible new table level allocations)
 /// page insertion in kernel space. this type is *not* allocated itself, instead it must store allocations and free them when dropped.
 ///
@@ -168,7 +171,7 @@ impl core::fmt::Debug for PageFrame {
 /// if any allocations are made in types implementing this trait, they must be freed when it is dropped in order to prevent memory leaks.
 pub trait ReservedMemory {
     /// creates a new instance of this type and allocates memory for it
-    fn allocate<F: FnMut(core::alloc::Layout) -> Result<NonNull<u8>, super::HeapAllocError>>(alloc: F) -> Result<Self, PagingError>
+    fn allocate<F: AllocCallback>(alloc: F) -> Result<Self, PagingError>
     where Self: Sized;
     /// gets a layout which will encompass all allocations made by allocate()
     fn layout() -> core::alloc::Layout;
