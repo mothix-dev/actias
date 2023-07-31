@@ -1,8 +1,9 @@
 pub mod interrupts;
 pub mod paging;
 
-use super::ArchProperties;
+use super::bsp::ArchProperties;
 use crate::mm::ContiguousRegion;
+use core::arch::asm;
 
 const SPLIT_ADDR: usize = 0xe0000000;
 const HEAP_ADDR: usize = SPLIT_ADDR + 0x01000000;
@@ -18,6 +19,7 @@ pub const PROPERTIES: ArchProperties = ArchProperties {
     },
     heap_region: ContiguousRegion { base: HEAP_ADDR, length: 0xffff000 },
     heap_init_size: 0x100000,
+    wait_for_interrupt,
 };
 
 /// the physical address size for this architecture
@@ -27,3 +29,12 @@ pub type PhysicalAddress = u32;
 
 /// the page directory type for this architecture
 pub type PageDirectory = paging::PageDir;
+
+/// the interrupt manager for this architecture
+pub type InterruptManager = interrupts::IntManager;
+
+fn wait_for_interrupt() {
+    unsafe {
+        asm!("sti; hlt");
+    }
+}

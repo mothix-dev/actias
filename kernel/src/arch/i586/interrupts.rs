@@ -7,7 +7,7 @@ use x86::{
     io::outb,
 };
 
-use crate::{arch::InterruptManager, FormatHex};
+use crate::{arch::bsp::InterruptManager, FormatHex};
 
 /// IDT flags
 #[bitmask(u8)]
@@ -292,10 +292,12 @@ pub struct IntManager {
 }
 
 impl IntManager {
-    pub fn load_idt(&self) {
-        unsafe {
-            self.idt.load();
-        }
+    fn register_internal<F: FnMut(&mut InterruptRegisters) + 'static>(&mut self, interrupt_num: usize, handler: F) {
+        let has_error_code = matches!(interrupt_num, 8 | 10..=14 | 17 | 21 | 29 | 30);
+        let data = Interrupt::new(handler, has_error_code);
+        // TODO: clear interrupts while IDT is being modified
+        self.idt.entries[interrupt_num] = IDTEntry::new(data.trampoline_ptr() as *const (), IDTFlags::Interrupt);
+        self.data[interrupt_num] = Some(data);
     }
 }
 
@@ -313,12 +315,23 @@ impl InterruptManager for IntManager {
         Self { idt: Box::pin(IDT::new()), data }
     }
 
-    fn register<F: FnMut(&mut Self::Registers) + 'static>(&mut self, interrupt_num: usize, handler: F) {
-        let has_error_code = matches!(interrupt_num, 8 | 10..=14 | 17 | 21 | 29 | 30);
-        let data = Interrupt::new(handler, has_error_code);
-        // TODO: clear interrupts while IDT is being modified
-        self.idt.entries[interrupt_num] = IDTEntry::new(data.trampoline_ptr() as *const (), IDTFlags::Interrupt);
-        self.data[interrupt_num] = Some(data);
+    fn register<F: FnMut(&mut Self::Registers) + 'static>(&mut self, interrupt_num: usize, mut handler: F) {
+        match interrupt_num {
+            0x20..=0x27 => self.register_internal(interrupt_num, move |regs| {
+                handler(regs);
+                unsafe {
+                    outb(0x20, 0x20); // reset primary interrupt controller
+                }
+            }),
+            0x28..=0x2f => self.register_internal(interrupt_num, move |regs| {
+                handler(regs);
+                unsafe {
+                    outb(0xa0, 0x20); // reset secondary interrupt controller
+                    outb(0x20, 0x20);
+                }
+            }),
+            _ => self.register_internal(interrupt_num, handler),
+        }
     }
 
     fn deregister(&mut self, interrupt_num: usize) {
@@ -341,6 +354,12 @@ impl InterruptManager for IntManager {
         {
             let handler = handler.clone();
             self.register(exception as usize, move |regs| handler(regs, exception));
+        }
+    }
+
+    fn load_handlers(&self) {
+        unsafe {
+            self.idt.load();
         }
     }
 }
@@ -369,6 +388,23 @@ pub struct InterruptRegisters {
     pub eflags: u32,
     pub esp: u32,
     pub ss: u32,
+}
+
+impl crate::arch::bsp::RegisterContext for InterruptRegisters {
+    fn from_fn(func: *const extern "C" fn(), stack: *mut u8) -> Self {
+        Self {
+            ds: 0x10,
+            ebp: (stack as usize).try_into().unwrap(),
+            eip: (func as usize).try_into().unwrap(),
+            cs: 0x8,
+            esp: (stack as usize).try_into().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    fn context_switch_to(&self) -> ! {
+        todo!();
+    }
 }
 
 impl core::fmt::Debug for InterruptRegisters {
@@ -451,4 +487,6 @@ impl Interrupt {
 unsafe extern "C" fn trampoline<F: FnMut(&mut InterruptRegisters)>(data: *mut c_void, regs: &mut InterruptRegisters) {
     let data = &mut *(data as *mut F);
     data(regs);
+
+    crate::tasks::run_executor(regs);
 }

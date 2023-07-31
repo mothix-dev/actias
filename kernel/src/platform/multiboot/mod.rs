@@ -105,23 +105,46 @@ pub fn kmain() {
 
     crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
 
-    use crate::arch::{interrupts::Exceptions, InterruptManager};
-    let mut manager = crate::arch::interrupts::IntManager::new();
-    manager.load_idt();
+    use crate::arch::bsp::InterruptManager;
+    let mut manager = crate::arch::InterruptManager::new();
 
     use log::{error, info};
-    manager.register_faults(|regs, info| {
-        error!("exception in kernel mode: {info}");
-        info!("register dump: {regs:#?}");
-        panic!("exception in kernel mode");
-    });
     manager.register_aborts(|regs, info| {
         error!("unrecoverable exception: {info}");
         info!("register dump: {regs:#?}");
         panic!("unrecoverable exception");
     });
+    manager.register_faults(|regs, info| {
+        error!("exception in kernel mode: {info}");
+        info!("register dump: {regs:#?}");
+        panic!("exception in kernel mode");
+    });
 
-    manager.register(Exceptions::Breakpoint as usize, move |_| info!("breakpoint :333"));
+    let hz = 1000;
+
+    // init PIT
+    let divisor = 1193180 / hz;
+
+    let l = (divisor & 0xff) as u8;
+    let h = ((divisor >> 8) & 0xff) as u8;
+
+    unsafe {
+        use x86::io::outb;
+        outb(0x43, 0x36);
+        outb(0x40, l);
+        outb(0x40, h);
+    }
+
+    let timer = alloc::sync::Arc::new(crate::tasks::Timer::new(hz));
+
+    {
+        let timer = timer.clone();
+        manager.register(0x20, move |_| timer.tick());
+    }
+
+    manager.load_handlers();
+
+    /*manager.register(crate::arch::interrupts::Exceptions::Breakpoint as usize, move |_| info!("breakpoint :333"));
 
     unsafe {
         debug!("TEST: making huge allocation");
@@ -138,13 +161,25 @@ pub fn kmain() {
     unsafe {
         debug!("TEST: page fault");
         *(1 as *mut u8) = 0;
+    }*/
+
+    unsafe {
+        crate::tasks::init();
     }
 
-    debug!("halting");
+    crate::tasks::get_cpu_executor().spawn(async move {
+        info!("UwU");
+        timer.timeout_in(timer.hz()).unwrap().await;
+        info!("OwO");
+    });
+
+    //crate::tasks::get_cpu_executor().run();
+
     loop {
-        unsafe {
-            use core::arch::asm;
-            asm!("cli; hlt");
-        }
+        (crate::arch::PROPERTIES.wait_for_interrupt)();
     }
+}
+
+pub fn get_stack_ptr() -> *mut u8 {
+    unsafe { &stack_end as *const _ as usize as *mut u8 }
 }

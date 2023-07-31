@@ -1,3 +1,5 @@
+//! memory management
+
 mod heap;
 mod init;
 mod paging;
