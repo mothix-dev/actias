@@ -15,9 +15,11 @@ extern crate alloc;
 
 pub mod arch;
 pub mod array;
+pub mod cpu;
 pub mod mm;
 pub mod platform;
-pub mod tasks;
+pub mod sched;
+pub mod timer;
 
 use core::{fmt, fmt::LowerHex};
 use log::{error, info};
@@ -45,7 +47,7 @@ pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
         error!("PANIC @ {file}:{line}");
     }
 
-    loop {}
+    (crate::arch::PROPERTIES.halt)();
 }
 
 pub fn init_message() {

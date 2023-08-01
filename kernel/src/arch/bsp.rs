@@ -20,14 +20,14 @@ pub struct ArchProperties {
 
     /// function that'll halt the CPU until an interrupt occurs
     pub wait_for_interrupt: fn(),
+
+    /// function that'll halt execution of the current CPU
+    pub halt: fn() -> !,
 }
 
 pub trait RegisterContext: Clone {
     /// creates a set of registers which, when switched to, will start running the provided function with the stack set to the provided stack pointer
     fn from_fn(func: *const extern "C" fn(), stack: *mut u8) -> Self;
-
-    /// context switches to this set of registers
-    fn context_switch_to(&self) -> !;
 }
 
 pub trait InterruptManager {

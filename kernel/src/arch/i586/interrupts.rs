@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use bitmask_enum::bitmask;
-use core::{ffi::c_void, pin::Pin};
+use core::{arch::asm, ffi::c_void, pin::Pin};
 use num_enum::TryFromPrimitive;
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
@@ -392,18 +392,21 @@ pub struct InterruptRegisters {
 
 impl crate::arch::bsp::RegisterContext for InterruptRegisters {
     fn from_fn(func: *const extern "C" fn(), stack: *mut u8) -> Self {
+        let eflags;
+        unsafe {
+            asm!("pushfd; pop {}", out(reg) eflags);
+        }
+
         Self {
             ds: 0x10,
             ebp: (stack as usize).try_into().unwrap(),
             eip: (func as usize).try_into().unwrap(),
             cs: 0x8,
+            eflags,
             esp: (stack as usize).try_into().unwrap(),
+            ss: 0x10,
             ..Default::default()
         }
-    }
-
-    fn context_switch_to(&self) -> ! {
-        todo!();
     }
 }
 
@@ -487,6 +490,4 @@ impl Interrupt {
 unsafe extern "C" fn trampoline<F: FnMut(&mut InterruptRegisters)>(data: *mut c_void, regs: &mut InterruptRegisters) {
     let data = &mut *(data as *mut F);
     data(regs);
-
-    crate::tasks::run_executor(regs);
 }

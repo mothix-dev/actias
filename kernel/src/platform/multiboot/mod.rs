@@ -15,10 +15,13 @@ pub const LINKED_BASE: usize = 0xe0000000;
 extern "C" {
     /// start of the kernel's code/data/etc.
     static mut kernel_start: u8;
+
     /// located at end of loader, used for more efficient memory mappings
     static mut kernel_end: u8;
+
     /// base of the stack, used to map out the page below to catch stack overflow
     static stack_base: u8;
+
     /// top of the stack
     static stack_end: u8;
 }
@@ -135,14 +138,31 @@ pub fn kmain() {
         outb(0x40, h);
     }
 
-    let timer = alloc::sync::Arc::new(crate::tasks::Timer::new(hz));
+    let timer = alloc::sync::Arc::new(crate::timer::Timer::new(hz));
 
     {
         let timer = timer.clone();
-        manager.register(0x20, move |_| timer.tick());
+        manager.register(0x20, move |regs| timer.tick(regs));
     }
 
     manager.load_handlers();
+
+    unsafe {
+        asm!("sti");
+    }
+
+    let stack_manager = crate::arch::gdt::init(0x1000 * 8);
+
+    /*timer.timeout_in(timer.hz() / 2, |_| {
+        info!(":3c");
+    });
+
+    timer.clone().timeout_in(1, move |_| {
+        info!("UwU");
+        timer.timeout_in(timer.hz(), |_| {
+            info!("OwO");
+        });
+    });*/
 
     /*manager.register(crate::arch::interrupts::Exceptions::Breakpoint as usize, move |_| info!("breakpoint :333"));
 
@@ -163,21 +183,78 @@ pub fn kmain() {
         *(1 as *mut u8) = 0;
     }*/
 
-    unsafe {
-        crate::tasks::init();
-    }
-
-    crate::tasks::get_cpu_executor().spawn(async move {
-        info!("UwU");
-        timer.timeout_in(timer.hz()).unwrap().await;
-        info!("OwO");
-    });
-
-    //crate::tasks::get_cpu_executor().run();
-
-    loop {
+    /*loop {
         (crate::arch::PROPERTIES.wait_for_interrupt)();
+    }*/
+
+    use alloc::sync::Arc;
+    use spin::Mutex;
+    use crate::arch::interrupts::InterruptRegisters;
+    use crate::arch::bsp::RegisterContext;
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use core::arch::asm;
+
+    let cpu = crate::cpu::CPU {
+        timer: timer.clone(),
+        stack_manager,
+        scheduler: Arc::new(crate::sched::Scheduler::new(timer)),
+    };
+
+    let stack_size = 0x1000 * 4;
+    let mut stack_a = Box::into_pin(vec![0_u8; stack_size].into_boxed_slice());
+    let stack_ptr_a = &mut stack_a[stack_size - 1] as *mut u8;
+    let mut stack_b = Box::into_pin(vec![0_u8; stack_size].into_boxed_slice());
+    let stack_ptr_b = &mut stack_b[stack_size - 1] as *mut u8;
+
+    extern "C" fn task_a() {
+        loop {
+            info!("UwU");
+
+            // wait a little while
+            for _i in 0..1048576 {
+                unsafe {
+                    asm!("pause");
+                }
+            }
+        }
     }
+
+    extern "C" fn task_b() {
+        loop {
+            for _i in 0..524288 {
+                unsafe {
+                    asm!("pause");
+                }
+            }
+
+            info!("OwO");
+
+            for _i in 0..524288 {
+                unsafe {
+                    asm!("pause");
+                }
+            }
+        }
+    }
+
+    cpu.scheduler.run_queue.push(Arc::new(Mutex::new(crate::sched::Task {
+        is_valid: true,
+        registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr_a),
+        niceness: 0,
+        niceness_adj: 0,
+        exec_mode: crate::sched::ExecMode::Running,
+    })));
+
+    cpu.scheduler.run_queue.push(Arc::new(Mutex::new(crate::sched::Task {
+        is_valid: true,
+        registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr_b),
+        niceness: 0,
+        niceness_adj: 0,
+        exec_mode: crate::sched::ExecMode::Running,
+    })));
+
+    cpu.start_context_switching();
 }
 
 pub fn get_stack_ptr() -> *mut u8 {

@@ -1,3 +1,4 @@
+pub mod gdt;
 pub mod interrupts;
 pub mod paging;
 
@@ -20,6 +21,7 @@ pub const PROPERTIES: ArchProperties = ArchProperties {
     heap_region: ContiguousRegion { base: HEAP_ADDR, length: 0xffff000 },
     heap_init_size: 0x100000,
     wait_for_interrupt,
+    halt,
 };
 
 /// the physical address size for this architecture
@@ -33,8 +35,18 @@ pub type PageDirectory = paging::PageDir;
 /// the interrupt manager for this architecture
 pub type InterruptManager = interrupts::IntManager;
 
+pub type StackManager = gdt::GDTState;
+
 fn wait_for_interrupt() {
     unsafe {
         asm!("sti; hlt");
+    }
+}
+
+fn halt() -> ! {
+    loop {
+        unsafe {
+            asm!("cli; hlt");
+        }
     }
 }

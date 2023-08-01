@@ -348,6 +348,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
         _ => unreachable!(),
     };
 
+    debug!("shrinking bump allocator");
     bump_alloc.print_free();
 
     // free any extra memory used by the bump allocator
