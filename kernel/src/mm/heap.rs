@@ -61,8 +61,9 @@ impl HeapAllocator {
                 trace!("new_top is {new_top:#x} (growth {growth:#x})");
 
                 fn alloc_pages(current_top: usize, new_top: usize, reserved_memory: &mut Option<Reserved>) -> Result<(), HeapAllocError> {
-                    let mut page_dir = super::KERNEL_PAGE_DIR.lock();
-                    let mut page_manager = super::KERNEL_PAGE_MANAGER.lock();
+                    let global_state = crate::cpu::get_global_state();
+                    let mut page_dir = global_state.page_directory.lock();
+                    let mut page_manager = global_state.page_manager.lock();
 
                     // allocate and map in new pages for the heap
                     for i in (current_top..new_top).step_by(PROPERTIES.page_size) {
@@ -82,7 +83,12 @@ impl HeapAllocator {
                             }
                             Err(_) => return Err(HeapAllocError),
                         }
+                    }
 
+                    // synchronize the current page directory and TLB
+                    // TODO: synchronize this with other CPUs
+                    global_state.cpus.read()[0].scheduler.sync_page_directory();
+                    for i in (current_top..new_top).step_by(PROPERTIES.page_size) {
                         crate::arch::PageDirectory::flush_page(i);
                     }
 
@@ -94,19 +100,24 @@ impl HeapAllocator {
                     Err(err) => {
                         error!("heap expansion failed, attempting cleanup");
 
-                        let mut page_dir = super::KERNEL_PAGE_DIR.lock();
-                        let mut page_manager = super::KERNEL_PAGE_MANAGER.lock();
+                        let global_state = crate::cpu::get_global_state();
+                        let mut page_dir = global_state.page_directory.lock();
+                        let mut page_manager = global_state.page_manager.lock();
 
                         // free and unmap any pages for the heap that were allocated before failing
                         for i in (current_top..new_top).step_by(PROPERTIES.page_size) {
                             if let Some(page) = page_dir.get_page(i) {
                                 page_manager.free_frame(page.addr);
 
-                                match page_dir.set_page_no_alloc(None::<&crate::arch::PageDirectory>, i, None, None) {
-                                    Ok(_) => crate::arch::PageDirectory::flush_page(i),
-                                    Err(_) => error!("couldn't remove page when cleaning up failed heap expansion"),
+                                if page_dir.set_page_no_alloc(None::<&crate::arch::PageDirectory>, i, None, None).is_err() {
+                                    error!("couldn't remove page when cleaning up failed heap expansion");
                                 }
                             }
+                        }
+
+                        global_state.cpus.read()[0].scheduler.sync_page_directory();
+                        for i in (current_top..new_top).step_by(PROPERTIES.page_size) {
+                            crate::arch::PageDirectory::flush_page(i);
                         }
 
                         return Err(err);
@@ -125,6 +136,8 @@ impl HeapAllocator {
                         Err(err) => error!("failed to allocate reserved memory: {err:?}"),
                     }
                 }
+
+                // TODO: synchronize page table of currently running process on this CPU
 
                 // try allocating again
                 self.heap.allocate_first_fit(layout).map_err(|_| HeapAllocError)

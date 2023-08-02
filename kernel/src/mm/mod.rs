@@ -3,16 +3,18 @@
 mod heap;
 mod init;
 mod paging;
+mod sync;
 
 pub use heap::*;
 pub use init::*;
-use num_traits::Num;
 pub use paging::*;
+pub use sync::*;
 
 use crate::arch::PhysicalAddress;
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::{fmt, ops::DerefMut};
 use log::error;
+use num_traits::Num;
 use spin::Mutex;
 
 pub enum AllocState {
@@ -144,34 +146,3 @@ impl<T> From<&mut [T]> for ContiguousRegion<usize> {
         }
     }
 }
-
-pub struct InitDeref<T> {
-    t: Option<T>,
-}
-
-impl<T> InitDeref<T> {
-    pub const fn new() -> Self {
-        Self { t: None }
-    }
-
-    pub fn init(&mut self, t: T) {
-        self.t = Some(t);
-    }
-}
-
-impl<T> core::ops::Deref for InitDeref<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.t.as_ref().expect("uninitialized")
-    }
-}
-
-impl<T> core::ops::DerefMut for InitDeref<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.t.as_mut().expect("uninitialized")
-    }
-}
-
-pub static KERNEL_PAGE_DIR: Mutex<InitDeref<crate::arch::PageDirectory>> = Mutex::new(InitDeref::new());
-pub static KERNEL_PAGE_MANAGER: Mutex<InitDeref<PageManager>> = Mutex::new(InitDeref::new());

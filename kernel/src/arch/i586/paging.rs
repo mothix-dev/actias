@@ -224,7 +224,7 @@ impl fmt::Display for PageTableFlags {
 /// entry in a page directory
 #[repr(transparent)]
 #[derive(Copy, Clone, Default)]
-struct PageDirEntry(u32);
+pub struct PageDirEntry(u32);
 
 impl PageDirEntry {
     /// create new page directory entry
@@ -496,6 +496,7 @@ impl PageDir {
 impl PageDirectory for PageDir {
     const PAGE_SIZE: usize = PAGE_SIZE;
     type Reserved = TableRef;
+    type RawKernelArea = [PageDirEntry];
 
     fn new(current_dir: &impl PageDirectory) -> Result<Self, PagingError> {
         unsafe {
@@ -613,7 +614,7 @@ impl PageDirectory for PageDir {
         // check if the reference to this page directory is in kernel memory, and will be valid across *up to date* page directories
         assert!(self as *const _ as usize >= SPLIT_ADDR, "current page directory reference isn't in kernel memory");
 
-        trace!("switching to page table @ {:#x}", self.tables_physical_addr);
+        //trace!("switching to page table @ {:#x}", self.tables_physical_addr);
 
         asm!(
             "mov cr3, {0}",
@@ -625,5 +626,13 @@ impl PageDirectory for PageDir {
         unsafe {
             x86::tlb::flush(addr);
         }
+    }
+
+    fn get_raw_kernel_area(&self) -> &Self::RawKernelArea {
+        &self.tables_physical.tables[SPLIT_ADDR >> 22..]
+    }
+
+    unsafe fn set_raw_kernel_area(&mut self, area: &Self::RawKernelArea) {
+        self.tables_physical.tables[SPLIT_ADDR >> 22..].copy_from_slice(area);
     }
 }

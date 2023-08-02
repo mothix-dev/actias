@@ -3,10 +3,12 @@
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     array::BitSet,
-    mm::{AllocState, ContiguousRegion, HeapAllocator, PageDirectory, PageManager, ALLOCATOR, KERNEL_PAGE_DIR, KERNEL_PAGE_MANAGER},
+    mm::{AllocState, ContiguousRegion, HeapAllocator, PageDirectory, PageManager, ALLOCATOR},
 };
+use alloc::{sync::Arc, vec::Vec};
 use core::{alloc::Layout, ptr::NonNull};
 use log::debug;
+use spin::{Mutex, RwLock};
 
 /// describes the memory map set up by the bootloader and/or platform-specific bringup code
 pub struct InitMemoryMap {
@@ -148,6 +150,7 @@ struct InitPageDir {
 impl super::PageDirectory for InitPageDir {
     const PAGE_SIZE: usize = 0;
     type Reserved = InitPageDirReserved;
+    type RawKernelArea = ();
 
     fn new(_current_dir: &impl super::PageDirectory) -> Result<Self, super::PagingError> {
         unimplemented!();
@@ -186,6 +189,14 @@ impl super::PageDirectory for InitPageDir {
     }
 
     fn flush_page(_addr: usize) {
+        unimplemented!();
+    }
+
+    fn get_raw_kernel_area(&self) -> &Self::RawKernelArea {
+        unimplemented!();
+    }
+
+    unsafe fn set_raw_kernel_area(&mut self, _area: &Self::RawKernelArea) {
         unimplemented!();
     }
 }
@@ -337,10 +348,16 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
     manager.print_free();
 
-    KERNEL_PAGE_DIR.lock().init(page_dir);
-    let mut page_dir = KERNEL_PAGE_DIR.lock();
-    KERNEL_PAGE_MANAGER.lock().init(manager);
-    let mut manager = KERNEL_PAGE_MANAGER.lock();
+    let page_dir = Arc::new(Mutex::new(super::PageDirTracker::track(page_dir)));
+    let manager = Arc::new(Mutex::new(manager));
+
+    unsafe {
+        crate::cpu::init_global_state(crate::cpu::GlobalState {
+            cpus: RwLock::new(Vec::new()),
+            page_directory: page_dir.clone(),
+            page_manager: manager.clone(),
+        });
+    }
 
     // reclaim bump allocator
     let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), state) {
@@ -362,11 +379,12 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let base_virt = freed_area.as_ptr() as *const _ as usize + offset as usize;
 
     for i in 0..len_pages {
-        manager.frame_set.clear((base_page + i).try_into().unwrap());
+        manager.lock().frame_set.clear((base_page + i).try_into().unwrap());
         page_dir
+            .lock()
             .set_page(None::<&crate::arch::PageDirectory>, base_virt + i as usize * PROPERTIES.page_size, None)
             .expect("couldn't set page");
     }
 
-    manager.print_free();
+    manager.lock().print_free();
 }

@@ -1,7 +1,11 @@
 //! simple multi-level feedback queue scheduler based on the 4.4BSD scheduler as described in https://www.scs.stanford.edu/23wi-cs212/pintos/pintos_7.html
 //! because it seems to work and i don't care enough to reinvent the wheel here
 
-use crate::{arch::bsp::RegisterContext, timer::Timer};
+use crate::{
+    arch::bsp::RegisterContext,
+    mm::{PageDirSync, PageDirTracker, PageDirectory},
+    timer::Timer,
+};
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     fmt::Display,
@@ -55,10 +59,13 @@ pub struct Task {
     pub exec_mode: ExecMode,
 
     /// the niceness value of this task, -20..=20
-    pub niceness: isize,
+    pub niceness: i64,
 
     /// estimate of how much CPU time this task has used recently in 17.14 fixed point
-    pub cpu_time: isize,
+    pub cpu_time: i64,
+
+    /// the page directory that should be switched to when running this task
+    pub page_directory: Arc<Mutex<PageDirSync<crate::arch::PageDirectory>>>,
 }
 
 /// scheduler for a single CPU
@@ -75,6 +82,9 @@ pub struct Scheduler {
     /// the stack used when waiting around for a task to be queued
     wait_around_stack: Mutex<Pin<Box<[u8]>>>,
 
+    /// the page directory of the kernel, to be switched to when there aren't any tasks to run
+    kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>,
+
     /// how many tasks are ready for execution
     ready_tasks: AtomicUsize,
 
@@ -89,7 +99,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(timer: Arc<Timer>) -> Arc<Self> {
+    pub fn new(timer: Arc<Timer>, kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>) -> Arc<Self> {
         let arc_self = Arc::new(Self {
             run_queues: {
                 let mut v = Vec::with_capacity(MAX_PRIORITY + 1);
@@ -101,6 +111,7 @@ impl Scheduler {
             current_task: Mutex::new(None),
             timer,
             wait_around_stack: Mutex::new(Box::into_pin(vec![0_u8; WAIT_STACK_SIZE].into_boxed_slice())),
+            kernel_page_directory,
             ready_tasks: AtomicUsize::new(0),
             load_avg: AtomicUsize::new(0),
             is_dropped: Arc::new(AtomicBool::new(false)),
@@ -134,8 +145,7 @@ impl Scheduler {
             let mut task = task.lock();
 
             // cpu_time = (new_load_avg * 2) / (new_load_avg * 2 + 1) * cpu_time + niceness
-            let cpu_time = ((new_load_avg * 2 * (1 << 14)) / (new_load_avg * 2 + (1 << 14)) * task.cpu_time as i64) / (1 << 14) + (task.niceness as i64 * (1 << 14));
-            task.cpu_time = cpu_time.try_into().unwrap();
+            task.cpu_time = ((new_load_avg * 2 * (1 << 14)) / (new_load_avg * 2 + (1 << 14)) * task.cpu_time) / (1 << 14) + (task.niceness * (1 << 14));
         }
 
         // schedule this function to run again in another second
@@ -147,11 +157,12 @@ impl Scheduler {
         let priority = {
             let task = task.lock();
 
-            // MAX_PRIORITY - (cpu_time / 4) - (niceness * 2)
-            let raw_prio = MAX_PRIORITY as isize - (((task.cpu_time / 4) - (task.niceness * 2 * (1 << 14))) >> 14);
+            // MAX_PRIORITY - (cpu_time / 4) + (niceness * 2)
+            // niceness was originally subtracted as originally described, however upon testing it has the exact opposite effect as intended
+            let raw_prio = MAX_PRIORITY as i64 - (((task.cpu_time / 4) + (task.niceness * 2 * (1 << 14))) >> 14);
 
             // clamp priority to 0..=MAX_PRIORITY
-            raw_prio.max(0).min(MAX_PRIORITY as isize) as usize
+            raw_prio.max(0).min(MAX_PRIORITY as i64) as usize
         };
 
         self.run_queues[priority].push(task);
@@ -183,6 +194,9 @@ impl Scheduler {
 
     /// performs a context switch,
     pub fn context_switch(&self, registers: &mut Registers, arc_self: Arc<Self>) {
+        // used to keep the previous task's page directory from being dropped until it's been switched out
+        let mut _page_directory = None;
+
         // save state of current task and re-queue it if necessary
         {
             let mut current_task = self.current_task.lock();
@@ -195,6 +209,7 @@ impl Scheduler {
                     let mut task = task.lock();
                     task.registers = registers.clone();
                     exec_mode = task.exec_mode;
+                    _page_directory = Some(task.page_directory.clone());
                 }
 
                 if exec_mode == ExecMode::Running {
@@ -212,6 +227,10 @@ impl Scheduler {
                 *registers = task.registers.clone();
                 task.cpu_time += 1 << 14;
 
+                unsafe {
+                    task.page_directory.lock().switch_to();
+                }
+
                 self.timer
                     .timeout_in(TIME_SLICE * self.timer.millis(), move |registers| arc_self.context_switch(registers, arc_self.clone()));
             }
@@ -225,6 +244,19 @@ impl Scheduler {
                 &mut stack[i] as *mut _
             };
             *registers = Registers::from_fn(wait_around as *const _, stack);
+
+            unsafe {
+                self.kernel_page_directory.lock().switch_to();
+            }
+        }
+    }
+
+    /// synchronizes the page directory of the running task with that of the kernel
+    pub fn sync_page_directory(&self) {
+        let current_task = self.current_task.lock();
+
+        if let Some(task) = &*current_task {
+            task.lock().page_directory.lock().check_synchronize();
         }
     }
 }

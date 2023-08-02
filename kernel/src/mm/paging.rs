@@ -11,6 +11,7 @@ pub enum PagingError {
     AllocError,
     BadFrame,
     BadAddress,
+    Invalid,
 }
 
 impl core::fmt::Debug for PagingError {
@@ -22,6 +23,7 @@ impl core::fmt::Debug for PagingError {
             Self::AllocError => "error allocating memory",
             Self::BadFrame => "bad frame",
             Self::BadAddress => "address not mapped",
+            Self::Invalid => "invalid request",
         })
     }
 }
@@ -186,6 +188,9 @@ pub trait PageDirectory {
     /// see the `ReservedMemory` trait for more details.
     type Reserved: ReservedMemory;
 
+    /// a type that's used to store a raw representation of the kernel's area in a page directory
+    type RawKernelArea: ?Sized;
+
     /* -= Required functions -= */
 
     /// creates a new instance of this page directory, allocating any necessary memory for it in the process
@@ -235,6 +240,16 @@ pub trait PageDirectory {
     /// when ran on the current page directory, flushes the entry for the given page in the TLB (or equivalent).
     /// when ran on any page directory other than the current one, the behavior is undefined
     fn flush_page(addr: usize);
+
+    /// gets the raw kernel area from this page directory
+    fn get_raw_kernel_area(&self) -> &Self::RawKernelArea;
+
+    /// sets the raw kernel area of this page directory to the one given.
+    ///
+    /// # Safety
+    ///
+    /// once the raw kernel area is modified in a page directory, the behavior of any `get_page()` or `set_page()` calls in the kernel area of that page directory are undefined
+    unsafe fn set_raw_kernel_area(&mut self, area: &Self::RawKernelArea);
 
     /* -= Non required functions =- */
 

@@ -1,12 +1,13 @@
 pub mod bootloader;
 pub mod logger;
 
-use core::ptr::addr_of_mut;
-
 use crate::{
-    arch::{PhysicalAddress, PROPERTIES},
-    mm::MemoryRegion,
+    arch::{bsp::RegisterContext, interrupts::InterruptRegisters, PhysicalAddress, PROPERTIES},
+    mm::{MemoryRegion, PageDirectory, PageDirSync},
 };
+use alloc::sync::Arc;
+use core::{arch::asm, ptr::addr_of_mut};
+use spin::Mutex;
 
 /// the address the kernel is linked at
 pub const LINKED_BASE: usize = 0xe0000000;
@@ -108,6 +109,15 @@ pub fn kmain() {
 
     crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
 
+    let stack_manager = crate::arch::gdt::init(0x1000 * 8);
+    let timer = alloc::sync::Arc::new(crate::timer::Timer::new(1000));
+    let scheduler = crate::sched::Scheduler::new(timer.clone(), crate::cpu::get_global_state().page_directory.clone());
+    crate::cpu::get_global_state().cpus.write().push(crate::cpu::CPU {
+        timer: timer.clone(),
+        stack_manager,
+        scheduler: scheduler.clone(),
+    });
+
     use crate::arch::bsp::InterruptManager;
     let mut manager = crate::arch::InterruptManager::new();
 
@@ -123,10 +133,8 @@ pub fn kmain() {
         panic!("exception in kernel mode");
     });
 
-    let hz = 1000;
-
     // init PIT
-    let divisor = 1193180 / hz;
+    let divisor = 1193180 / timer.hz();
 
     let l = (divisor & 0xff) as u8;
     let h = ((divisor >> 8) & 0xff) as u8;
@@ -138,20 +146,13 @@ pub fn kmain() {
         outb(0x40, h);
     }
 
-    let timer = alloc::sync::Arc::new(crate::timer::Timer::new(hz));
-
-    {
-        let timer = timer.clone();
-        manager.register(0x20, move |regs| timer.tick(regs));
-    }
+    manager.register(0x20, move |regs| timer.tick(regs));
 
     manager.load_handlers();
 
     unsafe {
         asm!("sti");
     }
-
-    let stack_manager = crate::arch::gdt::init(0x1000 * 8);
 
     /*timer.timeout_in(timer.hz() / 2, |_| {
         info!(":3c");
@@ -187,22 +188,6 @@ pub fn kmain() {
         (crate::arch::PROPERTIES.wait_for_interrupt)();
     }*/
 
-    use crate::arch::{bsp::RegisterContext, interrupts::InterruptRegisters};
-    use alloc::{boxed::Box, vec};
-    use core::arch::asm;
-
-    let cpu = crate::cpu::CPU {
-        timer: timer.clone(),
-        stack_manager,
-        scheduler: crate::sched::Scheduler::new(timer),
-    };
-
-    let stack_size = 0x1000 * 4;
-    let mut stack_a = Box::into_pin(vec![0_u8; stack_size].into_boxed_slice());
-    let stack_ptr_a = &mut stack_a[stack_size - 1] as *mut u8;
-    let mut stack_b = Box::into_pin(vec![0_u8; stack_size].into_boxed_slice());
-    let stack_ptr_b = &mut stack_b[stack_size - 1] as *mut u8;
-
     extern "C" fn task_a() {
         loop {
             info!("UwU");
@@ -234,23 +219,52 @@ pub fn kmain() {
         }
     }
 
-    cpu.scheduler.add_task(crate::sched::Task {
+    fn make_page_dir() -> PageDirSync<crate::arch::PageDirectory> {
+        let stack_size = 0x1000 * 4;
+
+        let split_addr = PROPERTIES.kernel_region.base;
+        let global_state = crate::cpu::get_global_state();
+        let mut dir = PageDirSync::sync_from(global_state.page_directory.clone(), split_addr).unwrap();
+
+        for addr in (split_addr - stack_size..split_addr).step_by(PROPERTIES.page_size) {
+            let phys_addr = global_state.page_manager.lock().alloc_frame().unwrap();
+            dir.set_page(
+                None::<&crate::arch::PageDirectory>,
+                addr,
+                Some(crate::mm::PageFrame {
+                    addr: phys_addr,
+                    present: true,
+                    writable: true,
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+
+        dir
+    }
+
+    let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
+
+    scheduler.add_task(crate::sched::Task {
         is_valid: true,
-        registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr_a),
+        registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
+        page_directory: Arc::new(Mutex::new(make_page_dir())),
     });
 
-    cpu.scheduler.add_task(crate::sched::Task {
+    scheduler.add_task(crate::sched::Task {
         is_valid: true,
-        registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr_b),
+        registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
+        page_directory: Arc::new(Mutex::new(make_page_dir())),
     });
 
-    cpu.start_context_switching();
+    crate::cpu::get_global_state().cpus.read()[0].start_context_switching();
 }
 
 pub fn get_stack_ptr() -> *mut u8 {
