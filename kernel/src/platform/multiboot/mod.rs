@@ -187,18 +187,14 @@ pub fn kmain() {
         (crate::arch::PROPERTIES.wait_for_interrupt)();
     }*/
 
-    use alloc::sync::Arc;
-    use spin::Mutex;
-    use crate::arch::interrupts::InterruptRegisters;
-    use crate::arch::bsp::RegisterContext;
-    use alloc::boxed::Box;
-    use alloc::vec;
+    use crate::arch::{bsp::RegisterContext, interrupts::InterruptRegisters};
+    use alloc::{boxed::Box, vec};
     use core::arch::asm;
 
     let cpu = crate::cpu::CPU {
         timer: timer.clone(),
         stack_manager,
-        scheduler: Arc::new(crate::sched::Scheduler::new(timer)),
+        scheduler: crate::sched::Scheduler::new(timer),
     };
 
     let stack_size = 0x1000 * 4;
@@ -238,21 +234,21 @@ pub fn kmain() {
         }
     }
 
-    cpu.scheduler.run_queue.push(Arc::new(Mutex::new(crate::sched::Task {
+    cpu.scheduler.add_task(crate::sched::Task {
         is_valid: true,
         registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr_a),
         niceness: 0,
-        niceness_adj: 0,
         exec_mode: crate::sched::ExecMode::Running,
-    })));
+        cpu_time: 0,
+    });
 
-    cpu.scheduler.run_queue.push(Arc::new(Mutex::new(crate::sched::Task {
+    cpu.scheduler.add_task(crate::sched::Task {
         is_valid: true,
         registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr_b),
         niceness: 0,
-        niceness_adj: 0,
         exec_mode: crate::sched::ExecMode::Running,
-    })));
+        cpu_time: 0,
+    });
 
     cpu.start_context_switching();
 }
