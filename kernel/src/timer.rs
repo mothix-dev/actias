@@ -12,16 +12,17 @@ struct Timeout {
 }
 
 #[cfg(not(target_has_atomic = "64"))]
-type TimerJiffies = AtomicUsize;
+pub type AtomicJiffies = AtomicUsize;
 
 #[cfg(target_has_atomic = "64")]
-type TimerJiffies = AtomicU64;
+pub type AtomicJiffies = AtomicU64;
 
 pub struct Timer {
-    jiffies: TimerJiffies,
+    jiffies: AtomicJiffies,
     hz: u64,
     timers: Mutex<VecDeque<Timeout>>,
     add_queue: SegQueue<Timeout>,
+    remove_queue: SegQueue<u64>,
 }
 
 unsafe impl Send for Timer {}
@@ -31,10 +32,11 @@ impl Timer {
     /// creates a new timer with the specified tick rate
     pub fn new(hz: u64) -> Self {
         Self {
-            jiffies: TimerJiffies::new(0),
+            jiffies: AtomicJiffies::new(0),
             hz,
             timers: Mutex::new(VecDeque::new()),
             add_queue: SegQueue::new(),
+            remove_queue: SegQueue::new(),
         }
     }
 
@@ -47,8 +49,17 @@ impl Timer {
     }
 
     /// adds a timeout that'll expire in the given amount of ticks in the future
-    pub fn timeout_in<F: FnMut(&mut Registers) + 'static>(&self, expires_in: u64, callback: F) {
-        self.timeout_at(self.jiffies.load(Ordering::SeqCst) as u64 + expires_in, callback)
+    pub fn timeout_in<F: FnMut(&mut Registers) + 'static>(&self, expires_in: u64, callback: F) -> u64 {
+        let expires_at = self.jiffies.load(Ordering::SeqCst) as u64 + expires_in;
+        self.timeout_at(expires_at, callback);
+        expires_at
+    }
+
+    /// removes any timeouts that expire at the given time
+    ///
+    /// TODO: is it worth hashing callbacks and using them as keys to remove individual timeouts?
+    pub fn remove(&self, expires_at: u64) {
+        self.remove_queue.push(expires_at);
     }
 
     pub fn tick(&self, registers: &mut Registers) {
@@ -84,6 +95,18 @@ impl Timer {
             } else {
                 // break out of the loop since we keep the timer queue sorted
                 break;
+            }
+        }
+
+        // remove any timers to be removed
+        while let Some(expires_at) = self.remove_queue.pop() {
+            for (index, timer) in timers.iter().enumerate() {
+                if timer.expires_at == expires_at {
+                    timers.remove(index);
+                    break;
+                } else if timer.expires_at > expires_at {
+                    break;
+                }
             }
         }
     }

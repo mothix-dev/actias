@@ -1,7 +1,8 @@
 use crate::{
     mm::{PageDirTracker, PageManager},
+    process::ProcessTable,
     sched::Scheduler,
-    timer::Timer, process::ProcessTable,
+    timer::Timer,
 };
 use alloc::{sync::Arc, vec::Vec};
 use log::debug;
@@ -18,7 +19,7 @@ impl CPU {
         debug!("starting context switching");
         let scheduler = self.scheduler.clone();
         self.scheduler.force_next_context_switch();
-        self.timer.timeout_at(0, move |registers| scheduler.context_switch(registers, scheduler.clone()));
+        self.timer.timeout_at(0, move |registers| scheduler.context_switch(registers, scheduler.clone(), true));
 
         crate::sched::wait_around();
     }

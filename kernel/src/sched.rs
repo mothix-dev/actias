@@ -13,7 +13,6 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use crossbeam::queue::SegQueue;
-use log::debug;
 use spin::Mutex;
 
 type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
@@ -23,7 +22,7 @@ const TIME_SLICE: u64 = 6;
 const MAX_PRIORITY: usize = 63;
 
 /// formats a fixed point number properly with the given number of decimal places
-struct FixedPoint<T>(T, usize);
+pub struct FixedPoint<T>(pub T, pub usize);
 
 impl<T: Display + Copy + TryFrom<usize> + core::ops::Shr<T, Output = T> + core::ops::BitAnd<T, Output = T> + core::ops::Mul<T, Output = T> + core::ops::Div<T, Output = T>> core::fmt::Display
     for FixedPoint<T>
@@ -71,6 +70,16 @@ pub struct Task {
 
     /// the page directory that should be switched to when running this task
     pub page_directory: Arc<Mutex<PageDirSync<crate::arch::PageDirectory>>>,
+
+    /// the PID associated with this task
+    pub pid: Option<usize>,
+}
+
+impl Task {
+    pub fn calc_cpu_time(&mut self, load_avg: i64) {
+        // cpu_time = (load_avg * 2) / (load_avg * 2 + 1) * cpu_time + niceness
+        self.cpu_time = ((load_avg * 2 * (1 << 14)) / (load_avg * 2 + (1 << 14)) * self.cpu_time) / (1 << 14) + (self.niceness * (1 << 14));
+    }
 }
 
 /// scheduler for a single CPU
@@ -99,16 +108,16 @@ pub struct Scheduler {
     /// whether or not this scheduler has been dropped
     is_dropped: Arc<AtomicBool>,
 
-    /// temporary until a full on process list is created
-    tasks: Mutex<Vec<Arc<Mutex<Task>>>>,
-
     /// whether to force a context switch to happen regardless of whether or not we're in kernel mode
     force_context_switch: AtomicBool,
+
+    /// when the preemption timeout will occur
+    timeout: crate::timer::AtomicJiffies,
 }
 
 impl Scheduler {
-    pub fn new(timer: Arc<Timer>, kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>) -> Arc<Self> {
-        let arc_self = Arc::new(Self {
+    pub fn new(timer: Arc<Timer>, kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>) -> Self {
+        Self {
             run_queues: {
                 let mut v = Vec::with_capacity(MAX_PRIORITY + 1);
                 for _i in 0..=MAX_PRIORITY {
@@ -123,44 +132,17 @@ impl Scheduler {
             ready_tasks: AtomicUsize::new(0),
             load_avg: AtomicUsize::new(0),
             is_dropped: Arc::new(AtomicBool::new(false)),
-            tasks: Mutex::new(vec![]),
             force_context_switch: AtomicBool::new(false),
-        });
-
-        Self::every_second(arc_self.clone());
-
-        arc_self
+            timeout: crate::timer::AtomicJiffies::new(0),
+        }
     }
 
     pub fn force_next_context_switch(&self) {
         self.force_context_switch.store(true, Ordering::SeqCst);
     }
 
-    /// calculates the scheduler's load average every second
-    fn every_second(arc_self: Arc<Self>) {
-        if arc_self.is_dropped.load(Ordering::SeqCst) {
-            return;
-        }
-
-        arc_self.calc_load_avg();
-
-        // temporary, calculates the average CPU time for all tasks
-        let load_avg: i64 = arc_self.load_avg.load(Ordering::SeqCst).try_into().unwrap();
-        debug!("load_avg is {}", FixedPoint(load_avg, 2));
-
-        for task in arc_self.tasks.lock().iter() {
-            let mut task = task.lock();
-
-            // cpu_time = (load_avg * 2) / (load_avg * 2 + 1) * cpu_time + niceness
-            task.cpu_time = ((load_avg * 2 * (1 << 14)) / (load_avg * 2 + (1 << 14)) * task.cpu_time) / (1 << 14) + (task.niceness * (1 << 14));
-        }
-
-        // schedule this function to run again in another second
-        arc_self.timer.clone().timeout_in(arc_self.timer.hz(), move |_| Self::every_second(arc_self.clone()));
-    }
-
     /// calculates the load average of the scheduler. should only be called once per second
-    pub fn calc_load_avg(&self) {
+    pub fn calc_load_avg(&self) -> u64 {
         let cur_load_avg = self.load_avg.load(Ordering::SeqCst) as u64;
         let cur_ready_tasks = self.ready_tasks.load(Ordering::SeqCst) as u64;
 
@@ -168,6 +150,7 @@ impl Scheduler {
         let new_load_avg = ((((59 << 14) / 60) * cur_load_avg) >> 14) + ((1 << 14) / 60) * cur_ready_tasks;
 
         self.load_avg.store(new_load_avg.try_into().unwrap(), Ordering::SeqCst);
+        new_load_avg
     }
 
     /// pushes a task onto the proper runqueue
@@ -187,22 +170,16 @@ impl Scheduler {
         self.ready_tasks.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// temporary
-    pub fn add_task(&self, task: Task) {
-        let task = Arc::new(Mutex::new(task));
-        self.tasks.lock().push(task.clone());
-        self.push_task(task);
-    }
-
     /// iterates thru all the runqueues from highest to lowest priority to find an available task
     fn pop_task(&self) -> Option<Arc<Mutex<Task>>> {
         for i in (0..=MAX_PRIORITY).rev() {
             if let Some(task) = self.run_queues[i].pop() {
+                self.ready_tasks.fetch_sub(1, Ordering::SeqCst);
+
                 if !task.lock().is_valid {
                     continue;
                 }
 
-                self.ready_tasks.fetch_sub(1, Ordering::SeqCst);
                 return Some(task);
             }
         }
@@ -211,23 +188,18 @@ impl Scheduler {
     }
 
     /// performs a context switch,
-    pub fn context_switch(&self, registers: &mut Registers, arc_self: Arc<Self>) {
+    pub fn context_switch(&self, registers: &mut Registers, arc_self: Arc<Self>, from_timer: bool) {
         if self.is_dropped.load(Ordering::SeqCst) {
             return;
         }
 
         // skip context switching if the kernel is busy doing something
-        let stack_pointer = registers.stack_pointer() as *const u8;
-        if stack_pointer as usize >= PROPERTIES.kernel_region.base && !self.force_context_switch.load(Ordering::SeqCst) {
-            let wait_around_stack = self.wait_around_stack.lock();
-
-            // make sure we're not in the waiting around stack, since that
-            if stack_pointer < &wait_around_stack[0] || stack_pointer > &wait_around_stack[wait_around_stack.len() - 1] {
-                // stack pointer is in the kernel area so the kernel is probably doing something, best not to touch anything and just wait a bit
-                self.timer.timeout_in(1, move |registers| arc_self.context_switch(registers, arc_self.clone()));
-                return;
-            }
+        if !self.is_running_task(registers) && !self.force_context_switch.load(Ordering::SeqCst) {
+            self.timer.timeout_in(0, move |registers| arc_self.context_switch(registers, arc_self.clone(), true));
+            return;
         }
+
+        self.force_context_switch.store(false, Ordering::SeqCst);
 
         // used to keep the previous task's page directory from being dropped until it's been switched out
         let mut _page_directory = None;
@@ -269,8 +241,15 @@ impl Scheduler {
                     page_directory.switch_to();
                 }
 
-                self.timer
-                    .timeout_in(TIME_SLICE * self.timer.millis(), move |registers| arc_self.context_switch(registers, arc_self.clone()));
+                let timeout = self
+                    .timer
+                    .timeout_in(TIME_SLICE * self.timer.millis(), move |registers| arc_self.context_switch(registers, arc_self.clone(), true));
+
+                if from_timer {
+                    self.timeout.store(timeout.try_into().unwrap(), Ordering::SeqCst);
+                } else {
+                    self.timer.remove(self.timeout.swap(timeout.try_into().unwrap(), Ordering::SeqCst) as u64);
+                }
             }
 
             *self.current_task.lock() = Some(task);
@@ -295,6 +274,24 @@ impl Scheduler {
 
         if let Some(task) = &*current_task {
             task.lock().page_directory.lock().check_synchronize();
+        }
+    }
+
+    /// gets the currently running task on this scheduler
+    pub fn get_current_task(&self) -> Option<Arc<Mutex<Task>>> {
+        self.current_task.lock().clone()
+    }
+
+    /// figures out whether or not a task is currently running based on registers
+    pub fn is_running_task(&self, registers: &Registers) -> bool {
+        let stack_pointer = registers.stack_pointer() as *const u8;
+        if stack_pointer as usize >= PROPERTIES.kernel_region.base && stack_pointer as usize - PROPERTIES.kernel_region.base < PROPERTIES.kernel_region.length {
+            let wait_around_stack = self.wait_around_stack.lock();
+
+            // make sure we're not in the waiting around stack, since that's in the kernel area but shouldn't be treated as part of the kernel
+            stack_pointer >= &wait_around_stack[0] && stack_pointer <= &wait_around_stack[wait_around_stack.len() - 1]
+        } else {
+            true
         }
     }
 }

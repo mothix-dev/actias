@@ -1,7 +1,7 @@
 //! process management
 
-use crate::{array::VecBitSet, sched::Task, mm::PageDirSync};
-use alloc::{collections::BTreeMap, vec::Vec, sync::Arc};
+use crate::{array::VecBitSet, mm::PageDirSync, sched::Task};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 
 pub enum AddProcessError {
@@ -84,6 +84,16 @@ impl ProcessTable {
     /// gets a mutable reference to the process associated with the given PID
     pub fn get_mut(&mut self, pid: usize) -> Option<&mut Process> {
         self.process_map.get_mut(&pid)
+    }
+
+    /// gets an iterator over every process in the map
+    pub fn iter(&self) -> alloc::collections::btree_map::Iter<'_, usize, Process> {
+        self.process_map.iter()
+    }
+
+    /// gets a mutable iterator over every process in the map
+    pub fn iter_mut(&mut self) -> alloc::collections::btree_map::IterMut<'_, usize, Process> {
+        self.process_map.iter_mut()
     }
 }
 

@@ -5,8 +5,9 @@ use crate::{
     arch::{bsp::RegisterContext, interrupts::InterruptRegisters, PhysicalAddress, PROPERTIES},
     mm::{MemoryRegion, PageDirSync, PageDirectory},
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec};
 use core::{arch::asm, ptr::addr_of_mut};
+use log::{debug, error, info};
 use spin::Mutex;
 
 /// the address the kernel is linked at
@@ -78,7 +79,6 @@ pub fn kmain() {
         }
     };
 
-    use log::debug;
     debug!("kernel {}k, alloc {}k", init_memory_map.kernel_area.len() / 1024, init_memory_map.bump_alloc_area.len() / 1024);
 
     // create proper memory map from multiboot info
@@ -111,7 +111,7 @@ pub fn kmain() {
 
     let stack_manager = crate::arch::gdt::init(0x1000 * 8);
     let timer = alloc::sync::Arc::new(crate::timer::Timer::new(1000));
-    let scheduler = crate::sched::Scheduler::new(timer.clone(), crate::cpu::get_global_state().page_directory.clone());
+    let scheduler = alloc::sync::Arc::new(crate::sched::Scheduler::new(timer.clone(), crate::cpu::get_global_state().page_directory.clone()));
     crate::cpu::get_global_state().cpus.write().push(crate::cpu::CPU {
         timer: timer.clone(),
         stack_manager,
@@ -121,16 +121,34 @@ pub fn kmain() {
     use crate::arch::bsp::InterruptManager;
     let mut manager = crate::arch::InterruptManager::new();
 
-    use log::{error, info};
     manager.register_aborts(|regs, info| {
+        unsafe {
+            asm!("cli");
+        }
         error!("unrecoverable exception: {info}");
         info!("register dump: {regs:#?}");
         panic!("unrecoverable exception");
     });
     manager.register_faults(|regs, info| {
-        error!("exception in kernel mode: {info}");
-        info!("register dump: {regs:#?}");
-        panic!("exception in kernel mode");
+        let global_state = crate::cpu::get_global_state();
+        let scheduler = global_state.cpus.read()[0].scheduler.clone();
+
+        if scheduler.is_running_task(regs) {
+            if let Some(task) = scheduler.get_current_task() {
+                let mut task = task.lock();
+                debug!("exception in process {}: {info}", task.pid.unwrap_or_default());
+                task.is_valid = false;
+            }
+
+            scheduler.context_switch(regs, scheduler.clone(), false);
+        } else {
+            unsafe {
+                asm!("cli");
+            }
+            error!("exception in kernel mode: {info}");
+            info!("register dump: {regs:#?}");
+            panic!("exception in kernel mode");
+        }
     });
 
     // init PIT
@@ -151,8 +169,29 @@ pub fn kmain() {
     manager.register(0x80, move |_| {
         info!("hi from syscall land");
     });
+    manager.register(0x81, move |_| {
+        info!("hi from syscall land 2");
+    });
 
     manager.load_handlers();
+
+    fn every_second() {
+        let global_state = crate::cpu::get_global_state();
+
+        let total_load_avg: u64 = global_state.cpus.read().iter().map(|cpu| cpu.scheduler.calc_load_avg()).sum();
+        debug!("load_avg is {}", crate::sched::FixedPoint(total_load_avg, 2));
+
+        for (_pid, process) in global_state.process_table.read().iter() {
+            for task in process.threads.write().iter_mut() {
+                task.lock().calc_cpu_time(total_load_avg.try_into().unwrap());
+            }
+        }
+
+        let timer = global_state.cpus.read()[0].timer.clone();
+        timer.timeout_in(timer.hz(), |_| every_second());
+    }
+
+    every_second();
 
     unsafe {
         asm!("sti");
@@ -192,38 +231,63 @@ pub fn kmain() {
         (crate::arch::PROPERTIES.wait_for_interrupt)();
     }*/
 
-    extern "C" fn task_a() {
-        loop {
-            info!("UwU");
-
-            // wait a little while
-            for _i in 0..1048576 {
-                unsafe {
-                    asm!("pause");
-                }
-            }
+    #[inline(never)]
+    fn message_a() {
+        unsafe {
+            asm!("int 0x80");
         }
     }
 
+    #[inline(never)]
+    fn message_b() {
+        unsafe {
+            asm!("int 0x81");
+        }
+    }
+
+    #[inline(never)]
+    fn pause_hint() {
+        unsafe {
+            asm!("pause");
+        }
+    }
+
+    #[inline(never)]
+    fn page_fault() {
+        unsafe {
+            *(1 as *mut u8) = 0;
+        }
+    }
+
+    extern "C" fn task_a() {
+        for _i in 0..10 {
+            //info!("UwU");
+            message_a();
+
+            // wait a little while
+            for _i in 0..1048576 {
+                pause_hint();
+            }
+        }
+
+        //info!(":3c");
+        page_fault();
+    }
+
     extern "C" fn task_b() {
-        loop {
+        for _i in 0..20 {
             for _i in 0..524288 {
-                unsafe {
-                    asm!("pause");
-                }
+                pause_hint();
             }
 
             //info!("OwO");
-            unsafe {
-                asm!("int 0x80");
-            }
+            message_b();
 
             for _i in 0..524288 {
-                unsafe {
-                    asm!("pause");
-                }
+                pause_hint();
             }
         }
+        page_fault();
     }
 
     fn make_page_dir() -> PageDirSync<crate::arch::PageDirectory> {
@@ -253,23 +317,49 @@ pub fn kmain() {
 
     let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
 
-    scheduler.add_task(crate::sched::Task {
+    let global_state = crate::cpu::get_global_state();
+
+    let page_dir_a = Arc::new(Mutex::new(make_page_dir()));
+    let task_a = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
         registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
-        page_directory: Arc::new(Mutex::new(make_page_dir())),
-    });
+        page_directory: page_dir_a.clone(),
+        pid: None,
+    }));
+    let pid_a = global_state
+        .process_table
+        .write()
+        .insert(crate::process::Process {
+            threads: spin::RwLock::new(vec![task_a.clone()]),
+            page_directory: page_dir_a,
+        })
+        .unwrap();
+    task_a.lock().pid = Some(pid_a);
+    scheduler.push_task(task_a);
 
-    scheduler.add_task(crate::sched::Task {
+    let page_dir_b = Arc::new(Mutex::new(make_page_dir()));
+    let task_b = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
         registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
-        page_directory: Arc::new(Mutex::new(make_page_dir())),
-    });
+        page_directory: page_dir_b.clone(),
+        pid: None,
+    }));
+    let pid_b = global_state
+        .process_table
+        .write()
+        .insert(crate::process::Process {
+            threads: spin::RwLock::new(vec![task_b.clone()]),
+            page_directory: page_dir_b,
+        })
+        .unwrap();
+    task_b.lock().pid = Some(pid_b);
+    scheduler.push_task(task_b);
 
     crate::cpu::get_global_state().cpus.read()[0].start_context_switching();
 }

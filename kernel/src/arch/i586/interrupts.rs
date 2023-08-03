@@ -338,7 +338,7 @@ impl InterruptManager for IntManager {
                 },
                 IDTFlags::Interrupt,
             ),
-            0x80 => self.register_internal(interrupt_num, handler, IDTFlags::Call),
+            0x80 | 0x81 => self.register_internal(interrupt_num, handler, IDTFlags::Call),
             _ => self.register_internal(interrupt_num, handler, IDTFlags::Interrupt),
         }
     }
