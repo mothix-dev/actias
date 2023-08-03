@@ -356,6 +356,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
             cpus: RwLock::new(Vec::new()),
             page_directory: page_dir.clone(),
             page_manager: manager.clone(),
+            process_table: RwLock::new(crate::process::ProcessTable::new(4194304, 131072)),
         });
     }
 

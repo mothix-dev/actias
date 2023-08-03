@@ -2,7 +2,7 @@
 //! because it seems to work and i don't care enough to reinvent the wheel here
 
 use crate::{
-    arch::bsp::RegisterContext,
+    arch::{bsp::RegisterContext, PROPERTIES},
     mm::{PageDirSync, PageDirTracker, PageDirectory},
     timer::Timer,
 };
@@ -22,20 +22,25 @@ const WAIT_STACK_SIZE: usize = 0x1000;
 const TIME_SLICE: u64 = 6;
 const MAX_PRIORITY: usize = 63;
 
-/// formats a fixed point number properly with 4 decimal places
-struct FixedPoint<T>(T);
+/// formats a fixed point number properly with the given number of decimal places
+struct FixedPoint<T>(T, usize);
 
 impl<T: Display + Copy + TryFrom<usize> + core::ops::Shr<T, Output = T> + core::ops::BitAnd<T, Output = T> + core::ops::Mul<T, Output = T> + core::ops::Div<T, Output = T>> core::fmt::Display
     for FixedPoint<T>
 where <T as TryFrom<usize>>::Error: core::fmt::Debug
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "{}.{:04}",
-            self.0 >> 14_usize.try_into().unwrap(),
-            ((self.0 & ((1_usize << 14) - 1).try_into().unwrap()) * 10000_usize.try_into().unwrap()) / (1_usize << 14).try_into().unwrap()
-        )
+        if self.1 == 0 {
+            write!(f, "{}", self.0 >> 14_usize.try_into().unwrap())
+        } else {
+            write!(
+                f,
+                "{}.{:0width$}",
+                self.0 >> 14_usize.try_into().unwrap(),
+                ((self.0 & ((1_usize << 14) - 1).try_into().unwrap()) * 10_usize.pow(self.1.try_into().unwrap()).try_into().unwrap()) / (1_usize << 14).try_into().unwrap(),
+                width = self.1
+            )
+        }
     }
 }
 
@@ -96,6 +101,9 @@ pub struct Scheduler {
 
     /// temporary until a full on process list is created
     tasks: Mutex<Vec<Arc<Mutex<Task>>>>,
+
+    /// whether to force a context switch to happen regardless of whether or not we're in kernel mode
+    force_context_switch: AtomicBool,
 }
 
 impl Scheduler {
@@ -116,11 +124,16 @@ impl Scheduler {
             load_avg: AtomicUsize::new(0),
             is_dropped: Arc::new(AtomicBool::new(false)),
             tasks: Mutex::new(vec![]),
+            force_context_switch: AtomicBool::new(false),
         });
 
         Self::every_second(arc_self.clone());
 
         arc_self
+    }
+
+    pub fn force_next_context_switch(&self) {
+        self.force_context_switch.store(true, Ordering::SeqCst);
     }
 
     /// calculates the scheduler's load average every second
@@ -129,27 +142,32 @@ impl Scheduler {
             return;
         }
 
-        let cur_load_avg = arc_self.load_avg.load(Ordering::SeqCst) as u64;
-        let cur_ready_tasks = arc_self.ready_tasks.load(Ordering::SeqCst) as u64;
-
-        // new_load_avg = (59.0 / 60.0) * cur_load_avg + (1.0 / 60.0) * cur_ready_tasks
-        let new_load_avg = ((((59 << 14) / 60) * cur_load_avg) >> 14) + ((1 << 14) / 60) * cur_ready_tasks;
-
-        arc_self.load_avg.store(new_load_avg.try_into().unwrap(), Ordering::SeqCst);
-
-        debug!("load_avg is {}", FixedPoint(new_load_avg));
+        arc_self.calc_load_avg();
 
         // temporary, calculates the average CPU time for all tasks
-        let new_load_avg: i64 = new_load_avg.try_into().unwrap();
+        let load_avg: i64 = arc_self.load_avg.load(Ordering::SeqCst).try_into().unwrap();
+        debug!("load_avg is {}", FixedPoint(load_avg, 2));
+
         for task in arc_self.tasks.lock().iter() {
             let mut task = task.lock();
 
-            // cpu_time = (new_load_avg * 2) / (new_load_avg * 2 + 1) * cpu_time + niceness
-            task.cpu_time = ((new_load_avg * 2 * (1 << 14)) / (new_load_avg * 2 + (1 << 14)) * task.cpu_time) / (1 << 14) + (task.niceness * (1 << 14));
+            // cpu_time = (load_avg * 2) / (load_avg * 2 + 1) * cpu_time + niceness
+            task.cpu_time = ((load_avg * 2 * (1 << 14)) / (load_avg * 2 + (1 << 14)) * task.cpu_time) / (1 << 14) + (task.niceness * (1 << 14));
         }
 
         // schedule this function to run again in another second
         arc_self.timer.clone().timeout_in(arc_self.timer.hz(), move |_| Self::every_second(arc_self.clone()));
+    }
+
+    /// calculates the load average of the scheduler. should only be called once per second
+    pub fn calc_load_avg(&self) {
+        let cur_load_avg = self.load_avg.load(Ordering::SeqCst) as u64;
+        let cur_ready_tasks = self.ready_tasks.load(Ordering::SeqCst) as u64;
+
+        // new_load_avg = (59.0 / 60.0) * cur_load_avg + (1.0 / 60.0) * cur_ready_tasks
+        let new_load_avg = ((((59 << 14) / 60) * cur_load_avg) >> 14) + ((1 << 14) / 60) * cur_ready_tasks;
+
+        self.load_avg.store(new_load_avg.try_into().unwrap(), Ordering::SeqCst);
     }
 
     /// pushes a task onto the proper runqueue
@@ -194,6 +212,23 @@ impl Scheduler {
 
     /// performs a context switch,
     pub fn context_switch(&self, registers: &mut Registers, arc_self: Arc<Self>) {
+        if self.is_dropped.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // skip context switching if the kernel is busy doing something
+        let stack_pointer = registers.stack_pointer() as *const u8;
+        if stack_pointer as usize >= PROPERTIES.kernel_region.base && !self.force_context_switch.load(Ordering::SeqCst) {
+            let wait_around_stack = self.wait_around_stack.lock();
+
+            // make sure we're not in the waiting around stack, since that
+            if stack_pointer < &wait_around_stack[0] || stack_pointer > &wait_around_stack[wait_around_stack.len() - 1] {
+                // stack pointer is in the kernel area so the kernel is probably doing something, best not to touch anything and just wait a bit
+                self.timer.timeout_in(1, move |registers| arc_self.context_switch(registers, arc_self.clone()));
+                return;
+            }
+        }
+
         // used to keep the previous task's page directory from being dropped until it's been switched out
         let mut _page_directory = None;
 
@@ -207,6 +242,7 @@ impl Scheduler {
                 #[allow(clippy::clone_on_copy)]
                 {
                     let mut task = task.lock();
+
                     task.registers = registers.clone();
                     exec_mode = task.exec_mode;
                     _page_directory = Some(task.page_directory.clone());
@@ -225,10 +261,12 @@ impl Scheduler {
                 let mut task = task.lock();
 
                 *registers = task.registers.clone();
-                task.cpu_time += 1 << 14;
+                task.cpu_time += (TIME_SLICE as i64) * (1 << 14) / 3;
 
                 unsafe {
-                    task.page_directory.lock().switch_to();
+                    let mut page_directory = task.page_directory.lock();
+                    page_directory.check_synchronize();
+                    page_directory.switch_to();
                 }
 
                 self.timer

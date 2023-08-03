@@ -218,7 +218,7 @@ impl<D: PageDirectory> PageDirectory for SyncVirtToPhys<D> {
     type RawKernelArea = D::RawKernelArea;
 
     fn new(_current_dir: &impl PageDirectory) -> Result<Self, super::PagingError>
-        where Self: Sized {
+    where Self: Sized {
         unimplemented!();
     }
 
@@ -230,7 +230,13 @@ impl<D: PageDirectory> PageDirectory for SyncVirtToPhys<D> {
         unimplemented!();
     }
 
-    fn set_page_no_alloc(&mut self, _current_dir: Option<&impl PageDirectory>, _addr: usize, _page: Option<super::PageFrame>, _reserved_memory: Option<Self::Reserved>) -> Result<(), super::PagingError> {
+    fn set_page_no_alloc(
+        &mut self,
+        _current_dir: Option<&impl PageDirectory>,
+        _addr: usize,
+        _page: Option<super::PageFrame>,
+        _reserved_memory: Option<Self::Reserved>,
+    ) -> Result<(), super::PagingError> {
         unimplemented!();
     }
 

@@ -18,6 +18,7 @@ pub mod array;
 pub mod cpu;
 pub mod mm;
 pub mod platform;
+pub mod process;
 pub mod sched;
 pub mod timer;
 

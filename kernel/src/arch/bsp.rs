@@ -28,6 +28,12 @@ pub struct ArchProperties {
 pub trait RegisterContext: Clone {
     /// creates a set of registers which, when switched to, will start running the provided function with the stack set to the provided stack pointer
     fn from_fn(func: *const extern "C" fn(), stack: *mut u8) -> Self;
+
+    /// gets the value of the instruction pointer stored in this context
+    fn instruction_pointer(&self) -> *mut u8;
+
+    /// gets the value of the stack pointer stored in this context
+    fn stack_pointer(&self) -> *mut u8;
 }
 
 pub trait InterruptManager {

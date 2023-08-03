@@ -53,12 +53,6 @@ name = "common"
 version = "0.1.0"
 
 [[package]]
-name = "const_soft_float"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87ca1caa64ef4ed453e68bb3db612e51cf1b2f5b871337f0fcab1c8f87cc3dff"
-
-[[package]]
 name = "crossbeam"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -212,7 +206,6 @@ dependencies = [
  "bitmask-enum",
  "cc",
  "common",
- "const_soft_float",
  "crossbeam",
  "futures",
  "linked_list_allocator",

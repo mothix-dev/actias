@@ -3,7 +3,7 @@ pub mod logger;
 
 use crate::{
     arch::{bsp::RegisterContext, interrupts::InterruptRegisters, PhysicalAddress, PROPERTIES},
-    mm::{MemoryRegion, PageDirectory, PageDirSync},
+    mm::{MemoryRegion, PageDirSync, PageDirectory},
 };
 use alloc::sync::Arc;
 use core::{arch::asm, ptr::addr_of_mut};
@@ -134,7 +134,7 @@ pub fn kmain() {
     });
 
     // init PIT
-    let divisor = 1193180 / timer.hz();
+    let divisor = 1193182 / timer.hz();
 
     let l = (divisor & 0xff) as u8;
     let h = ((divisor >> 8) & 0xff) as u8;
@@ -147,6 +147,10 @@ pub fn kmain() {
     }
 
     manager.register(0x20, move |regs| timer.tick(regs));
+
+    manager.register(0x80, move |_| {
+        info!("hi from syscall land");
+    });
 
     manager.load_handlers();
 
@@ -209,7 +213,10 @@ pub fn kmain() {
                 }
             }
 
-            info!("OwO");
+            //info!("OwO");
+            unsafe {
+                asm!("int 0x80");
+            }
 
             for _i in 0..524288 {
                 unsafe {

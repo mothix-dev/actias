@@ -292,11 +292,11 @@ pub struct IntManager {
 }
 
 impl IntManager {
-    fn register_internal<F: FnMut(&mut InterruptRegisters) + 'static>(&mut self, interrupt_num: usize, handler: F) {
+    fn register_internal<F: FnMut(&mut InterruptRegisters) + 'static>(&mut self, interrupt_num: usize, handler: F, flags: IDTFlags) {
         let has_error_code = matches!(interrupt_num, 8 | 10..=14 | 17 | 21 | 29 | 30);
         let data = Interrupt::new(handler, has_error_code);
         // TODO: clear interrupts while IDT is being modified
-        self.idt.entries[interrupt_num] = IDTEntry::new(data.trampoline_ptr() as *const (), IDTFlags::Interrupt);
+        self.idt.entries[interrupt_num] = IDTEntry::new(data.trampoline_ptr() as *const (), flags);
         self.data[interrupt_num] = Some(data);
     }
 }
@@ -317,20 +317,29 @@ impl InterruptManager for IntManager {
 
     fn register<F: FnMut(&mut Self::Registers) + 'static>(&mut self, interrupt_num: usize, mut handler: F) {
         match interrupt_num {
-            0x20..=0x27 => self.register_internal(interrupt_num, move |regs| {
-                handler(regs);
-                unsafe {
-                    outb(0x20, 0x20); // reset primary interrupt controller
-                }
-            }),
-            0x28..=0x2f => self.register_internal(interrupt_num, move |regs| {
-                handler(regs);
-                unsafe {
-                    outb(0xa0, 0x20); // reset secondary interrupt controller
-                    outb(0x20, 0x20);
-                }
-            }),
-            _ => self.register_internal(interrupt_num, handler),
+            0x20..=0x27 => self.register_internal(
+                interrupt_num,
+                move |regs| {
+                    handler(regs);
+                    unsafe {
+                        outb(0x20, 0x20); // reset primary interrupt controller
+                    }
+                },
+                IDTFlags::Interrupt,
+            ),
+            0x28..=0x2f => self.register_internal(
+                interrupt_num,
+                move |regs| {
+                    handler(regs);
+                    unsafe {
+                        outb(0xa0, 0x20); // reset secondary interrupt controller
+                        outb(0x20, 0x20);
+                    }
+                },
+                IDTFlags::Interrupt,
+            ),
+            0x80 => self.register_internal(interrupt_num, handler, IDTFlags::Call),
+            _ => self.register_internal(interrupt_num, handler, IDTFlags::Interrupt),
         }
     }
 
@@ -392,6 +401,7 @@ pub struct InterruptRegisters {
 
 impl crate::arch::bsp::RegisterContext for InterruptRegisters {
     fn from_fn(func: *const extern "C" fn(), stack: *mut u8) -> Self {
+        // read the current eflags
         let eflags;
         unsafe {
             asm!("pushfd; pop {}", out(reg) eflags);
@@ -407,6 +417,14 @@ impl crate::arch::bsp::RegisterContext for InterruptRegisters {
             ss: 0x10,
             ..Default::default()
         }
+    }
+
+    fn instruction_pointer(&self) -> *mut u8 {
+        self.eip as *mut u8
+    }
+
+    fn stack_pointer(&self) -> *mut u8 {
+        self.esp as *mut u8
     }
 }
 
