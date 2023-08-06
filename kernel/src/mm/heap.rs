@@ -61,7 +61,7 @@ impl HeapAllocator {
                 trace!("new_top is {new_top:#x} (growth {growth:#x})");
 
                 fn alloc_pages(current_top: usize, new_top: usize, reserved_memory: &mut Option<Reserved>) -> Result<(), HeapAllocError> {
-                    let global_state = crate::cpu::get_global_state();
+                    let global_state = crate::get_global_state();
                     let mut page_dir = global_state.page_directory.lock();
                     let mut page_manager = global_state.page_manager.lock();
 
@@ -100,7 +100,7 @@ impl HeapAllocator {
                     Err(err) => {
                         error!("heap expansion failed, attempting cleanup");
 
-                        let global_state = crate::cpu::get_global_state();
+                        let global_state = crate::get_global_state();
                         let mut page_dir = global_state.page_directory.lock();
                         let mut page_manager = global_state.page_manager.lock();
 

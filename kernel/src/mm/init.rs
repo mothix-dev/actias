@@ -5,7 +5,7 @@ use crate::{
     array::BitSet,
     mm::{AllocState, ContiguousRegion, HeapAllocator, PageDirectory, PageManager, ALLOCATOR},
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::{alloc::Layout, ptr::NonNull};
 use log::debug;
 use spin::{Mutex, RwLock};
@@ -202,7 +202,7 @@ impl super::PageDirectory for InitPageDir {
 }
 
 /// initializes memory management given the initial memory map of the kernel and a way to get the full memory map
-pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_map: InitMemoryMap, memory_map_entries: I) {
+pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_map: InitMemoryMap, memory_map_entries: I, cmdline: &str, initrd_region: Option<ContiguousRegion<PhysicalAddress>>) {
     let mut bump_alloc = crate::mm::BumpAllocator::new(init_memory_map.bump_alloc_area);
     let slice = bump_alloc.collect_iter(memory_map_entries).expect("couldn't collect memory map entries");
 
@@ -214,6 +214,8 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     };
 
     *ALLOCATOR.0.lock() = AllocState::BumpAlloc(bump_alloc);
+
+    let cmdline = cmdline.to_string();
 
     debug!("got {} memory map entries:", slice.len());
 
@@ -233,53 +235,41 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let mut set = BitSet::new(highest_page).expect("couldn't create bitset for page allocation");
 
     // fill the set with true values
-    for num in set.array.iter_mut() {
-        *num = 0xffffffff;
-    }
-    set.bits_used = set.size;
-
-    let page_size = PROPERTIES.page_size as PhysicalAddress;
-
-    fn set_used(set: &mut BitSet, page_size: PhysicalAddress, region: ContiguousRegion<PhysicalAddress>) {
-        let region = region.align_covering(page_size);
-        let start = region.base / page_size;
-        let end = start + region.length / page_size;
-
-        for i in start..end {
-            set.set(i.try_into().unwrap());
-        }
-    }
-
-    fn set_free(set: &mut BitSet, page_size: PhysicalAddress, region: ContiguousRegion<PhysicalAddress>) {
-        let region = region.align_inside(page_size);
-        let start = region.base / page_size;
-        let end = start + region.length / page_size;
-
-        for i in start..end {
-            set.clear(i.try_into().unwrap());
-        }
-    }
+    set.set_all();
 
     // mark all available memory regions from the memory map
     for region in slice.iter() {
         if region.kind == crate::mm::MemoryKind::Available {
-            set_free(&mut set, page_size, (*region).into());
+            let region: ContiguousRegion<PhysicalAddress> = (*region).into();
+            set.clear_region(region.map(|i| i.try_into().unwrap()), PROPERTIES.page_size);
         }
     }
 
-    // mark the kernel and bump alloc areas as used
-    set_used(&mut set, page_size, ContiguousRegion {
-        base: init_memory_map.kernel_phys,
-        length: init_memory_map.kernel_area.len().try_into().unwrap(),
-    });
+    // mark the kernel area as used in the bitset
+    set.set_region(
+        ContiguousRegion {
+            base: init_memory_map.kernel_phys.try_into().unwrap(),
+            length: init_memory_map.kernel_area.len(),
+        },
+        PROPERTIES.page_size,
+    );
+
+    if let Some(region) = initrd_region.clone() {
+        // mark the initrd area as used
+        set.set_region(region.map(|i| i.try_into().unwrap()), PROPERTIES.page_size);
+    }
 
     let num_reserved = set.bits_used;
     debug!("{num_reserved} pages ({}k) reserved", num_reserved * PROPERTIES.page_size / 1024);
 
-    set_used(&mut set, page_size, ContiguousRegion {
-        base: init_memory_map.bump_alloc_phys,
-        length: init_page_dir.alloc_region.length.try_into().unwrap(),
-    });
+    // mark the bump alloc area as used
+    set.set_region(
+        ContiguousRegion {
+            base: init_memory_map.bump_alloc_phys.try_into().unwrap(),
+            length: init_page_dir.alloc_region.length,
+        },
+        PROPERTIES.page_size,
+    );
 
     let mut manager = PageManager::new(set, PROPERTIES.page_size);
     manager.num_reserved = num_reserved;
@@ -351,20 +341,23 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let page_dir = Arc::new(Mutex::new(super::PageDirTracker::track(page_dir)));
     let manager = Arc::new(Mutex::new(manager));
 
-    unsafe {
-        crate::cpu::init_global_state(crate::cpu::GlobalState {
-            cpus: RwLock::new(Vec::new()),
-            page_directory: page_dir.clone(),
-            page_manager: manager.clone(),
-            process_table: RwLock::new(crate::process::ProcessTable::new(4194304, 131072)),
-        });
-    }
-
     // reclaim bump allocator
     let mut bump_alloc = match core::mem::replace(&mut *ALLOCATOR.0.lock(), state) {
         AllocState::BumpAlloc(bump_alloc) => bump_alloc,
         _ => unreachable!(),
     };
+
+    unsafe {
+        crate::init_global_state(crate::GlobalState {
+            cpus: RwLock::new(Vec::new()),
+            page_directory: page_dir.clone(),
+            page_manager: manager.clone(),
+            process_table: RwLock::new(crate::process::ProcessTable::new(4194304, 131072)),
+            cmdline: RwLock::new(crate::CommandLine::parse(cmdline)),
+        });
+    }
+
+    debug!("cmdline parsed as {:?}", crate::get_global_state().cmdline.read().parsed);
 
     debug!("shrinking bump allocator");
     bump_alloc.print_free();
@@ -374,6 +367,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     let freed_offset = unsafe { freed_area.as_ptr().offset_from(bump_alloc.area().as_ptr()) };
     let freed_phys = init_memory_map.bump_alloc_phys + freed_offset as PhysicalAddress;
 
+    let page_size: PhysicalAddress = PROPERTIES.page_size.try_into().unwrap();
     let base_page = (freed_phys + page_size - 1) / page_size;
     let offset = (base_page * page_size) - freed_phys;
     let len_pages = (freed_area.len() as PhysicalAddress - offset) / page_size;
@@ -388,4 +382,46 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
     }
 
     manager.lock().print_free();
+
+    if let Some(region) = initrd_region.clone() {
+        // get a page-aligned region covering the initrd region
+        let region = region.map(|i| i.try_into().unwrap());
+        let aligned = region.align_covering(PROPERTIES.page_size);
+        let offset = region.base - aligned.base;
+
+        debug!("aligned initrd region is {aligned:?}, offset of {offset:#x}");
+
+        // allocate memory on the heap to map the initrd into
+        let layout = Layout::from_size_align(aligned.length, PROPERTIES.page_size).unwrap();
+        let base = unsafe { alloc::alloc::alloc(layout) };
+        assert!(!base.is_null(), "allocation failed");
+
+        // free the old pages in the allocated area and map in the initrd's pages
+        for i in (0..aligned.length).step_by(PROPERTIES.page_size) {
+            let virt_addr = base as usize + i;
+            let old_phys = page_dir.lock().virt_to_phys(virt_addr).unwrap();
+            debug!("{virt_addr:#x} -> {old_phys:#x}, will be {:#x}", aligned.base + i);
+
+            manager.lock().frame_set.clear((old_phys / PROPERTIES.page_size as PhysicalAddress).try_into().unwrap());
+
+            page_dir
+                .lock()
+                .set_page(
+                    None::<&crate::arch::PageDirectory>,
+                    virt_addr,
+                    Some(super::PageFrame {
+                        addr: (aligned.base + i).try_into().unwrap(),
+                        present: true,
+                        writable: false,
+                        ..Default::default()
+                    }),
+                )
+                .expect("couldn't set page");
+            crate::arch::PageDirectory::flush_page(virt_addr);
+        }
+
+        let initrd_region = unsafe { core::slice::from_raw_parts(base.add(offset), region.length) };
+
+        debug!("{:?}", core::str::from_utf8(initrd_region));
+    }
 }

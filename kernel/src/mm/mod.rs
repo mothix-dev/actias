@@ -12,7 +12,10 @@ pub use sync::*;
 
 use crate::arch::PhysicalAddress;
 use alloc::alloc::{GlobalAlloc, Layout};
-use core::{fmt, ops::DerefMut};
+use core::{
+    fmt::{self, LowerHex},
+    ops::DerefMut,
+};
 use log::error;
 use num_traits::Num;
 use spin::Mutex;
@@ -94,13 +97,22 @@ pub enum MemoryKind {
 }
 
 /// a contiguous region in memory
-#[derive(Debug, Copy, Clone)]
-pub struct ContiguousRegion<T: Num + Copy> {
+#[derive(Copy, Clone)]
+pub struct ContiguousRegion<T: Num + Copy + LowerHex> {
     pub base: T,
     pub length: T,
 }
 
-impl<T: Num + Copy> ContiguousRegion<T> {
+impl<T: Num + Copy + LowerHex> fmt::Debug for ContiguousRegion<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContiguousRegion")
+            .field("base", &crate::FormatHex(self.base))
+            .field("length", &crate::FormatHex(self.length))
+            .finish()
+    }
+}
+
+impl<T: Num + Copy + LowerHex> ContiguousRegion<T> {
     /// aligns this region to the specified page size so that the resulting region completely covers the original region
     pub fn align_covering(&self, page_size: T) -> Self {
         let base = (self.base / page_size) * page_size;
@@ -117,6 +129,13 @@ impl<T: Num + Copy> ContiguousRegion<T> {
         let length = ((self.length - offset) / page_size) * page_size;
 
         Self { base, length }
+    }
+
+    pub fn map<F: FnMut(T) -> U, U: Num + Copy + LowerHex>(&self, mut op: F) -> ContiguousRegion<U> {
+        ContiguousRegion {
+            base: op(self.base),
+            length: op(self.length),
+        }
     }
 }
 

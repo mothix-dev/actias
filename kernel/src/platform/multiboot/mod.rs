@@ -4,9 +4,10 @@ pub mod logger;
 use crate::{
     arch::{bsp::RegisterContext, interrupts::InterruptRegisters, PhysicalAddress, PROPERTIES},
     mm::{MemoryRegion, PageDirSync, PageDirectory},
+    platform::bootloader::ModuleEntry,
 };
 use alloc::{sync::Arc, vec};
-use core::{arch::asm, ptr::addr_of_mut};
+use core::{arch::asm, mem::size_of, ptr::addr_of_mut};
 use log::{debug, error, info};
 use spin::Mutex;
 
@@ -53,23 +54,16 @@ pub fn kmain() {
         }
     }
 
-    let mboot_ptr = unsafe { bootloader::mboot_ptr.byte_add(LINKED_BASE) };
-
     // create initial memory map based on where the kernel is loaded into memory
-    let init_memory_map = unsafe {
+    let mut init_memory_map = unsafe {
         let start_ptr = addr_of_mut!(kernel_start);
         let end_ptr = addr_of_mut!(kernel_end);
         let map_end = (LINKED_BASE + 1024 * PROPERTIES.page_size) as *const u8;
 
-        // sanity checks
-        if mboot_ptr as *const _ >= map_end {
-            panic!("multiboot structure outside of initially mapped memory");
-        } else if mboot_ptr as *const _ >= start_ptr {
-            panic!("multiboot structure overlaps with allocated memory");
-        }
-
         let kernel_area = core::slice::from_raw_parts_mut(start_ptr, end_ptr.offset_from(start_ptr).try_into().unwrap());
         let bump_alloc_area = core::slice::from_raw_parts_mut(end_ptr, map_end.offset_from(end_ptr).try_into().unwrap());
+
+        debug!("kernel {}k (@ {start_ptr:?}), alloc {}k (@ {end_ptr:?})", kernel_area.len() / 1024, bump_alloc_area.len() / 1024);
 
         crate::mm::InitMemoryMap {
             kernel_area,
@@ -79,19 +73,98 @@ pub fn kmain() {
         }
     };
 
-    debug!("kernel {}k, alloc {}k", init_memory_map.kernel_area.len() / 1024, init_memory_map.bump_alloc_area.len() / 1024);
+    let mboot_ptr = unsafe { bootloader::mboot_ptr.byte_add(LINKED_BASE) };
+
+    /// checks whether a block of data is in the kernel or bump alloc area and adjusts the bump alloc area if there's overlap
+    fn check_addr(addr: usize, length: usize, init_memory_map: &mut crate::mm::InitMemoryMap, allow_non_mapped: bool) {
+        let map_end = LINKED_BASE + 1024 * PROPERTIES.page_size;
+        let kernel_start_addr = unsafe { addr_of_mut!(kernel_start) } as usize;
+        let kernel_end_addr = unsafe { addr_of_mut!(kernel_end) } as usize;
+
+        // sanity checks
+        if (addr < LINKED_BASE || addr >= map_end || addr + length < LINKED_BASE || addr + length >= map_end) && !allow_non_mapped {
+            panic!("multiboot structure outside of initially mapped memory");
+        } else if (addr >= kernel_start_addr && addr < kernel_end_addr) || (addr + length >= kernel_start_addr && addr + length < kernel_end_addr) {
+            panic!("multiboot structure overlaps with kernel memory");
+        }
+
+        let bump_alloc_start = init_memory_map.bump_alloc_area.as_ptr() as usize;
+        let bump_alloc_len = init_memory_map.bump_alloc_area.len();
+        let region = crate::mm::ContiguousRegion { base: addr, length }.align_covering(PROPERTIES.page_size);
+        let addr = region.base;
+        let length = region.length;
+
+        if addr >= bump_alloc_start && addr - bump_alloc_start < bump_alloc_len {
+            let before_data = addr - bump_alloc_start;
+            //debug!("{before_data:#x} before");
+
+            let after_data = if addr - bump_alloc_start + length <= bump_alloc_len {
+                bump_alloc_len - (before_data + length)
+            } else {
+                0
+            };
+            //debug!("{after_data:#x} after");
+
+            if after_data >= before_data {
+                let offset = before_data + length;
+                init_memory_map.bump_alloc_phys += offset as u32;
+                let slice = &mut init_memory_map.bump_alloc_area;
+                init_memory_map.bump_alloc_area = unsafe { core::slice::from_raw_parts_mut(slice.as_mut_ptr().add(offset), slice.len() - offset) };
+            } else {
+                init_memory_map.bump_alloc_area = unsafe { core::slice::from_raw_parts_mut(init_memory_map.bump_alloc_area.as_mut_ptr(), before_data) };
+            }
+        } else if addr < bump_alloc_start && addr + length > bump_alloc_start {
+            // untested
+            let offset = bump_alloc_start - (addr + length);
+            let slice = &mut init_memory_map.bump_alloc_area;
+            init_memory_map.bump_alloc_area = unsafe { core::slice::from_raw_parts_mut(slice.as_mut_ptr().add(offset), slice.len() - offset) };
+        }
+    }
+
+    debug!("multiboot info @ {mboot_ptr:?}");
+    check_addr(mboot_ptr as usize, size_of::<bootloader::MultibootInfo>(), &mut init_memory_map, false);
+    let info = unsafe { &*mboot_ptr };
 
     // create proper memory map from multiboot info
     let mmap_buf = unsafe {
-        debug!("multiboot info @ {:?}", mboot_ptr);
-
-        let info = &*mboot_ptr;
-
         let mmap_addr = info.mmap_addr as usize + LINKED_BASE;
         debug!("{}b of memory mappings @ {mmap_addr:#x}", info.mmap_length);
+        check_addr(mmap_addr, info.mmap_length as usize, &mut init_memory_map, false);
 
         core::slice::from_raw_parts(mmap_addr as *const u8, info.mmap_length as usize)
     };
+
+    debug!("cmdline @ {:#x}", info.cmdline as usize + LINKED_BASE);
+    check_addr(info.cmdline as usize + LINKED_BASE, 1, &mut init_memory_map, false);
+
+    let cmdline = unsafe {
+        core::ffi::CStr::from_ptr((info.cmdline as usize + LINKED_BASE) as *const i8)
+            .to_str()
+            .expect("kernel command line isn't valid utf8")
+    };
+    check_addr(info.cmdline as usize + LINKED_BASE, cmdline.len(), &mut init_memory_map, false);
+
+    debug!("cmdline is {cmdline:?}");
+
+    let mods_addr = info.mods_addr as usize + LINKED_BASE;
+    debug!("{} module(s) @ {mods_addr:#x}", info.mods_count);
+
+    let initrd_region = if info.mods_count > 0 {
+        check_addr(mods_addr, size_of::<ModuleEntry>(), &mut init_memory_map, false);
+        let module = unsafe { &*(mods_addr as *const ModuleEntry) };
+
+        let region = crate::mm::ContiguousRegion {
+            base: module.mod_start,
+            length: module.mod_end - module.mod_start,
+        };
+        check_addr(region.base as usize + LINKED_BASE, region.length as usize, &mut init_memory_map, true);
+
+        Some(region)
+    } else {
+        None
+    };
+
+    debug!("initrd region is {initrd_region:?}");
 
     let memory_map_entries = core::iter::from_generator(|| {
         let mut offset = 0;
@@ -107,12 +180,13 @@ pub fn kmain() {
         }
     });
 
-    crate::mm::init_memory_manager(init_memory_map, memory_map_entries);
+    debug!("alloc now {}k (@ {:?})", init_memory_map.bump_alloc_area.len() / 1024, init_memory_map.bump_alloc_area.as_ptr());
+    crate::mm::init_memory_manager(init_memory_map, memory_map_entries, cmdline, initrd_region);
 
     let stack_manager = crate::arch::gdt::init(0x1000 * 8);
-    let timer = alloc::sync::Arc::new(crate::timer::Timer::new(1000));
-    let scheduler = alloc::sync::Arc::new(crate::sched::Scheduler::new(timer.clone(), crate::cpu::get_global_state().page_directory.clone()));
-    crate::cpu::get_global_state().cpus.write().push(crate::cpu::CPU {
+    let timer = alloc::sync::Arc::new(crate::timer::Timer::new(10000));
+    let scheduler = alloc::sync::Arc::new(crate::sched::Scheduler::new(timer.clone(), crate::get_global_state().page_directory.clone()));
+    crate::get_global_state().cpus.write().push(crate::cpu::CPU {
         timer: timer.clone(),
         stack_manager,
         scheduler: scheduler.clone(),
@@ -130,7 +204,7 @@ pub fn kmain() {
         panic!("unrecoverable exception");
     });
     manager.register_faults(|regs, info| {
-        let global_state = crate::cpu::get_global_state();
+        let global_state = crate::get_global_state();
         let scheduler = global_state.cpus.read()[0].scheduler.clone();
 
         if scheduler.is_running_task(regs) {
@@ -176,7 +250,7 @@ pub fn kmain() {
     manager.load_handlers();
 
     fn every_second() {
-        let global_state = crate::cpu::get_global_state();
+        let global_state = crate::get_global_state();
 
         let total_load_avg: u64 = global_state.cpus.read().iter().map(|cpu| cpu.scheduler.calc_load_avg()).sum();
         debug!("load_avg is {}", crate::sched::FixedPoint(total_load_avg, 2));
@@ -197,104 +271,46 @@ pub fn kmain() {
         asm!("sti");
     }
 
-    /*timer.timeout_in(timer.hz() / 2, |_| {
-        info!(":3c");
-    });
-
-    timer.clone().timeout_in(1, move |_| {
-        info!("UwU");
-        timer.timeout_in(timer.hz(), |_| {
-            info!("OwO");
-        });
-    });*/
-
-    /*manager.register(crate::arch::interrupts::Exceptions::Breakpoint as usize, move |_| info!("breakpoint :333"));
-
-    unsafe {
-        debug!("TEST: making huge allocation");
-        let uwu = alloc::alloc::alloc(alloc::alloc::Layout::from_size_align(0x1000 * 1024, 1).unwrap());
-        debug!("got {uwu:?}");
-    }
-
-    unsafe {
-        use core::arch::asm;
-        debug!("TEST: breakpoint exception");
-        asm!("int3");
-    }
-
-    unsafe {
-        debug!("TEST: page fault");
-        *(1 as *mut u8) = 0;
-    }*/
-
-    /*loop {
-        (crate::arch::PROPERTIES.wait_for_interrupt)();
-    }*/
-
-    #[inline(never)]
-    fn message_a() {
-        unsafe {
-            asm!("int 0x80");
-        }
-    }
-
-    #[inline(never)]
-    fn message_b() {
-        unsafe {
-            asm!("int 0x81");
-        }
-    }
-
-    #[inline(never)]
-    fn pause_hint() {
-        unsafe {
-            asm!("pause");
-        }
-    }
-
-    #[inline(never)]
-    fn page_fault() {
-        unsafe {
-            *(1 as *mut u8) = 0;
-        }
-    }
-
     extern "C" fn task_a() {
-        for _i in 0..10 {
-            //info!("UwU");
-            message_a();
+        loop {
+            unsafe {
+                asm!("int 0x80");
+            }
 
             // wait a little while
-            for _i in 0..1048576 {
-                pause_hint();
+            for _i in 0..524288 {
+                unsafe {
+                    asm!("pause");
+                }
             }
         }
-
-        //info!(":3c");
-        page_fault();
     }
 
     extern "C" fn task_b() {
-        for _i in 0..20 {
-            for _i in 0..524288 {
-                pause_hint();
+        loop {
+            for _i in 0..262144 {
+                unsafe {
+                    asm!("pause");
+                }
             }
 
-            //info!("OwO");
-            message_b();
+            unsafe {
+                asm!("int 0x81");
+            }
 
-            for _i in 0..524288 {
-                pause_hint();
+            for _i in 0..262144 {
+                unsafe {
+                    asm!("pause");
+                }
             }
         }
-        page_fault();
     }
 
     fn make_page_dir() -> PageDirSync<crate::arch::PageDirectory> {
         let stack_size = 0x1000 * 4;
 
         let split_addr = PROPERTIES.kernel_region.base;
-        let global_state = crate::cpu::get_global_state();
+        let global_state = crate::get_global_state();
         let mut dir = PageDirSync::sync_from(global_state.page_directory.clone(), split_addr).unwrap();
 
         for addr in (split_addr - stack_size..split_addr).step_by(PROPERTIES.page_size) {
@@ -306,6 +322,7 @@ pub fn kmain() {
                     addr: phys_addr,
                     present: true,
                     writable: true,
+                    user_mode: true,
                     ..Default::default()
                 }),
             )
@@ -317,12 +334,12 @@ pub fn kmain() {
 
     let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
 
-    let global_state = crate::cpu::get_global_state();
+    let global_state = crate::get_global_state();
 
     let page_dir_a = Arc::new(Mutex::new(make_page_dir()));
     let task_a = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
-        registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr),
+        registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr, false),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
@@ -343,7 +360,7 @@ pub fn kmain() {
     let page_dir_b = Arc::new(Mutex::new(make_page_dir()));
     let task_b = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
-        registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr),
+        registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr, false),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
@@ -361,7 +378,7 @@ pub fn kmain() {
     task_b.lock().pid = Some(pid_b);
     scheduler.push_task(task_b);
 
-    crate::cpu::get_global_state().cpus.read()[0].start_context_switching();
+    crate::get_global_state().cpus.read()[0].start_context_switching();
 }
 
 pub fn get_stack_ptr() -> *mut u8 {

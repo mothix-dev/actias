@@ -3,6 +3,8 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::fmt;
 
+use crate::mm::ContiguousRegion;
+
 /// simple bitset, acts sorta like an array but you access single bits
 #[repr(C)]
 pub struct BitSet {
@@ -17,7 +19,7 @@ pub struct BitSet {
 }
 
 impl BitSet {
-    /// create a bitset and allocate memory for it
+    /// creates a bitset and allocates memory for it
     pub fn new(size: usize) -> Result<Self, alloc::collections::TryReserveError> {
         let mut array = Vec::new();
         let u32_size = (size + 31) / 32;
@@ -31,7 +33,7 @@ impl BitSet {
         })
     }
 
-    /// set a bit in the set
+    /// sets a bit in the set
     pub fn set(&mut self, addr: usize) {
         if addr >= self.size {
             return;
@@ -47,7 +49,19 @@ impl BitSet {
         }
     }
 
-    /// clear a bit in the set
+    /// aligns the given region to the given page size, then sets bits in the set accordingly.
+    /// bits will be set so that the bit corresponding to the page containing any given address in the region will be set
+    pub fn set_region(&mut self, region: ContiguousRegion<usize>, page_size: usize) {
+        let region = region.align_covering(page_size);
+        let start = region.base / page_size;
+        let end = start + region.length / page_size;
+
+        for i in start..end {
+            self.set(i);
+        }
+    }
+
+    /// clears a bit in the set
     pub fn clear(&mut self, addr: usize) {
         if addr >= self.size {
             return;
@@ -63,7 +77,19 @@ impl BitSet {
         }
     }
 
-    /// clear all the bits in the set
+    /// aligns the given region to the given page size, then clears bits in the set accordingly
+    /// bits will be set so that the bit corresponding to the page containing any given address in the region will be set
+    pub fn clear_region(&mut self, region: ContiguousRegion<usize>, page_size: usize) {
+        let region = region.align_inside(page_size);
+        let start = region.base / page_size;
+        let end = start + region.length / page_size;
+
+        for i in start..end {
+            self.clear(i);
+        }
+    }
+
+    /// clears all the bits in the set
     pub fn clear_all(&mut self) {
         for i in 0..self.array.len() {
             self.array[i] = 0;
@@ -71,7 +97,15 @@ impl BitSet {
         self.bits_used = 0;
     }
 
-    /// check if bit is set
+    /// sets all the bits in the set
+    pub fn set_all(&mut self) {
+        for i in 0..self.array.len() {
+            self.array[i] = 0xffffffff;
+        }
+        self.bits_used = self.size;
+    }
+
+    /// checks if bit is set
     pub fn test(&self, addr: usize) -> bool {
         if addr < self.size {
             let idx = addr / 32;

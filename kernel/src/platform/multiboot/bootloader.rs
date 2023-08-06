@@ -33,7 +33,7 @@ pub struct MultibootInfo {
     /// physical address of first module in list
     pub mods_addr: u32,
 
-    /// either the location of an a.out symbol table or the location of elf section headers
+    /// either the location of an a.out symbol table or the location of elf section headers.
     /// we don't use this
     pub syms: [u32; 4],
 
@@ -222,4 +222,20 @@ impl From<&MemMapEntry> for MemoryRegion {
             kind: entry.kind.into(),
         }
     }
+}
+
+/// describes a "module" loaded by the bootloader into memory
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ModuleEntry {
+    /// start of module's contents (physical address)
+    pub mod_start: u32,
+
+    /// end of module's contents (physical address)
+    pub mod_end: u32,
+
+    /// string identifier of module
+    pub string: u32,
+
+    pub reserved: u32,
 }

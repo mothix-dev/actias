@@ -5,6 +5,8 @@ use num_enum::TryFromPrimitive;
 use x86::{
     dtables::{lidt, DescriptorTablePointer},
     io::outb,
+    segmentation::SegmentSelector,
+    Ring,
 };
 
 use crate::{arch::bsp::InterruptManager, FormatHex};
@@ -400,21 +402,24 @@ pub struct InterruptRegisters {
 }
 
 impl crate::arch::bsp::RegisterContext for InterruptRegisters {
-    fn from_fn(func: *const extern "C" fn(), stack: *mut u8) -> Self {
+    fn from_fn(func: *const extern "C" fn(), stack: *mut u8, is_user_mode: bool) -> Self {
         // read the current eflags
         let eflags;
         unsafe {
             asm!("pushfd; pop {}", out(reg) eflags);
         }
 
+        let ring = if is_user_mode { Ring::Ring3 } else { Ring::Ring0 };
+        let offset = if is_user_mode { 2 } else { 0 };
+
         Self {
-            ds: 0x10,
+            cs: SegmentSelector::new(offset + 1, ring).bits().into(),
+            ds: SegmentSelector::new(offset + 2, ring).bits().into(),
+            ss: SegmentSelector::new(offset + 2, ring).bits().into(),
             ebp: (stack as usize).try_into().unwrap(),
-            eip: (func as usize).try_into().unwrap(),
-            cs: 0x8,
-            eflags,
             esp: (stack as usize).try_into().unwrap(),
-            ss: 0x10,
+            eip: (func as usize).try_into().unwrap(),
+            eflags,
             ..Default::default()
         }
     }

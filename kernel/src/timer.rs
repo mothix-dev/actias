@@ -62,6 +62,7 @@ impl Timer {
         self.remove_queue.push(expires_at);
     }
 
+    #[allow(clippy::comparison_chain)] // don't want the performance hit here
     pub fn tick(&self, registers: &mut Registers) {
         let jiffy = self.jiffies.fetch_add(1, Ordering::SeqCst);
 

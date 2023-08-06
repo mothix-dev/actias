@@ -195,6 +195,8 @@ impl Scheduler {
 
         // skip context switching if the kernel is busy doing something
         if !self.is_running_task(registers) && !self.force_context_switch.load(Ordering::SeqCst) {
+            use log::debug;
+            debug!("missed");
             self.timer.timeout_in(0, move |registers| arc_self.context_switch(registers, arc_self.clone(), true));
             return;
         }
@@ -233,7 +235,7 @@ impl Scheduler {
                 let mut task = task.lock();
 
                 *registers = task.registers.clone();
-                task.cpu_time += (TIME_SLICE as i64) * (1 << 14) / 3;
+                task.cpu_time += TIME_SLICE as i64 * (1 << 14);
 
                 unsafe {
                     let mut page_directory = task.page_directory.lock();
@@ -260,7 +262,7 @@ impl Scheduler {
                 let i = stack.len() - 1;
                 &mut stack[i] as *mut _
             };
-            *registers = Registers::from_fn(wait_around as *const _, stack);
+            *registers = Registers::from_fn(wait_around as *const _, stack, false);
 
             unsafe {
                 self.kernel_page_directory.lock().switch_to();
