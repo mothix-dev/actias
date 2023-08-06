@@ -328,11 +328,16 @@ pub fn kmain() {
             }
         }
 
-        let syscall_num = 2;
+        let syscall_num = common::syscalls::Syscalls::Exit as u32;
         unsafe {
             asm!("int 0x80", in("eax") syscall_num);
         }
 
+        unsafe {
+            asm!("int 0x81");
+        }
+
+        #[allow(clippy::empty_loop)]
         loop {}
     }
 

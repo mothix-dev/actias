@@ -267,6 +267,10 @@ impl Scheduler {
             unsafe {
                 self.kernel_page_directory.lock().switch_to();
             }
+
+            if !from_timer {
+                self.timer.remove(self.timeout.swap(0, Ordering::SeqCst) as u64);
+            }
         }
     }
 

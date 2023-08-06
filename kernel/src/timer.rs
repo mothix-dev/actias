@@ -89,6 +89,21 @@ impl Timer {
             }
         }
 
+        // remove any timers to be removed
+        fn remove_timers(remove_queue: &SegQueue<u64>, timers: &mut VecDeque<Timeout>) {
+            while let Some(expires_at) = remove_queue.pop() {
+                for (index, timer) in timers.iter().enumerate() {
+                    if timer.expires_at == expires_at {
+                        timers.remove(index);
+                        break;
+                    } else if timer.expires_at > expires_at {
+                        break;
+                    }
+                }
+            }
+        }
+        remove_timers(&self.remove_queue, &mut *timers);
+
         // process any expired timers
         while let Some(timer) = timers.front() {
             if jiffy as u64 >= timer.expires_at {
@@ -99,17 +114,8 @@ impl Timer {
             }
         }
 
-        // remove any timers to be removed
-        while let Some(expires_at) = self.remove_queue.pop() {
-            for (index, timer) in timers.iter().enumerate() {
-                if timer.expires_at == expires_at {
-                    timers.remove(index);
-                    break;
-                } else if timer.expires_at > expires_at {
-                    break;
-                }
-            }
-        }
+        // remove any timers that were queued to be removed in other timer handlers
+        remove_timers(&self.remove_queue, &mut *timers);
     }
 
     /// returns the current jiffies counter of the timer

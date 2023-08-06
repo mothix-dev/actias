@@ -5,6 +5,7 @@
 #![feature(asm_const)]
 #![feature(generators)]
 #![feature(iter_from_generator)]
+#![feature(let_chains)]
 #![feature(naked_functions)]
 #![feature(new_uninit)]
 #![feature(panic_info_message)]
