@@ -20,6 +20,7 @@ pub mod mm;
 pub mod platform;
 pub mod process;
 pub mod sched;
+pub mod syscalls;
 pub mod tar;
 pub mod timer;
 

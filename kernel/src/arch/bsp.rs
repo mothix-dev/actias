@@ -34,6 +34,9 @@ pub trait RegisterContext: Clone {
 
     /// gets the value of the stack pointer stored in this context
     fn stack_pointer(&self) -> *mut u8;
+
+    /// sets appropriate registers in the context to pass the given result back to userspace
+    fn syscall_return(&mut self, result: Result<usize, usize>);
 }
 
 pub trait InterruptManager {

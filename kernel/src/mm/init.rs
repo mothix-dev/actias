@@ -422,6 +422,9 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
         let initrd_region = unsafe { core::slice::from_raw_parts(base.add(offset), region.length) };
 
-        debug!("{:?}", core::str::from_utf8(initrd_region));
+        //debug!("{:?}", core::str::from_utf8(initrd_region));
+        for thing in crate::tar::TarIterator::new(initrd_region) {
+            debug!("{thing:?}");
+        }
     }
 }

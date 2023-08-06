@@ -431,6 +431,19 @@ impl crate::arch::bsp::RegisterContext for InterruptRegisters {
     fn stack_pointer(&self) -> *mut u8 {
         self.esp as *mut u8
     }
+
+    fn syscall_return(&mut self, result: Result<usize, usize>) {
+        match result {
+            Ok(num) => {
+                self.eax = num as u32;
+                self.ebx = 0;
+            }
+            Err(num) => {
+                self.eax = 0;
+                self.ebx = num as u32;
+            }
+        }
+    }
 }
 
 impl core::fmt::Debug for InterruptRegisters {

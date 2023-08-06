@@ -240,11 +240,11 @@ pub fn kmain() {
 
     manager.register(0x20, move |regs| timer.tick(regs));
 
-    manager.register(0x80, move |_| {
-        info!("hi from syscall land");
+    manager.register(0x80, move |regs| {
+        crate::syscalls::syscall_handler(regs, regs.eax, regs.ebx as usize, regs.ecx as usize, regs.edx as usize, regs.edi as usize)
     });
     manager.register(0x81, move |_| {
-        info!("hi from syscall land 2");
+        info!("test message");
     });
 
     manager.load_handlers();
@@ -271,7 +271,7 @@ pub fn kmain() {
         asm!("sti");
     }
 
-    extern "C" fn task_a() {
+    /*extern "C" fn task_a() {
         loop {
             unsafe {
                 asm!("int 0x80");
@@ -304,6 +304,36 @@ pub fn kmain() {
                 }
             }
         }
+    }*/
+
+    extern "C" fn task_a() {
+        let syscall_num = common::syscalls::Syscalls::IsComputerOn as u32;
+        let ok: u32;
+        let err: u32;
+        unsafe {
+            asm!("int 0x80", in("eax") syscall_num, lateout("eax") ok, out("ebx") err);
+        }
+
+        if err != 0 {
+            loop {
+                unsafe {
+                    asm!("int 0x81");
+                }
+            }
+        }
+
+        if ok == 1 {
+            unsafe {
+                asm!("int 0x81");
+            }
+        }
+
+        let syscall_num = 2;
+        unsafe {
+            asm!("int 0x80", in("eax") syscall_num);
+        }
+
+        loop {}
     }
 
     fn make_page_dir() -> PageDirSync<crate::arch::PageDirectory> {
@@ -357,7 +387,7 @@ pub fn kmain() {
     task_a.lock().pid = Some(pid_a);
     scheduler.push_task(task_a);
 
-    let page_dir_b = Arc::new(Mutex::new(make_page_dir()));
+    /*let page_dir_b = Arc::new(Mutex::new(make_page_dir()));
     let task_b = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
         registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr, false),
@@ -376,7 +406,7 @@ pub fn kmain() {
         })
         .unwrap();
     task_b.lock().pid = Some(pid_b);
-    scheduler.push_task(task_b);
+    scheduler.push_task(task_b);*/
 
     crate::get_global_state().cpus.read()[0].start_context_switching();
 }

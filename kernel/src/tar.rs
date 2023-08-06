@@ -5,6 +5,7 @@ use generic_array::{
     typenum::{U12, U8},
     ArrayLength, GenericArray,
 };
+use log::error;
 
 pub type UserID = usize;
 pub type GroupID = usize;
@@ -233,34 +234,44 @@ impl<'a> Iterator for TarIterator<'a> {
     type Item = TarEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // spit out first header
+        // make sure we don't overflow the buffer
         if self.offset >= self.data.len() || self.offset + size_of::<Header>() > self.data.len() {
-            // make sure we don't overflow the buffer
-            None
-        } else {
-            let header = unsafe { &*(&self.data[self.offset] as *const _ as *const Header) }; // pointer magic (:
-
-            // trace!("got header {:?}", header);
-
-            if header.name().is_empty() {
-                None
-            } else {
-                let file_size = header.file_size();
-
-                let contents_offset = if file_size == 0 {
-                    self.offset + size_of::<Header>() // dont bother aligning to nearest block if there's no contents, as it just screws things up
-                } else {
-                    ((self.offset + size_of::<Header>()) & !(BLOCK_SIZE - 1)) + BLOCK_SIZE
-                };
-                let contents_end = contents_offset + file_size;
-
-                self.offset = (contents_end & !(BLOCK_SIZE - 1)) + BLOCK_SIZE;
-
-                Some(TarEntry {
-                    header,
-                    contents: &self.data[contents_offset..contents_end],
-                })
-            }
+            return None;
         }
+
+        let header = unsafe { &*(self.data.as_ptr().add(self.offset) as *const Header) }; // pointer magic (:
+
+        if header.name().is_empty() {
+            return None;
+        }
+
+        // make sure the checksum matches
+        let checksum = header.checksum();
+        let actual_checksum = self.data[self.offset..self.offset + size_of::<Header>()]
+            .iter()
+            .enumerate()
+            .map(|(i, b)| if (148..156).contains(&i) { 32 } else { *b as usize })
+            .sum::<usize>();
+
+        if checksum != actual_checksum {
+            error!("checksum of tar header ({checksum}) doesn't match calculated checksum ({actual_checksum})");
+            return None;
+        }
+
+        let file_size = header.file_size();
+
+        let contents_offset = if file_size == 0 {
+            self.offset + size_of::<Header>() // dont bother aligning to nearest block if there's no contents, as it just screws things up
+        } else {
+            ((self.offset + size_of::<Header>()) & !(BLOCK_SIZE - 1)) + BLOCK_SIZE
+        };
+        let contents_end = contents_offset + file_size;
+
+        self.offset = (contents_end & !(BLOCK_SIZE - 1)) + BLOCK_SIZE;
+
+        Some(TarEntry {
+            header,
+            contents: &self.data[contents_offset..contents_end],
+        })
     }
 }
