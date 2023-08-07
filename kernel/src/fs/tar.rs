@@ -403,8 +403,8 @@ impl TarFilesystem {
     }
 }
 
-impl crate::vfs::Filesystem for TarFilesystem {
-    fn get_root_dir(&self) -> alloc::boxed::Box<dyn crate::vfs::FileDescriptor> {
+impl super::Filesystem for TarFilesystem {
+    fn get_root_dir(&self) -> alloc::boxed::Box<dyn super::FileDescriptor> {
         Box::new(TarDirectory {
             dir_entries: self.root.dir_entries.clone(),
             seek_pos: AtomicUsize::new(0),
@@ -429,23 +429,7 @@ impl Clone for TarFile {
     }
 }
 
-impl crate::vfs::FileDescriptor for TarFile {
-    fn chmod(&self, _permissions: common::Permissions) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn chown(&self, _owner: Option<common::UserId>, _group: Option<common::GroupId>) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn link(&self, _source: &dyn crate::vfs::FileDescriptor) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn open(&self, _name: &str, _flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn crate::vfs::FileDescriptor>> {
-        Err(common::Error::CantOpen)
-    }
-
+impl super::FileDescriptor for TarFile {
     fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
         let pos = self.seek_pos.fetch_add(buf.len(), core::sync::atomic::Ordering::SeqCst);
 
@@ -494,18 +478,6 @@ impl crate::vfs::FileDescriptor for TarFile {
     fn stat(&self) -> common::Result<common::FileStat> {
         (&self.header).try_into()
     }
-
-    fn truncate(&self, _len: usize) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn unlink(&self) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn write(&self, _buf: &[u8]) -> common::Result<usize> {
-        Err(common::Error::ReadOnly)
-    }
 }
 
 #[derive(Clone)]
@@ -537,20 +509,8 @@ impl Clone for TarDirectory {
     }
 }
 
-impl crate::vfs::FileDescriptor for TarDirectory {
-    fn chmod(&self, _permissions: common::Permissions) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn chown(&self, _owner: Option<common::UserId>, _group: Option<common::GroupId>) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn link(&self, _source: &dyn crate::vfs::FileDescriptor) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn crate::vfs::FileDescriptor>> {
+impl super::FileDescriptor for TarDirectory {
+    fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(common::Error::ReadOnly);
         }
@@ -565,7 +525,7 @@ impl crate::vfs::FileDescriptor for TarDirectory {
                         } else {
                             return Ok(Box::new(file.clone()));
                         }
-                    },
+                    }
                 }
             }
         }
@@ -612,7 +572,7 @@ impl crate::vfs::FileDescriptor for TarDirectory {
                     Ok(old_val - val)
                 }
                 core::cmp::Ordering::Equal => Ok(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
-            }
+            },
             common::SeekKind::End => {
                 let len: isize = self.dir_entries.len().try_into().map_err(|_| common::Error::Overflow)?;
                 let new_val = (len + offset).try_into().map_err(|_| common::Error::Overflow)?;
@@ -631,19 +591,15 @@ impl crate::vfs::FileDescriptor for TarDirectory {
         if let Some(header) = self.header.as_ref() {
             header.try_into()
         } else {
-            Ok(Default::default())
+            Ok(common::FileStat {
+                permissions: common::Permissions::OwnerRead
+                    | common::Permissions::OwnerExecute
+                    | common::Permissions::GroupRead
+                    | common::Permissions::GroupExecute
+                    | common::Permissions::OtherRead
+                    | common::Permissions::OtherExecute,
+                ..Default::default()
+            })
         }
-    }
-
-    fn truncate(&self, _len: usize) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn unlink(&self) -> common::Result<()> {
-        Err(common::Error::ReadOnly)
-    }
-
-    fn write(&self, _buf: &[u8]) -> common::Result<usize> {
-        Err(common::Error::ReadOnly)
     }
 }

@@ -17,14 +17,13 @@ extern crate alloc;
 pub mod arch;
 pub mod array;
 pub mod cpu;
+pub mod fs;
 pub mod mm;
 pub mod platform;
 pub mod process;
 pub mod sched;
 pub mod syscalls;
-pub mod tar;
 pub mod timer;
-pub mod vfs;
 
 use alloc::{
     collections::BTreeMap,

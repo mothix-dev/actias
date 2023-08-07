@@ -71,6 +71,8 @@ pub enum Error {
     ReadOnly,
     DoesntExist,
     NotDirectory,
+    InvalidOperation,
+    BadInput,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

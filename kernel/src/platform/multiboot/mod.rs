@@ -371,17 +371,16 @@ pub fn kmain() {
 
     let global_state = crate::get_global_state();
 
-    let environment = crate::vfs::FsEnvironment::new();
+    let environment = crate::fs::FsEnvironment::new();
+    environment.namespace.lock().insert("sysfs".to_string(), alloc::boxed::Box::new(crate::fs::sys::SysFs));
 
     if let Some(region) = initrd_region {
-        let filesystem = crate::tar::TarFilesystem::new(region);
-        use crate::vfs::Filesystem;
-        crate::vfs::print_tree(&filesystem.get_root_dir());
-        environment
-            .namespace
-            .write()
-            .insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
+        let filesystem = crate::fs::tar::TarFilesystem::new(region);
+        environment.namespace.lock().insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
     }
+
+    use crate::fs::Filesystem;
+    crate::fs::print_tree(&environment.get_root_dir());
 
     let page_dir_a = Arc::new(Mutex::new(make_page_dir()));
     let task_a = Arc::new(Mutex::new(crate::sched::Task {
