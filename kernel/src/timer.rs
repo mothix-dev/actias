@@ -102,7 +102,7 @@ impl Timer {
                 }
             }
         }
-        remove_timers(&self.remove_queue, &mut *timers);
+        remove_timers(&self.remove_queue, &mut timers);
 
         // process any expired timers
         while let Some(timer) = timers.front() {
@@ -115,7 +115,7 @@ impl Timer {
         }
 
         // remove any timers that were queued to be removed in other timer handlers
-        remove_timers(&self.remove_queue, &mut *timers);
+        remove_timers(&self.remove_queue, &mut timers);
     }
 
     /// returns the current jiffies counter of the timer

@@ -201,8 +201,13 @@ impl super::PageDirectory for InitPageDir {
     }
 }
 
-/// initializes memory management given the initial memory map of the kernel and a way to get the full memory map
-pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_map: InitMemoryMap, memory_map_entries: I, cmdline: &str, initrd_region: Option<ContiguousRegion<PhysicalAddress>>) {
+/// initializes memory management given the initial memory map of the kernel and a way to get the full memory map. a slice containing the initrd is returned
+pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(
+    init_memory_map: InitMemoryMap,
+    memory_map_entries: I,
+    cmdline: &str,
+    initrd_region: Option<ContiguousRegion<PhysicalAddress>>,
+) -> Option<&[u8]> {
     let mut bump_alloc = crate::mm::BumpAllocator::new(init_memory_map.bump_alloc_area);
     let slice = bump_alloc.collect_iter(memory_map_entries).expect("couldn't collect memory map entries");
 
@@ -254,7 +259,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
         PROPERTIES.page_size,
     );
 
-    if let Some(region) = initrd_region.clone() {
+    if let Some(region) = initrd_region {
         // mark the initrd area as used
         set.set_region(region.map(|i| i.try_into().unwrap()), PROPERTIES.page_size);
     }
@@ -383,7 +388,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
 
     manager.lock().print_free();
 
-    if let Some(region) = initrd_region.clone() {
+    if let Some(region) = initrd_region {
         // get a page-aligned region covering the initrd region
         let region = region.map(|i| i.try_into().unwrap());
         let aligned = region.align_covering(PROPERTIES.page_size);
@@ -420,11 +425,8 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(init_memory_
             crate::arch::PageDirectory::flush_page(virt_addr);
         }
 
-        let initrd_region = unsafe { core::slice::from_raw_parts(base.add(offset), region.length) };
-
-        //debug!("{:?}", core::str::from_utf8(initrd_region));
-        for thing in crate::tar::TarIterator::new(initrd_region) {
-            debug!("{thing:?}");
-        }
+        Some(unsafe { core::slice::from_raw_parts(base.add(offset), region.length) })
+    } else {
+        None
     }
 }

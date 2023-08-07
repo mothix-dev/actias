@@ -100,4 +100,5 @@ impl ProcessTable {
 pub struct Process {
     pub threads: RwLock<Vec<Arc<Mutex<Task>>>>,
     pub page_directory: Arc<Mutex<PageDirSync<crate::arch::PageDirectory>>>,
+    pub environment: crate::vfs::FsEnvironment,
 }

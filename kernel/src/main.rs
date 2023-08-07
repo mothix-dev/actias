@@ -24,6 +24,7 @@ pub mod sched;
 pub mod syscalls;
 pub mod tar;
 pub mod timer;
+pub mod vfs;
 
 use alloc::{
     collections::BTreeMap,

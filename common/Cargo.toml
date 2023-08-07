@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 num_enum = { version = "0.6", default-features = false }
+bitmask-enum = "2"

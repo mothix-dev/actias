@@ -6,7 +6,7 @@ use crate::{
     mm::{MemoryRegion, PageDirSync, PageDirectory},
     platform::bootloader::ModuleEntry,
 };
-use alloc::{sync::Arc, vec};
+use alloc::{string::ToString, sync::Arc, vec};
 use core::{arch::asm, mem::size_of, ptr::addr_of_mut};
 use log::{debug, error, info};
 use spin::Mutex;
@@ -181,7 +181,7 @@ pub fn kmain() {
     });
 
     debug!("alloc now {}k (@ {:?})", init_memory_map.bump_alloc_area.len() / 1024, init_memory_map.bump_alloc_area.as_ptr());
-    crate::mm::init_memory_manager(init_memory_map, memory_map_entries, cmdline, initrd_region);
+    let initrd_region = crate::mm::init_memory_manager(init_memory_map, memory_map_entries, cmdline, initrd_region);
 
     let stack_manager = crate::arch::gdt::init(0x1000 * 8);
     let timer = alloc::sync::Arc::new(crate::timer::Timer::new(10000));
@@ -307,7 +307,7 @@ pub fn kmain() {
     }*/
 
     extern "C" fn task_a() {
-        let syscall_num = common::syscalls::Syscalls::IsComputerOn as u32;
+        let syscall_num = common::Syscalls::IsComputerOn as u32;
         let ok: u32;
         let err: u32;
         unsafe {
@@ -328,7 +328,7 @@ pub fn kmain() {
             }
         }
 
-        let syscall_num = common::syscalls::Syscalls::Exit as u32;
+        let syscall_num = common::Syscalls::Exit as u32;
         unsafe {
             asm!("int 0x80", in("eax") syscall_num);
         }
@@ -371,6 +371,18 @@ pub fn kmain() {
 
     let global_state = crate::get_global_state();
 
+    let environment = crate::vfs::FsEnvironment::new();
+
+    if let Some(region) = initrd_region {
+        let filesystem = crate::tar::TarFilesystem::new(region);
+        use crate::vfs::Filesystem;
+        crate::vfs::print_tree(&filesystem.get_root_dir());
+        environment
+            .namespace
+            .write()
+            .insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
+    }
+
     let page_dir_a = Arc::new(Mutex::new(make_page_dir()));
     let task_a = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
@@ -387,6 +399,7 @@ pub fn kmain() {
         .insert(crate::process::Process {
             threads: spin::RwLock::new(vec![task_a.clone()]),
             page_directory: page_dir_a,
+            environment,
         })
         .unwrap();
     task_a.lock().pid = Some(pid_a);

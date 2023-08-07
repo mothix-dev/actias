@@ -1,5 +1,5 @@
 use crate::{arch::bsp::RegisterContext, mm::PageDirectory};
-use common::syscalls::Syscalls;
+use common::Syscalls;
 use log::error;
 
 pub type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
