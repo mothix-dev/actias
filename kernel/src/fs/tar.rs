@@ -147,7 +147,10 @@ impl TryFrom<&Header> for common::FileStat {
         Ok(common::FileStat {
             device: 0,
             serial_num: 0,
-            permissions: mode.into(),
+            mode: common::FileMode {
+                permissions: mode.into(),
+                kind: header.kind().try_into().unwrap_or_default(),
+            },
             num_links: 0,
             user_id: header.owner_uid().try_into().map_err(|_| common::Error::Overflow)?,
             group_id: header.owner_gid().try_into().map_err(|_| common::Error::Overflow)?,
@@ -244,6 +247,19 @@ pub enum EntryKind {
     VendorSpecificZ = 90,
     GlobalExtendedHeader = 103,
     ExtendedHeaderNext = 120,
+}
+
+impl TryFrom<EntryKind> for common::FileKind {
+    type Error = ();
+
+    fn try_from(value: EntryKind) -> Result<Self, Self::Error> {
+        match value {
+            EntryKind::NormalFile | EntryKind::CharSpecial | EntryKind::BlockSpecial | EntryKind::FIFO => Ok(common::FileKind::Regular),
+            EntryKind::HardLink | EntryKind::SymLink => Ok(common::FileKind::SymLink),
+            EntryKind::Directory => Ok(common::FileKind::Directory),
+            _ => Err(()),
+        }
+    }
 }
 
 /// entry in a tar file, as returned by TarIterator
@@ -357,18 +373,22 @@ impl TarFilesystem {
                     name
                 } else {
                     // add this file/directory to the container and return
-                    let file = if entry.header.kind() == EntryKind::Directory {
-                        DirFile::Directory(TarDirectory {
+                    let file = match entry.header.kind() {
+                        EntryKind::Directory => DirFile::Directory(TarDirectory {
                             dir_entries: Vec::new(),
                             seek_pos: AtomicUsize::new(0),
                             header: Some(entry.header.clone()),
-                        })
-                    } else {
-                        DirFile::File(TarFile {
+                        }),
+                        EntryKind::SymLink => DirFile::File(TarFile {
+                            data: entry.header.link_name().as_bytes().into(),
+                            header: entry.header.clone(),
+                            seek_pos: AtomicUsize::new(0),
+                        }),
+                        _ => DirFile::File(TarFile {
                             data: entry.contents.into(),
                             header: entry.header.clone(),
                             seek_pos: AtomicUsize::new(0),
-                        })
+                        }),
                     };
                     container.dir_entries.push(DirEntry { name: filename.to_string(), file });
 
@@ -446,33 +466,8 @@ impl super::FileDescriptor for TarFile {
         }
     }
 
-    fn seek(&self, offset: isize, kind: common::SeekKind) -> common::Result<usize> {
-        match kind {
-            common::SeekKind::Current => match offset.cmp(&0) {
-                core::cmp::Ordering::Greater => {
-                    let val = offset.try_into().map_err(|_| common::Error::Overflow)?;
-                    let old_val = self.seek_pos.fetch_add(val, core::sync::atomic::Ordering::SeqCst);
-                    Ok(old_val + val)
-                }
-                core::cmp::Ordering::Less => {
-                    let val = (-offset).try_into().map_err(|_| common::Error::Overflow)?;
-                    let old_val = self.seek_pos.fetch_sub(val, core::sync::atomic::Ordering::SeqCst);
-                    Ok(old_val - val)
-                }
-                core::cmp::Ordering::Equal => Ok(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
-            },
-            common::SeekKind::End => {
-                let len: isize = self.data.len().try_into().map_err(|_| common::Error::Overflow)?;
-                let new_val = (len + offset).try_into().map_err(|_| common::Error::Overflow)?;
-                self.seek_pos.store(new_val, core::sync::atomic::Ordering::SeqCst);
-                Ok(new_val)
-            }
-            common::SeekKind::Set => {
-                let new_val = offset.try_into().map_err(|_| common::Error::Overflow)?;
-                self.seek_pos.store(new_val, core::sync::atomic::Ordering::SeqCst);
-                Ok(new_val)
-            }
-        }
+    fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
+        super::seek_helper(&self.seek_pos, offset, kind, self.data.len().try_into().map_err(|_| common::Error::Overflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
@@ -543,8 +538,6 @@ impl super::FileDescriptor for TarDirectory {
             let entry = &self.dir_entries[pos];
             let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
-            let len: u32 = entry.name.len().try_into().map_err(|_| common::Error::Overflow)?;
-            data.extend_from_slice(&(len.to_ne_bytes()));
             data.extend_from_slice(entry.name.as_bytes());
             data.push(0);
 
@@ -558,33 +551,8 @@ impl super::FileDescriptor for TarDirectory {
         }
     }
 
-    fn seek(&self, offset: isize, kind: common::SeekKind) -> common::Result<usize> {
-        match kind {
-            common::SeekKind::Current => match offset.cmp(&0) {
-                core::cmp::Ordering::Greater => {
-                    let val = offset.try_into().map_err(|_| common::Error::Overflow)?;
-                    let old_val = self.seek_pos.fetch_add(val, core::sync::atomic::Ordering::SeqCst);
-                    Ok(old_val + val)
-                }
-                core::cmp::Ordering::Less => {
-                    let val = (-offset).try_into().map_err(|_| common::Error::Overflow)?;
-                    let old_val = self.seek_pos.fetch_sub(val, core::sync::atomic::Ordering::SeqCst);
-                    Ok(old_val - val)
-                }
-                core::cmp::Ordering::Equal => Ok(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
-            },
-            common::SeekKind::End => {
-                let len: isize = self.dir_entries.len().try_into().map_err(|_| common::Error::Overflow)?;
-                let new_val = (len + offset).try_into().map_err(|_| common::Error::Overflow)?;
-                self.seek_pos.store(new_val, core::sync::atomic::Ordering::SeqCst);
-                Ok(new_val)
-            }
-            common::SeekKind::Set => {
-                let new_val = offset.try_into().map_err(|_| common::Error::Overflow)?;
-                self.seek_pos.store(new_val, core::sync::atomic::Ordering::SeqCst);
-                Ok(new_val)
-            }
-        }
+    fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
+        super::seek_helper(&self.seek_pos, offset, kind, self.dir_entries.len().try_into().map_err(|_| common::Error::Overflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
@@ -592,12 +560,15 @@ impl super::FileDescriptor for TarDirectory {
             header.try_into()
         } else {
             Ok(common::FileStat {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
+                mode: common::FileMode {
+                    permissions: common::Permissions::OwnerRead
+                        | common::Permissions::OwnerExecute
+                        | common::Permissions::GroupRead
+                        | common::Permissions::GroupExecute
+                        | common::Permissions::OtherRead
+                        | common::Permissions::OtherExecute,
+                    kind: common::FileKind::Directory,
+                },
                 ..Default::default()
             })
         }

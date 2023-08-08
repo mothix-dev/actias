@@ -379,6 +379,10 @@ pub fn kmain() {
         environment.namespace.lock().insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
     }
 
+    let fd = environment.open(0, "sysfs/../sysfs/debug", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
+    environment.write(fd, "UwU OwO".as_bytes()).unwrap();
+    environment.close(fd);
+
     use crate::fs::Filesystem;
     crate::fs::print_tree(&environment.get_root_dir());
 

@@ -73,6 +73,8 @@ pub enum Error {
     NotDirectory,
     InvalidOperation,
     BadInput,
+    BadFileDescriptor,
+    AllocError,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -97,8 +99,8 @@ pub struct FileStat {
     /// file serial number
     pub serial_num: u32,
 
-    /// permissions of this file
-    pub permissions: Permissions,
+    /// type and permissions of this file
+    pub mode: FileMode,
 
     /// how many links exist to this file
     pub num_links: u32,
@@ -130,6 +132,16 @@ pub struct FileStat {
 
 pub type UserId = u32;
 pub type GroupId = u32;
+
+#[derive(Debug, Default)]
+#[repr(C)]
+pub struct FileMode {
+    /// permissions of this file
+    pub permissions: Permissions,
+
+    /// what kind of file this is
+    pub kind: FileKind,
+}
 
 /// standard unix permissions bit field
 #[derive(Default)]
@@ -197,4 +209,39 @@ impl core::fmt::Display for Permissions {
             }
         )
     }
+}
+
+#[repr(u8)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum FileKind {
+    /// block special file
+    BlockSpecial,
+
+    /// character special file
+    CharSpecial,
+
+    /// directory
+    Directory,
+
+    /// FIFO/pipe
+    FIFO,
+
+    /// regular file
+    #[default]
+    Regular,
+
+    /// symbolic link
+    SymLink,
+
+    /// socket
+    Socket,
+
+    /// message queue
+    MessageQueue,
+
+    /// semaphore
+    Semaphore,
+
+    /// shared memory
+    SharedMemory,
 }
