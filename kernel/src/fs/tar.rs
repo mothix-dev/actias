@@ -514,13 +514,7 @@ impl super::FileDescriptor for TarDirectory {
             if entry.name == name {
                 match entry.file {
                     DirFile::Directory(ref dir) => return Ok(Box::new(dir.clone())),
-                    DirFile::File(ref file) => {
-                        if flags & OpenFlags::Directory != OpenFlags::None {
-                            return Err(common::Error::NotDirectory);
-                        } else {
-                            return Ok(Box::new(file.clone()));
-                        }
-                    }
+                    DirFile::File(ref file) => return Ok(Box::new(file.clone())),
                 }
             }
         }

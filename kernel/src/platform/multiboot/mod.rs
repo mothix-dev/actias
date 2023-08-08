@@ -379,8 +379,30 @@ pub fn kmain() {
         environment.namespace.lock().insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
     }
 
-    let fd = environment.open(0, "sysfs/../sysfs/debug", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
+    // write test
+    let fd = environment.open(0, "initrd/test6", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
     environment.write(fd, "UwU OwO".as_bytes()).unwrap();
+    environment.close(fd);
+
+    // read test
+    let fd = environment.open(0, "initrd/test3.txt", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
+    let mut buf = [0; 256];
+    let bytes_read = environment.read(fd, &mut buf).unwrap();
+    debug!("file contains {:?}", core::str::from_utf8(&buf[..bytes_read]).unwrap());
+    environment.close(fd);
+
+    // readdir test
+    let fd = environment
+        .open(0, "initrd/test", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::Directory)
+        .unwrap();
+    let mut buf = [0; 256];
+    loop {
+        let bytes_read = environment.read(fd, &mut buf).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        debug!("read dir entry {:?}", core::str::from_utf8(&buf[4..bytes_read - 1]).unwrap());
+    }
     environment.close(fd);
 
     use crate::fs::Filesystem;
