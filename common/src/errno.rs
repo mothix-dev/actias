@@ -259,6 +259,6 @@ impl fmt::Display for Errno {
 
 impl fmt::Debug for Errno {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Errno: {}", self)
+        write!(f, "Errno {} ({})", *self as u32, self)
     }
 }

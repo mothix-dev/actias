@@ -1,6 +1,6 @@
 //! process management
 
-use crate::{array::VecBitSet, mm::PageDirSync, sched::Task};
+use crate::{array::VecBitSet, sched::Task};
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use spin::{Mutex, RwLock};
 
@@ -99,6 +99,6 @@ impl ProcessTable {
 
 pub struct Process {
     pub threads: RwLock<Vec<Arc<Mutex<Task>>>>,
-    pub page_directory: Arc<Mutex<PageDirSync<crate::arch::PageDirectory>>>,
+    pub memory_map: Arc<Mutex<crate::mm::ProcessMap>>,
     pub environment: crate::fs::FsEnvironment,
 }

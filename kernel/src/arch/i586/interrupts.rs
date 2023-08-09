@@ -9,7 +9,7 @@ use x86::{
     Ring,
 };
 
-use crate::{arch::bsp::InterruptManager, FormatHex};
+use crate::{arch::bsp::InterruptManager, mm::MemoryProtection, FormatHex};
 
 /// IDT flags
 #[bitmask(u8)]
@@ -238,49 +238,89 @@ impl core::fmt::Display for Exceptions {
     }
 }
 
-/// page fault error code wrapper
-#[repr(transparent)]
-pub struct PageFaultErrorCode(u32);
+#[bitmask(u32)]
+pub enum PageFaultErrorCode {
+    /// no flags set
+    None = 0,
+
+    /// set when the faulted-on page was present
+    Present = 1 << 0,
+
+    /// set when the page fault is caused by a write access, unset when it's caused by a read access
+    Write = 1 << 1,
+
+    /// whether the page fault was caused in ring 3
+    User = 1 << 2,
+
+    /// whether any reserved bits in a page directory entry are set, but only when PSE/PAE flags in CR4 are set
+    ReservedWrite = 1 << 3,
+
+    /// whether the page fault was caused by an instruction fetch. only applies when NX is supported and enabled
+    InstructionFetch = 1 << 4,
+
+    /// whether the page fault was caused by a protection key violation
+    ProtectionKey = 1 << 5,
+
+    /// whether the page fault was caused by shadow stack access
+    ShadowStack = 1 << 6,
+
+    /// whether the page fault was caused by SGX, unrelated to normal paging
+    SGX = 1 << 15,
+}
+
+impl From<PageFaultErrorCode> for MemoryProtection {
+    fn from(value: PageFaultErrorCode) -> Self {
+        let mut flags = if value & PageFaultErrorCode::Write != PageFaultErrorCode::None {
+            MemoryProtection::Write
+        } else {
+            MemoryProtection::Read
+        };
+        if value & PageFaultErrorCode::InstructionFetch != PageFaultErrorCode::None {
+            flags |= MemoryProtection::Execute
+        }
+        flags
+    }
+}
 
 impl core::fmt::Display for PageFaultErrorCode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "PageFaultErrorCode {{")?;
 
-        if self.0 & (1 << 0) > 0 {
+        if *self & Self::Present != Self::None {
             write!(f, " present,")?;
         }
 
-        if self.0 & (1 << 1) > 0 {
+        if *self & Self::Write != Self::None {
             write!(f, " write")?;
         } else {
             write!(f, " read")?;
         }
 
-        if self.0 & (1 << 2) > 0 {
+        if *self & Self::User != Self::None {
             write!(f, ", user mode")?;
         } else {
             write!(f, ", supervisor mode")?;
         }
 
-        if self.0 & (1 << 3) > 0 {
+        if *self & Self::ReservedWrite != Self::None {
             write!(f, ", reserved")?;
         }
 
-        if self.0 & (1 << 4) > 0 {
+        if *self & Self::InstructionFetch != Self::None {
             write!(f, ", instruction fetch")?;
         } else {
             write!(f, ", data access")?;
         }
 
-        if self.0 & (1 << 5) > 0 {
+        if *self & Self::ProtectionKey != Self::None {
             write!(f, ", protection-key")?;
         }
 
-        if self.0 & (1 << 6) > 0 {
-            write!(f, ", shadow")?;
+        if *self & Self::ShadowStack != Self::None {
+            write!(f, ", shadow stack")?;
         }
 
-        if self.0 & (1 << 15) > 0 {
+        if *self & Self::SGX != Self::None {
             write!(f, ", sgx")?;
         }
 

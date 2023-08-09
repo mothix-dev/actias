@@ -52,22 +52,17 @@ impl FsEnvironment {
 
     /// implements POSIX fchmod()
     pub fn chmod(&self, file_descriptor: usize, permissions: common::Permissions) -> common::Result<()> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.chmod(permissions)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.chmod(permissions)
     }
 
     /// implements POSIX fchown()
     pub fn chown(&self, file_descriptor: usize, owner: Option<common::UserId>, group: Option<common::GroupId>) -> common::Result<()> {
-        self.file_descriptors
-            .lock()
-            .get(file_descriptor)
-            .ok_or(Errno::NoSuchProcess)?
-            .descriptor
-            .chown(owner, group)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.descriptor.chown(owner, group)
     }
 
     /// implements POSIX close()
     pub fn close(&self, file_descriptor: usize) -> common::Result<()> {
-        self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::NoSuchProcess).map(|_| ())
+        self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::BadFile).map(|_| ())
     }
 
     /// parses a path, removing any . or .. elements, and detects whether the new path is relative or absolute
@@ -227,7 +222,7 @@ impl FsEnvironment {
                     }
                 } else {
                     let file_descriptors = self.file_descriptors.lock();
-                    let fd = file_descriptors.get(at).ok_or(Errno::NoSuchProcess)?;
+                    let fd = file_descriptors.get(at).ok_or(Errno::BadFile)?;
                     let (mut path, is_absolute) = self.simplify_path(&fd.path, path);
                     let name = path.pop().unwrap_or_default();
 
@@ -267,22 +262,22 @@ impl FsEnvironment {
 
     /// implements POSIX read()
     pub fn read(&self, file_descriptor: usize, buf: &mut [u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.read(buf)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.read(buf)
     }
 
     /// implements POSIX lseek()
     pub fn seek(&self, file_descriptor: usize, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.seek(offset, kind)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.seek(offset, kind)
     }
 
     /// implements POSIX fstat()
     pub fn stat(&self, file_descriptor: usize) -> common::Result<common::FileStat> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.stat()
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.stat()
     }
 
     /// implements POSIX ftruncate() with the exception of length being unsigned instead of signed
     pub fn truncate(&self, file_descriptor: usize, len: u64) -> common::Result<()> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.truncate(len)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.truncate(len)
     }
 
     /// implements POSIX unlinkat() with the exception of AT_FDCWD being a flag instead of a dedicated file descriptor
@@ -293,12 +288,12 @@ impl FsEnvironment {
 
     /// implements POSIX write()
     pub fn write(&self, file_descriptor: usize, buf: &[u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.write(buf)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.write(buf)
     }
 
     /// implements POSIX dup()
     pub fn dup(&self, file_descriptor: usize) -> common::Result<usize> {
-        let mut new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.duplicate()?;
+        let mut new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.duplicate()?;
         new_descriptor.flags &= !common::OpenFlags::CloseOnExec;
         self.file_descriptors.lock().add(new_descriptor).map_err(|_| Errno::OutOfMemory)
     }
@@ -308,7 +303,7 @@ impl FsEnvironment {
         if file_descriptor == new_fd {
             Ok(())
         } else {
-            let mut new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.duplicate()?;
+            let mut new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.duplicate()?;
             new_descriptor.flags &= !common::OpenFlags::CloseOnExec;
             self.file_descriptors.lock().set(new_fd, new_descriptor).map_err(|_| Errno::OutOfMemory)
         }
@@ -317,9 +312,13 @@ impl FsEnvironment {
     /// changes the root directory of this environment to the directory pointed to by the given file descriptor,
     /// removing the file descriptor from the list of available file descriptors in the process.
     /// if the file descriptor needs to be kept around it must first be duplicated.
-    pub fn chroot(&self, file_descriptor: usize) -> common::Result<()> {
-        *self.root.lock() = self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::NoSuchProcess)?;
+    pub fn chroot(&mut self, file_descriptor: usize) -> common::Result<()> {
+        self.root = Arc::new(Mutex::new(self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::BadFile)?));
         Ok(())
+    }
+
+    pub fn exec(&self, file_descriptor: usize) -> common::Result<(crate::mm::ProcessMap, usize)> {
+        crate::exec::exec(self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?)
     }
 }
 
@@ -332,10 +331,11 @@ fn concat_slices(a: &[String], b: &[String]) -> Vec<String> {
 
 impl Filesystem for FsEnvironment {
     fn get_root_dir(&self) -> Box<dyn FileDescriptor> {
-        Box::new(NamespaceDir {
+        /*Box::new(NamespaceDir {
             namespace: self.namespace.clone(),
             seek_pos: AtomicUsize::new(0),
-        })
+        })*/
+        self.root.lock().duplicate().expect("couldn't duplicate root directory").descriptor
     }
 }
 
@@ -411,7 +411,7 @@ impl FileDescriptor for OpenFile {
     }
 
     fn dup(&self) -> common::Result<Box<dyn FileDescriptor>> {
-        Err(Errno::FuncNotSupported)
+        self.descriptor.dup()
     }
 }
 
@@ -678,39 +678,39 @@ impl FDLookup {
 
 impl FileDescriptor for FDLookup {
     fn chmod(&self, permissions: common::Permissions) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.chmod(permissions)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.chmod(permissions)
     }
 
     fn chown(&self, owner: Option<common::UserId>, group: Option<common::GroupId>) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.chown(owner, group)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.chown(owner, group)
     }
 
     fn open(&self, name: &str, flags: common::OpenFlags) -> common::Result<Box<dyn FileDescriptor>> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.open(name, flags)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.open(name, flags)
     }
 
     fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.read(buf)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.read(buf)
     }
 
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.seek(offset, kind)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.seek(offset, kind)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.stat()
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.stat()
     }
 
     fn truncate(&self, len: u64) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.truncate(len)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.truncate(len)
     }
 
     fn unlink(&self, name: &str, flags: common::UnlinkFlags) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.unlink(name, flags)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.unlink(name, flags)
     }
 
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.write(buf)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::BadFile)?.write(buf)
     }
 
     fn dup(&self) -> common::Result<Box<dyn FileDescriptor>> {

@@ -6,7 +6,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use common::{OpenFlags, Errno};
+use common::{Errno, OpenFlags};
 use core::{ffi::CStr, fmt, mem::size_of, str, sync::atomic::AtomicUsize};
 use generic_array::{
     typenum::{U12, U8},
@@ -478,7 +478,7 @@ impl super::FileDescriptor for TarFile {
         Ok(Box::new(Self {
             data: self.data.clone(),
             header: self.header.clone(),
-            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst))
+            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
         }))
     }
 }

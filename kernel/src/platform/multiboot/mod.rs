@@ -3,7 +3,7 @@ pub mod logger;
 
 use crate::{
     arch::{bsp::RegisterContext, interrupts::InterruptRegisters, PhysicalAddress, PROPERTIES},
-    mm::{MemoryRegion, PageDirSync, PageDirectory},
+    mm::MemoryRegion,
     platform::bootloader::ModuleEntry,
 };
 use alloc::{string::ToString, sync::Arc, vec};
@@ -224,6 +224,32 @@ pub fn kmain() {
             panic!("exception in kernel mode");
         }
     });
+    manager.register(crate::arch::interrupts::Exceptions::PageFault as usize, |regs| {
+        let fault_addr = unsafe { x86::controlregs::cr2() };
+
+        let global_state = crate::get_global_state();
+        let scheduler = global_state.cpus.read()[0].scheduler.clone();
+
+        if scheduler.is_running_task(regs) {
+            if let Some(task) = scheduler.get_current_task() {
+                let mut task = task.lock();
+                if !task.memory_map.lock().page_fault(fault_addr, crate::arch::interrupts::PageFaultErrorCode::from(regs.error_code).into()) {
+                    debug!("page fault in process {}", task.pid.unwrap_or_default());
+                    task.is_valid = false;
+                    scheduler.context_switch(regs, scheduler.clone(), false);
+                }
+            } else {
+                scheduler.context_switch(regs, scheduler.clone(), false);
+            }
+        } else {
+            unsafe {
+                asm!("cli");
+            }
+            error!("page fault @ {fault_addr:#x} in kernel mode");
+            info!("register dump: {regs:#?}");
+            panic!("exception in kernel mode");
+        }
+    });
 
     // init PIT
     let divisor = 1193182 / timer.hz();
@@ -268,172 +294,60 @@ pub fn kmain() {
         asm!("sti");
     }
 
-    /*extern "C" fn task_a() {
-        loop {
-            unsafe {
-                asm!("int 0x80");
-            }
-
-            // wait a little while
-            for _i in 0..524288 {
-                unsafe {
-                    asm!("pause");
-                }
-            }
-        }
-    }
-
-    extern "C" fn task_b() {
-        loop {
-            for _i in 0..262144 {
-                unsafe {
-                    asm!("pause");
-                }
-            }
-
-            unsafe {
-                asm!("int 0x81");
-            }
-
-            for _i in 0..262144 {
-                unsafe {
-                    asm!("pause");
-                }
-            }
-        }
-    }*/
-
-    extern "C" fn task_a() {
-        let syscall_num = common::Syscalls::IsComputerOn as u32;
-        let ok: u32;
-        let err: u32;
-        unsafe {
-            asm!("int 0x80", in("eax") syscall_num, lateout("eax") ok, out("ebx") err);
-        }
-
-        if err != 0 {
-            loop {
-                let message = "error!";
-                let syscall_num = common::Syscalls::Write as u32;
-                let fd = 1;
-                let buf = message.as_bytes().as_ptr();
-                let buf_len = message.as_bytes().len();
-                unsafe {
-                    asm!("int 0x80", in("eax") syscall_num, in("ebx") fd, in("ecx") buf, in("edx") buf_len);
-                }
-            }
-        }
-
-        if ok == 1 {
-            let message = "computer is on!";
-            let syscall_num = common::Syscalls::Write as u32;
-            let fd = 1;
-            let buf = message.as_bytes().as_ptr();
-            let buf_len = message.as_bytes().len();
-            unsafe {
-                asm!("int 0x80", in("eax") syscall_num, in("ebx") fd, in("ecx") buf, in("edx") buf_len);
-            }
-        }
-
-        let syscall_num = common::Syscalls::Exit as u32;
-        unsafe {
-            asm!("int 0x80", in("eax") syscall_num);
-        }
-
-        let message = "not supposed to be here";
-        let syscall_num = common::Syscalls::Write as u32;
-        let fd = 1;
-        let buf = message.as_bytes().as_ptr();
-        let buf_len = message.as_bytes().len();
-        unsafe {
-            asm!("int 0x80", in("eax") syscall_num, in("ebx") fd, in("ecx") buf, in("edx") buf_len);
-        }
-
-        #[allow(clippy::empty_loop)]
-        loop {}
-    }
-
-    fn make_page_dir() -> PageDirSync<crate::arch::PageDirectory> {
-        let stack_size = 0x1000 * 4;
-
-        let split_addr = PROPERTIES.kernel_region.base;
-        let global_state = crate::get_global_state();
-        let mut dir = PageDirSync::sync_from(global_state.page_directory.clone(), split_addr).unwrap();
-
-        for addr in (split_addr - stack_size..split_addr).step_by(PROPERTIES.page_size) {
-            let phys_addr = global_state.page_manager.lock().alloc_frame().unwrap();
-            dir.set_page(
-                None::<&crate::arch::PageDirectory>,
-                addr,
-                Some(crate::mm::PageFrame {
-                    addr: phys_addr,
-                    present: true,
-                    writable: true,
-                    user_mode: true,
-                    ..Default::default()
-                }),
-            )
-            .unwrap();
-        }
-
-        dir
-    }
-
     let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
 
     let global_state = crate::get_global_state();
 
-    let environment = crate::fs::FsEnvironment::new();
+    let mut environment = crate::fs::FsEnvironment::new();
     environment.namespace.lock().insert("sysfs".to_string(), alloc::boxed::Box::new(crate::fs::sys::SysFs));
 
     if let Some(region) = initrd_region {
         let filesystem = crate::fs::tar::TarFilesystem::new(region);
         environment.namespace.lock().insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
+        let fd = environment.open(0, "/../initrd", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
+        environment.chroot(fd).unwrap();
     }
-
-    // read test
-    let fd = environment.open(0, "initrd/test3.txt", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
-    let mut buf = [0; 256];
-    let bytes_read = environment.read(fd, &mut buf).unwrap();
-    debug!("file contains {:?}", core::str::from_utf8(&buf[..bytes_read]).unwrap());
-    environment.close(fd).unwrap();
-
-    // write test
-    let fd = environment.open(0, "initrd/test6", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
-    environment.write(fd, "UwU OwO".as_bytes()).unwrap();
-    environment.dup2(fd, 1).unwrap();
-    if fd != 1 {
-        environment.close(fd).unwrap();
-    }
-    debug!("fd is {fd}");
-
-    // readdir test
-    let fd = environment
-        .open(0, "initrd/test", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::Directory)
-        .unwrap();
-    let mut buf = [0; 256];
-    loop {
-        let bytes_read = environment.read(fd, &mut buf).unwrap();
-        if bytes_read == 0 {
-            break;
-        }
-        debug!("read dir entry {:?}", core::str::from_utf8(&buf[4..bytes_read - 1]).unwrap());
-    }
-    environment.close(fd).unwrap();
-
-    let _ = environment.write(1, "fd 1 is still open!".as_bytes());
 
     use crate::fs::Filesystem;
     crate::fs::print_tree(&environment.get_root_dir());
 
-    let page_dir_a = Arc::new(Mutex::new(make_page_dir()));
+    let fd = environment.open(0, "/../sysfs/debug", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
+    environment.dup2(fd, 1).unwrap();
+    if fd != 1 {
+        environment.close(fd).unwrap();
+    }
+
+    let fd = environment.open(0, "/init", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
+    let (mut map, entry) = environment.exec(fd).unwrap();
+
+    let stack_size = 0x1000 * 4;
+    let split_addr = crate::arch::PROPERTIES.kernel_region.base;
+
+    /*map.map(
+        crate::mm::Mapping::new(
+            crate::mm::MappingKind::Anonymous,
+            crate::mm::ContiguousRegion::new(split_addr - stack_size * 2, stack_size + stack_size / 2),
+            crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
+        ),
+        false,
+    );*/
+    map.map(
+        crate::mm::Mapping::new(
+            crate::mm::MappingKind::Anonymous,
+            crate::mm::ContiguousRegion::new(split_addr - stack_size, stack_size),
+            /*crate::mm::MemoryProtection::Read | */ crate::mm::MemoryProtection::Write,
+        ),
+        false,
+    );
+
+    let memory_map_a = Arc::new(Mutex::new(map));
     let task_a = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
-        registers: InterruptRegisters::from_fn(task_a as *const _, stack_ptr, false),
+        registers: InterruptRegisters::from_fn(entry as *const _, stack_ptr, true),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
-        page_directory: page_dir_a.clone(),
+        memory_map: memory_map_a.clone(),
         pid: None,
     }));
     let pid_a = global_state
@@ -441,33 +355,12 @@ pub fn kmain() {
         .write()
         .insert(crate::process::Process {
             threads: spin::RwLock::new(vec![task_a.clone()]),
-            page_directory: page_dir_a,
+            memory_map: memory_map_a,
             environment,
         })
         .unwrap();
     task_a.lock().pid = Some(pid_a);
     scheduler.push_task(task_a);
-
-    /*let page_dir_b = Arc::new(Mutex::new(make_page_dir()));
-    let task_b = Arc::new(Mutex::new(crate::sched::Task {
-        is_valid: true,
-        registers: InterruptRegisters::from_fn(task_b as *const _, stack_ptr, false),
-        niceness: 0,
-        exec_mode: crate::sched::ExecMode::Running,
-        cpu_time: 0,
-        page_directory: page_dir_b.clone(),
-        pid: None,
-    }));
-    let pid_b = global_state
-        .process_table
-        .write()
-        .insert(crate::process::Process {
-            threads: spin::RwLock::new(vec![task_b.clone()]),
-            page_directory: page_dir_b,
-        })
-        .unwrap();
-    task_b.lock().pid = Some(pid_b);
-    scheduler.push_task(task_b);*/
 
     crate::get_global_state().cpus.read()[0].start_context_switching();
 }

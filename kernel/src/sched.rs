@@ -3,7 +3,7 @@
 
 use crate::{
     arch::{bsp::RegisterContext, PROPERTIES},
-    mm::{PageDirSync, PageDirTracker, PageDirectory},
+    mm::{PageDirTracker, PageDirectory},
     timer::Timer,
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
@@ -68,8 +68,8 @@ pub struct Task {
     /// estimate of how much CPU time this task has used recently in 17.14 fixed point
     pub cpu_time: i64,
 
-    /// the page directory that should be switched to when running this task
-    pub page_directory: Arc<Mutex<PageDirSync<crate::arch::PageDirectory>>>,
+    /// the memory map associated with this task
+    pub memory_map: Arc<Mutex<crate::mm::ProcessMap>>,
 
     /// the PID associated with this task
     pub pid: Option<usize>,
@@ -219,7 +219,7 @@ impl Scheduler {
 
                     task.registers = registers.clone();
                     exec_mode = task.exec_mode;
-                    _page_directory = Some(task.page_directory.clone());
+                    _page_directory = Some(task.memory_map.clone());
                 }
 
                 if exec_mode == ExecMode::Running {
@@ -238,9 +238,9 @@ impl Scheduler {
                 task.cpu_time += TIME_SLICE as i64 * (1 << 14);
 
                 unsafe {
-                    let mut page_directory = task.page_directory.lock();
-                    page_directory.check_synchronize();
-                    page_directory.switch_to();
+                    let mut map = task.memory_map.lock();
+                    map.page_directory.check_synchronize();
+                    map.page_directory.switch_to();
                 }
 
                 let timeout = self
@@ -279,7 +279,7 @@ impl Scheduler {
         let current_task = self.current_task.lock();
 
         if let Some(task) = &*current_task {
-            task.lock().page_directory.lock().check_synchronize();
+            task.lock().memory_map.lock().page_directory.check_synchronize();
         }
     }
 

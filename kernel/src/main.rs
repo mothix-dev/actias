@@ -17,6 +17,7 @@ extern crate alloc;
 pub mod arch;
 pub mod array;
 pub mod cpu;
+pub mod exec;
 pub mod fs;
 pub mod mm;
 pub mod platform;

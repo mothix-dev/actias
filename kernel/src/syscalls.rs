@@ -115,7 +115,19 @@ fn chown(file_descriptor: usize, owner: usize, group: usize) -> common::Result<(
 
 /// syscall handler for `chroot`
 fn chroot(file_descriptor: usize) -> common::Result<()> {
-    get_current_process()?.environment.chroot(file_descriptor)
+    let global_state = crate::get_global_state();
+
+    // TODO: detect current CPU
+    let scheduler = &global_state.cpus.read()[0].scheduler;
+
+    let current_task = match scheduler.get_current_task() {
+        Some(task) => task,
+        None => unreachable!(),
+    };
+
+    let pid = current_task.lock().pid.ok_or(common::Errno::NoSuchProcess)?;
+
+    global_state.process_table.write().get_mut(pid).ok_or(common::Errno::NoSuchProcess)?.environment.chroot(file_descriptor)
 }
 
 /// syscall handler for `close`
