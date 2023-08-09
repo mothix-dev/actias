@@ -6,7 +6,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use common::OpenFlags;
+use common::{OpenFlags, Errno};
 use core::{ffi::CStr, fmt, mem::size_of, str, sync::atomic::AtomicUsize};
 use generic_array::{
     typenum::{U12, U8},
@@ -139,11 +139,11 @@ impl fmt::Debug for Header {
 }
 
 impl TryFrom<&Header> for common::FileStat {
-    type Error = common::Error;
+    type Error = common::Errno;
 
     fn try_from(header: &Header) -> Result<Self, Self::Error> {
-        let mode: u16 = header.mode().try_into().map_err(|_| common::Error::Overflow)?;
-        let mod_time = header.mod_time().try_into().map_err(|_| common::Error::Overflow)?;
+        let mode: u16 = header.mode().try_into().map_err(|_| Errno::ValueOverflow)?;
+        let mod_time = header.mod_time().try_into().map_err(|_| Errno::ValueOverflow)?;
         Ok(common::FileStat {
             device: 0,
             serial_num: 0,
@@ -152,9 +152,9 @@ impl TryFrom<&Header> for common::FileStat {
                 kind: header.kind().try_into().unwrap_or_default(),
             },
             num_links: 0,
-            user_id: header.owner_uid().try_into().map_err(|_| common::Error::Overflow)?,
-            group_id: header.owner_gid().try_into().map_err(|_| common::Error::Overflow)?,
-            size: header.file_size().try_into().map_err(|_| common::Error::Overflow)?,
+            user_id: header.owner_uid().try_into().map_err(|_| Errno::ValueOverflow)?,
+            group_id: header.owner_gid().try_into().map_err(|_| Errno::ValueOverflow)?,
+            size: header.file_size().try_into().map_err(|_| Errno::ValueOverflow)?,
             access_time: mod_time,
             modification_time: mod_time,
             status_change_time: mod_time,
@@ -165,7 +165,7 @@ impl TryFrom<&Header> for common::FileStat {
 }
 
 impl TryFrom<Header> for common::FileStat {
-    type Error = common::Error;
+    type Error = common::Errno;
 
     fn try_from(header: Header) -> Result<Self, Self::Error> {
         (&header).try_into()
@@ -467,11 +467,19 @@ impl super::FileDescriptor for TarFile {
     }
 
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        super::seek_helper(&self.seek_pos, offset, kind, self.data.len().try_into().map_err(|_| common::Error::Overflow)?)
+        super::seek_helper(&self.seek_pos, offset, kind, self.data.len().try_into().map_err(|_| Errno::ValueOverflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
         (&self.header).try_into()
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
+        Ok(Box::new(Self {
+            data: self.data.clone(),
+            header: self.header.clone(),
+            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst))
+        }))
     }
 }
 
@@ -507,7 +515,7 @@ impl Clone for TarDirectory {
 impl super::FileDescriptor for TarDirectory {
     fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
-            return Err(common::Error::ReadOnly);
+            return Err(Errno::ReadOnlyFilesystem);
         }
 
         for entry in self.dir_entries.iter() {
@@ -519,7 +527,7 @@ impl super::FileDescriptor for TarDirectory {
             }
         }
 
-        Err(common::Error::DoesntExist)
+        Err(Errno::NoSuchFileOrDir)
     }
 
     fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
@@ -546,7 +554,7 @@ impl super::FileDescriptor for TarDirectory {
     }
 
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        super::seek_helper(&self.seek_pos, offset, kind, self.dir_entries.len().try_into().map_err(|_| common::Error::Overflow)?)
+        super::seek_helper(&self.seek_pos, offset, kind, self.dir_entries.len().try_into().map_err(|_| Errno::ValueOverflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
@@ -566,5 +574,13 @@ impl super::FileDescriptor for TarDirectory {
                 ..Default::default()
             })
         }
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
+        Ok(Box::new(Self {
+            dir_entries: self.dir_entries.clone(),
+            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
+            header: self.header.clone(),
+        }))
     }
 }

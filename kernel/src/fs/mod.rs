@@ -9,6 +9,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use common::Errno;
 use core::sync::atomic::AtomicUsize;
 use log::debug;
 use spin::Mutex;
@@ -23,6 +24,12 @@ pub struct FsEnvironment {
     file_descriptors: Arc<Mutex<ConsistentIndexArray<OpenFile>>>,
 }
 
+struct ResolveResult {
+    name: String,
+    path: Vec<String>,
+    container: Box<dyn FileDescriptor>,
+}
+
 impl FsEnvironment {
     pub fn new() -> Self {
         let namespace = Arc::new(Mutex::new(BTreeMap::new()));
@@ -32,7 +39,7 @@ impl FsEnvironment {
                 seek_pos: AtomicUsize::new(0),
             }),
             path: Vec::new(),
-            close_on_exec: false,
+            flags: common::OpenFlags::all(),
         }));
         Self {
             namespace,
@@ -43,31 +50,28 @@ impl FsEnvironment {
         }
     }
 
+    /// implements POSIX fchmod()
     pub fn chmod(&self, file_descriptor: usize, permissions: common::Permissions) -> common::Result<()> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.chmod(permissions)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.chmod(permissions)
     }
 
+    /// implements POSIX fchown()
     pub fn chown(&self, file_descriptor: usize, owner: Option<common::UserId>, group: Option<common::GroupId>) -> common::Result<()> {
         self.file_descriptors
             .lock()
             .get(file_descriptor)
-            .ok_or(common::Error::BadFileDescriptor)?
+            .ok_or(Errno::NoSuchProcess)?
             .descriptor
             .chown(owner, group)
     }
 
-    pub fn close(&self, file_descriptor: usize) {
-        self.file_descriptors.lock().remove(file_descriptor)
-    }
-
-    pub fn link(&self, source: usize, target: usize) -> common::Result<()> {
-        let file_descriptors = self.file_descriptors.lock();
-        let source = &*file_descriptors.get(source).ok_or(common::Error::BadFileDescriptor)?.descriptor;
-        file_descriptors.get(target).ok_or(common::Error::BadFileDescriptor)?.link(source)
+    /// implements POSIX close()
+    pub fn close(&self, file_descriptor: usize) -> common::Result<()> {
+        self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::NoSuchProcess).map(|_| ())
     }
 
     /// parses a path, removing any . or .. elements, and detects whether the new path is relative or absolute
-    fn remove_dots(&self, container_path: &[String], path: &str) -> (Vec<String>, bool) {
+    fn simplify_path(&self, container_path: &[String], path: &str) -> (Vec<String>, bool) {
         let mut path_stack = Vec::new();
         let mut is_absolute = false;
 
@@ -87,187 +91,235 @@ impl FsEnvironment {
         (path_stack, is_absolute)
     }
 
-    /// iterates path elements, double checking permissions and resolving symlinks, then opens the requested file
-    fn open_internal(&self, at: &dyn FileDescriptor, mut path: Vec<String>, mut absolute_path: Option<Vec<String>>, flags: common::OpenFlags) -> common::Result<usize> {
-        let mut last_fd: Option<Box<dyn FileDescriptor>> = None;
+    /// iterates path elements, double checking permissions and resolving symlinks
+    fn resolve_internal(&self, at: Box<dyn FileDescriptor>, mut path: Vec<String>, mut absolute_path: Option<Vec<String>>, mut name: String, no_follow: bool) -> common::Result<ResolveResult> {
+        let mut last_fd = at;
         let mut buf = [0_u8; 512];
 
-        let mut split = path.iter().enumerate();
+        let mut split = path.iter().chain(Some(&name)).enumerate();
 
         while let Some((index, component)) = split.next() {
-            let new_desc = match last_fd.as_ref() {
-                Some(dir) => dir.open(component, common::OpenFlags::Read)?,
-                None => at.open(component, common::OpenFlags::Read)?,
-            };
+            let new_desc = last_fd.open(component, common::OpenFlags::Read)?;
 
             let stat = new_desc.stat()?;
-            // TODO: check permissions
-
-            let mut last_element = false;
+            // TODO: check permissions, symlink follow limits
 
             match stat.mode.kind {
                 common::FileKind::Directory => {
-                    if index < path.len() - 1 {
-                        // haven't run out of path elements, keep searching
-                        last_fd = Some(new_desc)
-                    } else {
-                        last_element = true;
+                    if index < path.len() {
+                        last_fd = new_desc
                     }
                 }
                 common::FileKind::SymLink => {
+                    if no_follow {
+                        return Err(Errno::NotDirectory);
+                    }
+
                     // follow symlink
                     let bytes_read = new_desc.read(&mut buf)?;
                     if bytes_read == 0 {
-                        return Err(common::Error::BadInput);
+                        return Err(Errno::InvalidArgument);
                     }
 
-                    let target = core::str::from_utf8(&buf[..bytes_read]).map_err(|_| common::Error::BadInput)?;
+                    let target = core::str::from_utf8(&buf[..bytes_read]).map_err(|_| Errno::InvalidArgument)?;
 
                     match target.chars().next() {
                         Some('/') => {
                             // parse absolute path
                             let root = self.root.lock();
-                            let (new_path, is_absolute) = self.remove_dots(&root.path, target);
+                            let (new_path, is_absolute) = self.simplify_path(&root.path, target);
 
                             if is_absolute {
-                                last_fd = Some(Box::new(LockedFileDescriptor::new(self.fs_list.clone())));
+                                last_fd = Box::new(LockedFileDescriptor::new(self.fs_list.clone()));
                                 absolute_path = None;
 
                                 // start over with the symlink path
                                 drop(split);
                                 path = new_path;
-                                split = path.iter().enumerate();
+                                name = path.pop().unwrap_or_default();
+                                split = path.iter().chain(Some(&name)).enumerate();
                             } else {
-                                last_fd = Some(Box::new(LockedFileDescriptor::new(self.root.clone())));
+                                last_fd = Box::new(LockedFileDescriptor::new(self.root.clone()));
                                 absolute_path = Some(concat_slices(&root.path, &path));
 
                                 drop(split);
                                 path = new_path;
-                                split = path.iter().enumerate();
+                                name = path.pop().unwrap_or_default();
+                                split = path.iter().chain(Some(&name)).enumerate();
                             }
                         }
                         Some(_) => {
                             // parse relative path
                             let container_path = &path[..index - 1];
-                            let (new_path, is_absolute) = self.remove_dots(container_path, target);
+                            let (new_path, is_absolute) = self.simplify_path(container_path, target);
 
                             if is_absolute {
-                                last_fd = Some(Box::new(LockedFileDescriptor::new(self.fs_list.clone())));
+                                last_fd = Box::new(LockedFileDescriptor::new(self.fs_list.clone()));
                                 absolute_path = None;
 
                                 drop(split);
                                 path = new_path;
-                                split = path.iter().enumerate();
+                                name = path.pop().unwrap_or_default();
+                                split = path.iter().chain(Some(&name)).enumerate();
                             } else {
                                 absolute_path = Some(concat_slices(container_path, &path));
 
                                 drop(split);
                                 path = new_path;
-                                split = path.iter().enumerate();
+                                name = path.pop().unwrap_or_default();
+                                split = path.iter().chain(Some(&name)).enumerate();
                             }
                         }
-                        None => return Err(common::Error::BadInput),
+                        None => return Err(Errno::InvalidArgument),
                     }
                 }
                 _ => {
-                    if split.next().is_some() || flags & common::OpenFlags::Directory != common::OpenFlags::None {
-                        return Err(common::Error::NotDirectory);
+                    if index < path.len() {
+                        return Err(Errno::NotDirectory);
                     }
-
-                    last_element = true;
                 }
-            }
-
-            if last_element {
-                // last element in the path has been reached, open it and return
-                let component = &path[path.len() - 1];
-                let open_file = OpenFile {
-                    descriptor: match last_fd {
-                        Some(dir) => dir.open(component, flags & !common::OpenFlags::CloseOnExec)?,
-                        None => at.open(component, flags & !common::OpenFlags::CloseOnExec)?,
-                    },
-                    path: absolute_path.take().unwrap_or(path),
-                    close_on_exec: flags & common::OpenFlags::CloseOnExec != common::OpenFlags::None,
-                };
-
-                return self.file_descriptors.lock().add(open_file).map_err(|_| common::Error::AllocError);
             }
         }
 
-        Err(common::Error::InvalidOperation)
+        Ok(ResolveResult {
+            name,
+            path: absolute_path.unwrap_or(path),
+            container: last_fd,
+        })
     }
 
-    pub fn open(&self, at: usize, path: &str, flags: common::OpenFlags) -> common::Result<usize> {
+    /// resolves a relative and absolute path to the container at the given file descriptor number, returning the filename, absolute path to the file, and the file descriptor containing it
+    fn resolve_container(&self, at: usize, path: &str, at_cwd: bool, no_follow: bool) -> common::Result<ResolveResult> {
         match path.chars().next() {
             Some('/') => {
                 // parse absolute path
                 let root = self.root.lock();
-                let (path, is_absolute) = self.remove_dots(&root.path, path);
+                let (mut path, is_absolute) = self.simplify_path(&root.path, path);
+                let name = path.pop().unwrap_or_default();
 
                 if is_absolute {
+                    // simplified path resolves from /../
                     drop(root);
-                    self.open_internal(&LockedFileDescriptor::new(self.fs_list.clone()), path, None, flags)
+                    self.resolve_internal(Box::new(LockedFileDescriptor::new(self.fs_list.clone())), path, None, name, no_follow)
                 } else {
+                    // simplified path resolves from root
                     let new_path = concat_slices(&root.path, &path);
                     drop(root);
-                    self.open_internal(&LockedFileDescriptor::new(self.root.clone()), path, Some(new_path), flags)
+                    self.resolve_internal(Box::new(LockedFileDescriptor::new(self.root.clone())), path, Some(new_path), name, no_follow)
                 }
             }
             Some(_) => {
                 // parse relative path
-                if flags & common::OpenFlags::AtCWD != common::OpenFlags::None {
+                if at_cwd {
                     let cwd = self.cwd.lock();
-                    let (path, is_absolute) = self.remove_dots(&cwd.path, path);
+                    let (mut path, is_absolute) = self.simplify_path(&cwd.path, path);
+                    let name = path.pop().unwrap_or_default();
 
                     if is_absolute {
+                        // simplified path resolves from /../
                         drop(cwd);
-                        self.open_internal(&LockedFileDescriptor::new(self.fs_list.clone()), path, None, flags & !common::OpenFlags::AtCWD)
+                        self.resolve_internal(Box::new(LockedFileDescriptor::new(self.fs_list.clone())), path, None, name, no_follow)
                     } else {
+                        // simplified path resolves from cwd
                         let new_path = concat_slices(&cwd.path, &path);
                         drop(cwd);
-                        self.open_internal(&LockedFileDescriptor::new(self.cwd.clone()), path, Some(new_path), flags & !common::OpenFlags::AtCWD)
+                        self.resolve_internal(Box::new(LockedFileDescriptor::new(self.cwd.clone())), path, Some(new_path), name, no_follow)
                     }
                 } else {
                     let file_descriptors = self.file_descriptors.lock();
-                    let fd = file_descriptors.get(at).ok_or(common::Error::BadFileDescriptor)?;
-                    let (path, is_absolute) = self.remove_dots(&fd.path, path);
+                    let fd = file_descriptors.get(at).ok_or(Errno::NoSuchProcess)?;
+                    let (mut path, is_absolute) = self.simplify_path(&fd.path, path);
+                    let name = path.pop().unwrap_or_default();
 
                     if is_absolute {
+                        // simplified path resolves from /../
                         drop(file_descriptors);
-                        self.open_internal(&LockedFileDescriptor::new(self.fs_list.clone()), path, None, flags)
+                        self.resolve_internal(Box::new(LockedFileDescriptor::new(self.fs_list.clone())), path, None, name, no_follow)
                     } else {
+                        // simplified path resolves from the given file descriptor
                         let new_path = concat_slices(&fd.path, &path);
                         drop(file_descriptors);
-                        self.open_internal(&FDLookup::new(self.file_descriptors.clone(), at), path, Some(new_path), flags)
+                        self.resolve_internal(Box::new(FDLookup::new(self.file_descriptors.clone(), at)), path, Some(new_path), name, no_follow)
                     }
                 }
             }
-            None => Err(common::Error::BadInput),
+            None => Err(Errno::InvalidArgument),
         }
     }
 
+    /// implements POSIX openat() with the exception of AT_FDCWD being a flag instead of a dedicated file descriptor
+    pub fn open(&self, at: usize, path: &str, flags: common::OpenFlags) -> common::Result<usize> {
+        let result = self.resolve_container(
+            at,
+            path,
+            flags & common::OpenFlags::AtCWD != common::OpenFlags::None,
+            flags & common::OpenFlags::NoFollow != common::OpenFlags::None,
+        )?;
+
+        let open_file = OpenFile {
+            descriptor: result.container.open(&result.name, flags & !(common::OpenFlags::CloseOnExec | common::OpenFlags::AtCWD))?,
+            path: result.path,
+            flags,
+        };
+
+        self.file_descriptors.lock().add(open_file).map_err(|_| Errno::OutOfMemory)
+    }
+
+    /// implements POSIX read()
     pub fn read(&self, file_descriptor: usize, buf: &mut [u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.read(buf)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.read(buf)
     }
 
+    /// implements POSIX lseek()
     pub fn seek(&self, file_descriptor: usize, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.seek(offset, kind)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.seek(offset, kind)
     }
 
+    /// implements POSIX fstat()
     pub fn stat(&self, file_descriptor: usize) -> common::Result<common::FileStat> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.stat()
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.stat()
     }
 
+    /// implements POSIX ftruncate() with the exception of length being unsigned instead of signed
     pub fn truncate(&self, file_descriptor: usize, len: u64) -> common::Result<()> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.truncate(len)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.truncate(len)
     }
 
-    pub fn unlink(&self, file_descriptor: usize) -> common::Result<()> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.unlink()
+    /// implements POSIX unlinkat() with the exception of AT_FDCWD being a flag instead of a dedicated file descriptor
+    pub fn unlink(&self, at: usize, path: &str, flags: common::UnlinkFlags) -> common::Result<()> {
+        let result = self.resolve_container(at, path, flags & common::UnlinkFlags::AtCWD != common::UnlinkFlags::None, false)?;
+        result.container.unlink(&result.name, flags & !common::UnlinkFlags::AtCWD)
     }
 
+    /// implements POSIX write()
     pub fn write(&self, file_descriptor: usize, buf: &[u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(file_descriptor).ok_or(common::Error::BadFileDescriptor)?.write(buf)
+        self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.write(buf)
+    }
+
+    /// implements POSIX dup()
+    pub fn dup(&self, file_descriptor: usize) -> common::Result<usize> {
+        let mut new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.duplicate()?;
+        new_descriptor.flags &= !common::OpenFlags::CloseOnExec;
+        self.file_descriptors.lock().add(new_descriptor).map_err(|_| Errno::OutOfMemory)
+    }
+
+    /// implements POSIX dup2()
+    pub fn dup2(&self, file_descriptor: usize, new_fd: usize) -> common::Result<()> {
+        if file_descriptor == new_fd {
+            Ok(())
+        } else {
+            let mut new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::NoSuchProcess)?.duplicate()?;
+            new_descriptor.flags &= !common::OpenFlags::CloseOnExec;
+            self.file_descriptors.lock().set(new_fd, new_descriptor).map_err(|_| Errno::OutOfMemory)
+        }
+    }
+
+    /// changes the root directory of this environment to the directory pointed to by the given file descriptor,
+    /// removing the file descriptor from the list of available file descriptors in the process.
+    /// if the file descriptor needs to be kept around it must first be duplicated.
+    pub fn chroot(&self, file_descriptor: usize) -> common::Result<()> {
+        *self.root.lock() = self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::NoSuchProcess)?;
+        Ok(())
     }
 }
 
@@ -296,7 +348,17 @@ impl Default for FsEnvironment {
 struct OpenFile {
     descriptor: Box<dyn FileDescriptor>,
     path: Vec<String>,
-    close_on_exec: bool,
+    flags: common::OpenFlags,
+}
+
+impl OpenFile {
+    fn duplicate(&self) -> common::Result<Self> {
+        Ok(Self {
+            descriptor: self.descriptor.dup()?,
+            path: self.path.clone(),
+            flags: self.flags,
+        })
+    }
 }
 
 impl FileDescriptor for OpenFile {
@@ -308,16 +370,16 @@ impl FileDescriptor for OpenFile {
         self.descriptor.chown(owner, group)
     }
 
-    fn link(&self, source: &dyn FileDescriptor) -> common::Result<()> {
-        self.descriptor.link(source)
-    }
-
     fn open(&self, name: &str, flags: common::OpenFlags) -> common::Result<Box<dyn FileDescriptor>> {
         self.descriptor.open(name, flags)
     }
 
     fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        self.descriptor.read(buf)
+        if self.flags & common::OpenFlags::Read != common::OpenFlags::None {
+            self.descriptor.read(buf)
+        } else {
+            Err(Errno::FuncNotSupported)
+        }
     }
 
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
@@ -329,15 +391,27 @@ impl FileDescriptor for OpenFile {
     }
 
     fn truncate(&self, len: u64) -> common::Result<()> {
-        self.descriptor.truncate(len)
+        if self.flags & common::OpenFlags::Write != common::OpenFlags::None {
+            self.descriptor.truncate(len)
+        } else {
+            Err(Errno::ReadOnlyFilesystem)
+        }
     }
 
-    fn unlink(&self) -> common::Result<()> {
-        self.descriptor.unlink()
+    fn unlink(&self, name: &str, flags: common::UnlinkFlags) -> common::Result<()> {
+        self.descriptor.unlink(name, flags)
     }
 
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        self.descriptor.write(buf)
+        if self.flags & common::OpenFlags::Write != common::OpenFlags::None {
+            self.descriptor.write(buf)
+        } else {
+            Err(Errno::ReadOnlyFilesystem)
+        }
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn FileDescriptor>> {
+        Err(Errno::FuncNotSupported)
     }
 }
 
@@ -351,38 +425,34 @@ pub trait Filesystem {
 pub trait FileDescriptor {
     /// changes the access permissions of the file pointed to by this file descriptor
     fn chmod(&self, permissions: common::Permissions) -> common::Result<()> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
 
     /// changes the owner and/or group for the file pointed to by this file descriptor
     fn chown(&self, owner: Option<common::UserId>, group: Option<common::GroupId>) -> common::Result<()> {
-        Err(common::Error::InvalidOperation)
-    }
-
-    /// creates a hard (non-symbolic) link to a file in the same filesystem pointed to by `source`.
-    /// the file pointed to by this file descriptor will be replaced with the file pointed to by `source` in the filesystem,
-    /// however this open file descriptor will still point to the inode that existed previously.
-    fn link(&self, source: &dyn FileDescriptor) -> common::Result<()> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
 
     /// opens the file with the given name in the directory pointed to by this file descriptor, returning a new file descriptor to the file on success.
     /// the filename must not contain slash characters
     fn open(&self, name: &str, flags: common::OpenFlags) -> common::Result<Box<dyn FileDescriptor>> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
 
     /// reads data from this file descriptor into the given buffer. upon success, the amount of bytes read is returned.
     ///
     /// if this file descriptor points to a symlink, its target will be read.
-    /// if this file descriptor points to a directory, its entries will be read in order.
+    ///
+    /// if this file descriptor points to a directory, its entries will be read in order, one per every read() call,
+    /// where every directory entry is formatted as its serial number as a native-endian u32 (4 bytes), followed by the bytes of its name with no null terminator.
+    /// if a directory entry exceeds the given buffer length, it should be truncated to the buffer length.
     fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
 
     /// changes the position where writes will occur in this file descriptor, or returns an error if it doesn’t support seeking
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
 
     /// gets information about the file pointed to by this file descriptor
@@ -390,18 +460,22 @@ pub trait FileDescriptor {
 
     /// shrinks or extends the file pointed to by this file descriptor to the given length
     fn truncate(&self, len: u64) -> common::Result<()> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
 
-    /// removes a reference to a file from the filesystem, where it can then be deleted if no processes are using it or if there are no hard links to it
-    fn unlink(&self) -> common::Result<()> {
-        Err(common::Error::InvalidOperation)
+    /// removes a reference to a file in the directory pointed to by this file descriptor from the filesystem,
+    /// where it can then be deleted if no processes are using it or if there are no hard links to it
+    fn unlink(&self, name: &str, flags: common::UnlinkFlags) -> common::Result<()> {
+        Err(Errno::FuncNotSupported)
     }
 
     /// writes data from this buffer to this file descriptor
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        Err(common::Error::InvalidOperation)
+        Err(Errno::FuncNotSupported)
     }
+
+    /// duplicates this file descriptor
+    fn dup(&self) -> common::Result<Box<dyn FileDescriptor>>;
 }
 
 pub struct NamespaceDir {
@@ -412,13 +486,13 @@ pub struct NamespaceDir {
 impl FileDescriptor for NamespaceDir {
     fn open(&self, name: &str, flags: common::OpenFlags) -> common::Result<alloc::boxed::Box<dyn FileDescriptor>> {
         if flags & (common::OpenFlags::Write | common::OpenFlags::Create) != common::OpenFlags::None {
-            return Err(common::Error::ReadOnly);
+            return Err(Errno::ReadOnlyFilesystem);
         }
 
         if let Some(filesystem) = self.namespace.lock().get(name) {
             Ok(filesystem.get_root_dir())
         } else {
-            Err(common::Error::DoesntExist)
+            Err(common::Errno::NoSuchFileOrDir)
         }
     }
 
@@ -448,7 +522,7 @@ impl FileDescriptor for NamespaceDir {
     }
 
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        seek_helper(&self.seek_pos, offset, kind, self.namespace.lock().keys().count().try_into().map_err(|_| common::Error::Overflow)?)
+        seek_helper(&self.seek_pos, offset, kind, self.namespace.lock().keys().count().try_into().map_err(|_| Errno::ValueOverflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
@@ -464,6 +538,13 @@ impl FileDescriptor for NamespaceDir {
             },
             ..Default::default()
         })
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn FileDescriptor>> {
+        Ok(Box::new(Self {
+            namespace: self.namespace.clone(),
+            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
+        }))
     }
 }
 
@@ -507,26 +588,26 @@ pub fn seek_helper(seek_pos: &AtomicUsize, offset: i64, kind: common::SeekKind, 
     match kind {
         common::SeekKind::Current => match offset.cmp(&0) {
             core::cmp::Ordering::Greater => {
-                let val = offset.try_into().map_err(|_| common::Error::Overflow)?;
+                let val = offset.try_into().map_err(|_| Errno::ValueOverflow)?;
                 let old_val = seek_pos.fetch_add(val, core::sync::atomic::Ordering::SeqCst);
-                (old_val + val).try_into().map_err(|_| common::Error::Overflow)
+                (old_val + val).try_into().map_err(|_| Errno::ValueOverflow)
             }
             core::cmp::Ordering::Less => {
-                let val = (-offset).try_into().map_err(|_| common::Error::Overflow)?;
+                let val = (-offset).try_into().map_err(|_| Errno::ValueOverflow)?;
                 let old_val = seek_pos.fetch_sub(val, core::sync::atomic::Ordering::SeqCst);
-                (old_val - val).try_into().map_err(|_| common::Error::Overflow)
+                (old_val - val).try_into().map_err(|_| Errno::ValueOverflow)
             }
-            core::cmp::Ordering::Equal => seek_pos.load(core::sync::atomic::Ordering::SeqCst).try_into().map_err(|_| common::Error::Overflow),
+            core::cmp::Ordering::Equal => seek_pos.load(core::sync::atomic::Ordering::SeqCst).try_into().map_err(|_| Errno::ValueOverflow),
         },
         common::SeekKind::End => {
-            let new_val = (len + offset).try_into().map_err(|_| common::Error::Overflow)?;
+            let new_val = (len + offset).try_into().map_err(|_| Errno::ValueOverflow)?;
             seek_pos.store(new_val, core::sync::atomic::Ordering::SeqCst);
-            new_val.try_into().map_err(|_| common::Error::Overflow)
+            new_val.try_into().map_err(|_| Errno::ValueOverflow)
         }
         common::SeekKind::Set => {
-            let new_val = offset.try_into().map_err(|_| common::Error::Overflow)?;
+            let new_val = offset.try_into().map_err(|_| Errno::ValueOverflow)?;
             seek_pos.store(new_val, core::sync::atomic::Ordering::SeqCst);
-            new_val.try_into().map_err(|_| common::Error::Overflow)
+            new_val.try_into().map_err(|_| Errno::ValueOverflow)
         }
     }
 }
@@ -551,10 +632,6 @@ impl<D: FileDescriptor> FileDescriptor for LockedFileDescriptor<D> {
         self.descriptor.lock().chown(owner, group)
     }
 
-    fn link(&self, source: &dyn FileDescriptor) -> common::Result<()> {
-        self.descriptor.lock().link(source)
-    }
-
     fn open(&self, name: &str, flags: common::OpenFlags) -> common::Result<Box<dyn FileDescriptor>> {
         self.descriptor.lock().open(name, flags)
     }
@@ -575,12 +652,16 @@ impl<D: FileDescriptor> FileDescriptor for LockedFileDescriptor<D> {
         self.descriptor.lock().truncate(len)
     }
 
-    fn unlink(&self) -> common::Result<()> {
-        self.descriptor.lock().unlink()
+    fn unlink(&self, name: &str, flags: common::UnlinkFlags) -> common::Result<()> {
+        self.descriptor.lock().unlink(name, flags)
     }
 
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
         self.descriptor.lock().write(buf)
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn FileDescriptor>> {
+        Err(Errno::FuncNotSupported)
     }
 }
 
@@ -597,42 +678,42 @@ impl FDLookup {
 
 impl FileDescriptor for FDLookup {
     fn chmod(&self, permissions: common::Permissions) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.chmod(permissions)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.chmod(permissions)
     }
 
     fn chown(&self, owner: Option<common::UserId>, group: Option<common::GroupId>) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.chown(owner, group)
-    }
-
-    fn link(&self, source: &dyn FileDescriptor) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.link(source)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.chown(owner, group)
     }
 
     fn open(&self, name: &str, flags: common::OpenFlags) -> common::Result<Box<dyn FileDescriptor>> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.open(name, flags)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.open(name, flags)
     }
 
     fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.read(buf)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.read(buf)
     }
 
     fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.seek(offset, kind)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.seek(offset, kind)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.stat()
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.stat()
     }
 
     fn truncate(&self, len: u64) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.truncate(len)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.truncate(len)
     }
 
-    fn unlink(&self) -> common::Result<()> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.unlink()
+    fn unlink(&self, name: &str, flags: common::UnlinkFlags) -> common::Result<()> {
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.unlink(name, flags)
     }
 
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        self.file_descriptors.lock().get(self.file_descriptor).ok_or(common::Error::BadFileDescriptor)?.write(buf)
+        self.file_descriptors.lock().get(self.file_descriptor).ok_or(Errno::NoSuchProcess)?.write(buf)
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn FileDescriptor>> {
+        Err(Errno::FuncNotSupported)
     }
 }

@@ -1,5 +1,8 @@
 #![no_std]
 
+mod errno;
+pub use errno::Errno;
+
 use bitmask_enum::bitmask;
 use num_enum::TryFromPrimitive;
 
@@ -8,8 +11,22 @@ use num_enum::TryFromPrimitive;
 pub enum Syscalls {
     IsComputerOn,
     Exit,
+    Chmod,
+    Chown,
+    Chroot,
+    Close,
+    Dup,
+    Dup2,
+    Open,
+    Read,
+    Seek,
+    Stat,
+    Truncate,
+    Unlink,
+    Write,
 }
 
+/// flags passed to the open() syscall
 #[derive(Default)]
 #[bitmask(u32)]
 pub enum OpenFlags {
@@ -62,22 +79,7 @@ pub enum OpenFlags {
     None = 0,
 }
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
-#[repr(u32)]
-pub enum Error {
-    CantRead,
-    CantOpen,
-    Overflow,
-    ReadOnly,
-    DoesntExist,
-    NotDirectory,
-    InvalidOperation,
-    BadInput,
-    BadFileDescriptor,
-    AllocError,
-}
-
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Errno>;
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(u32)]
@@ -244,4 +246,18 @@ pub enum FileKind {
 
     /// shared memory
     SharedMemory,
+}
+
+/// flags passed to the unlink() syscall
+#[derive(Default)]
+#[bitmask(u32)]
+pub enum UnlinkFlags {
+    /// AT_REMOVEDIR
+    RemoveDir = 1 << 0,
+
+    /// AT_FDCWD
+    AtCWD = 1 << 1,
+
+    #[default]
+    None = 0,
 }

@@ -245,9 +245,13 @@ impl<T> ConsistentIndexArray<T> {
 
     pub fn add(&mut self, item: T) -> Result<usize, alloc::collections::TryReserveError> {
         let index = self.bit_set.first_unset();
+        self.set(index, item)?;
+        Ok(index)
+    }
 
+    pub fn set(&mut self, index: usize, item: T) -> Result<(), alloc::collections::TryReserveError> {
         if index >= self.array.len() {
-            self.array.try_reserve(self.array.len() - index + 1)?;
+            self.array.try_reserve(self.array.len() - index)?;
 
             while index >= self.array.len() {
                 self.array.push(None);
@@ -257,38 +261,30 @@ impl<T> ConsistentIndexArray<T> {
         self.array[index] = Some(item);
         self.bit_set.set(index);
 
-        Ok(index + 1)
+        Ok(())
     }
 
     pub fn get(&self, index: usize) -> Option<&T> {
-        if index == 0 {
-            None
-        } else {
-            self.array.get(index - 1).and_then(|i| i.as_ref())
-        }
+        self.array.get(index).and_then(|i| i.as_ref())
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if index == 0 {
-            None
-        } else {
-            self.array.get_mut(index - 1).and_then(|i| i.as_mut())
-        }
+        self.array.get_mut(index).and_then(|i| i.as_mut())
     }
 
-    pub fn remove(&mut self, index: usize) {
-        if index > 0 {
-            let index = index - 1;
+    pub fn remove(&mut self, index: usize) -> Option<T> {
+        let mut item = None;
 
-            if index < self.array.len() {
-                self.array[index] = None;
-                self.bit_set.clear(index);
-            }
-
-            while !self.array.is_empty() && self.array[self.array.len() - 1].is_none() {
-                self.array.pop();
-            }
+        if index < self.array.len() {
+            item = self.array[index].take();
+            self.bit_set.clear(index);
         }
+
+        while !self.array.is_empty() && self.array[self.array.len() - 1].is_none() {
+            self.array.pop();
+        }
+
+        item
     }
 
     pub fn clear(&mut self) {

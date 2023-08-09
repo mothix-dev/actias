@@ -76,13 +76,19 @@ impl Log for Logger {
 
             let level = record.level();
             let width = 5;
+            let target = record.target();
             let args = record.args();
 
+            write!(&mut SerialWriter, "{level:width$} ");
             if let Some(path) = record.module_path() {
-                writeln!(&mut SerialWriter, "{level:width$} [{path}] {args}");
+                if target != path {
+                    write!(&mut SerialWriter, "({target}) ");
+                }
+                write!(&mut SerialWriter, "[{path}] ");
             } else {
-                writeln!(&mut SerialWriter, "{level:width$} [?] {args}");
+                write!(&mut SerialWriter, "[?] ({target}) ");
             }
+            writeln!(&mut SerialWriter, "{args}");
 
             /*if has_lock {
                 // release lock

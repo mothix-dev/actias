@@ -1,5 +1,5 @@
 use alloc::{boxed::Box, vec::Vec};
-use common::{OpenFlags, Permissions};
+use common::{Errno, OpenFlags, Permissions};
 use core::sync::atomic::AtomicUsize;
 use log::debug;
 
@@ -28,12 +28,12 @@ macro_rules! make_sysfs {
         impl super::FileDescriptor for SysFsRoot {
             fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
-                    return Err(common::Error::ReadOnly);
+                    return Err(Errno::ReadOnlyFilesystem);
                 }
 
                 match name {
                     $($name => Ok(Box::new($type::new())),),*
-                    _ => Err(common::Error::DoesntExist),
+                    _ => Err(Errno::NoSuchFileOrDir),
                 }
             }
 
@@ -61,7 +61,7 @@ macro_rules! make_sysfs {
             }
 
             fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-                super::seek_helper(&self.seek_pos, offset, kind, SYS_FS_FILES.len().try_into().map_err(|_| common::Error::Overflow)?)
+                super::seek_helper(&self.seek_pos, offset, kind, SYS_FS_FILES.len().try_into().map_err(|_| Errno::ValueOverflow)?)
             }
 
             fn stat(&self) -> common::Result<common::FileStat> {
@@ -77,6 +77,10 @@ macro_rules! make_sysfs {
                     },
                     ..Default::default()
                 })
+            }
+
+            fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
+                Ok(Box::new(Self { seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)) }))
             }
         }
     };
@@ -107,7 +111,11 @@ impl super::FileDescriptor for Debug {
     }
 
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        debug!("{}", core::str::from_utf8(buf).map_err(|_| common::Error::BadInput)?);
+        debug!(target: "sysfs/debug", "{}", core::str::from_utf8(buf).map_err(|_| Errno::InvalidArgument)?);
         Ok(buf.len())
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
+        Ok(Box::new(Self))
     }
 }

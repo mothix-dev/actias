@@ -243,9 +243,6 @@ pub fn kmain() {
     manager.register(0x80, move |regs| {
         crate::syscalls::syscall_handler(regs, regs.eax, regs.ebx as usize, regs.ecx as usize, regs.edx as usize, regs.edi as usize)
     });
-    manager.register(0x81, move |_| {
-        info!("test message");
-    });
 
     manager.load_handlers();
 
@@ -316,15 +313,25 @@ pub fn kmain() {
 
         if err != 0 {
             loop {
+                let message = "error!";
+                let syscall_num = common::Syscalls::Write as u32;
+                let fd = 1;
+                let buf = message.as_bytes().as_ptr();
+                let buf_len = message.as_bytes().len();
                 unsafe {
-                    asm!("int 0x81");
+                    asm!("int 0x80", in("eax") syscall_num, in("ebx") fd, in("ecx") buf, in("edx") buf_len);
                 }
             }
         }
 
         if ok == 1 {
+            let message = "computer is on!";
+            let syscall_num = common::Syscalls::Write as u32;
+            let fd = 1;
+            let buf = message.as_bytes().as_ptr();
+            let buf_len = message.as_bytes().len();
             unsafe {
-                asm!("int 0x81");
+                asm!("int 0x80", in("eax") syscall_num, in("ebx") fd, in("ecx") buf, in("edx") buf_len);
             }
         }
 
@@ -333,8 +340,13 @@ pub fn kmain() {
             asm!("int 0x80", in("eax") syscall_num);
         }
 
+        let message = "not supposed to be here";
+        let syscall_num = common::Syscalls::Write as u32;
+        let fd = 1;
+        let buf = message.as_bytes().as_ptr();
+        let buf_len = message.as_bytes().len();
         unsafe {
-            asm!("int 0x81");
+            asm!("int 0x80", in("eax") syscall_num, in("ebx") fd, in("ecx") buf, in("edx") buf_len);
         }
 
         #[allow(clippy::empty_loop)]
@@ -379,17 +391,21 @@ pub fn kmain() {
         environment.namespace.lock().insert("initrd".to_string(), alloc::boxed::Box::new(filesystem));
     }
 
-    // write test
-    let fd = environment.open(0, "initrd/test6", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
-    environment.write(fd, "UwU OwO".as_bytes()).unwrap();
-    environment.close(fd);
-
     // read test
     let fd = environment.open(0, "initrd/test3.txt", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
     let mut buf = [0; 256];
     let bytes_read = environment.read(fd, &mut buf).unwrap();
     debug!("file contains {:?}", core::str::from_utf8(&buf[..bytes_read]).unwrap());
-    environment.close(fd);
+    environment.close(fd).unwrap();
+
+    // write test
+    let fd = environment.open(0, "initrd/test6", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
+    environment.write(fd, "UwU OwO".as_bytes()).unwrap();
+    environment.dup2(fd, 1).unwrap();
+    if fd != 1 {
+        environment.close(fd).unwrap();
+    }
+    debug!("fd is {fd}");
 
     // readdir test
     let fd = environment
@@ -403,7 +419,9 @@ pub fn kmain() {
         }
         debug!("read dir entry {:?}", core::str::from_utf8(&buf[4..bytes_read - 1]).unwrap());
     }
-    environment.close(fd);
+    environment.close(fd).unwrap();
+
+    let _ = environment.write(1, "fd 1 is still open!".as_bytes());
 
     use crate::fs::Filesystem;
     crate::fs::print_tree(&environment.get_root_dir());
