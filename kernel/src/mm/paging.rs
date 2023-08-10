@@ -12,6 +12,7 @@ pub enum PagingError {
     BadFrame,
     BadAddress,
     Invalid,
+    IOError,
 }
 
 impl core::fmt::Debug for PagingError {
@@ -24,6 +25,7 @@ impl core::fmt::Debug for PagingError {
             Self::BadFrame => "bad frame",
             Self::BadAddress => "address not mapped",
             Self::Invalid => "invalid request",
+            Self::IOError => "input/output error",
         })
     }
 }

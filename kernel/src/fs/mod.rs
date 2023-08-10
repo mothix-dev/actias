@@ -1,3 +1,4 @@
+pub mod proc;
 pub mod sys;
 pub mod tar;
 
@@ -5,6 +6,7 @@ use crate::array::ConsistentIndexArray;
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
+    format,
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
@@ -39,6 +41,7 @@ impl FsEnvironment {
                 seek_pos: AtomicUsize::new(0),
             }),
             path: Vec::new(),
+            name: "..".to_string(),
             flags: common::OpenFlags::all(),
         }));
         Self {
@@ -48,6 +51,13 @@ impl FsEnvironment {
             fs_list,
             file_descriptors: Arc::new(Mutex::new(ConsistentIndexArray::new())),
         }
+    }
+
+    pub fn get_fs_list(&self) -> Box<dyn FileDescriptor> {
+        Box::new(NamespaceDir {
+            namespace: self.namespace.clone(),
+            seek_pos: AtomicUsize::new(0),
+        })
     }
 
     /// implements POSIX fchmod()
@@ -135,7 +145,7 @@ impl FsEnvironment {
                                 split = path.iter().chain(Some(&name)).enumerate();
                             } else {
                                 last_fd = Box::new(LockedFileDescriptor::new(self.root.clone()));
-                                absolute_path = Some(concat_slices(&root.path, &path));
+                                absolute_path = Some(concat_slices(&root.path, &root.name, &path));
 
                                 drop(split);
                                 path = new_path;
@@ -157,7 +167,7 @@ impl FsEnvironment {
                                 name = path.pop().unwrap_or_default();
                                 split = path.iter().chain(Some(&name)).enumerate();
                             } else {
-                                absolute_path = Some(concat_slices(container_path, &path));
+                                absolute_path = Some(concat_slices(container_path, component, &path));
 
                                 drop(split);
                                 path = new_path;
@@ -198,7 +208,7 @@ impl FsEnvironment {
                     self.resolve_internal(Box::new(LockedFileDescriptor::new(self.fs_list.clone())), path, None, name, no_follow)
                 } else {
                     // simplified path resolves from root
-                    let new_path = concat_slices(&root.path, &path);
+                    let new_path = concat_slices(&root.path, &root.name, &path);
                     drop(root);
                     self.resolve_internal(Box::new(LockedFileDescriptor::new(self.root.clone())), path, Some(new_path), name, no_follow)
                 }
@@ -216,7 +226,7 @@ impl FsEnvironment {
                         self.resolve_internal(Box::new(LockedFileDescriptor::new(self.fs_list.clone())), path, None, name, no_follow)
                     } else {
                         // simplified path resolves from cwd
-                        let new_path = concat_slices(&cwd.path, &path);
+                        let new_path = concat_slices(&cwd.path, &cwd.name, &path);
                         drop(cwd);
                         self.resolve_internal(Box::new(LockedFileDescriptor::new(self.cwd.clone())), path, Some(new_path), name, no_follow)
                     }
@@ -232,7 +242,7 @@ impl FsEnvironment {
                         self.resolve_internal(Box::new(LockedFileDescriptor::new(self.fs_list.clone())), path, None, name, no_follow)
                     } else {
                         // simplified path resolves from the given file descriptor
-                        let new_path = concat_slices(&fd.path, &path);
+                        let new_path = concat_slices(&fd.path, &fd.name, &path);
                         drop(file_descriptors);
                         self.resolve_internal(Box::new(FDLookup::new(self.file_descriptors.clone(), at)), path, Some(new_path), name, no_follow)
                     }
@@ -254,6 +264,7 @@ impl FsEnvironment {
         let open_file = OpenFile {
             descriptor: result.container.open(&result.name, flags & !(common::OpenFlags::CloseOnExec | common::OpenFlags::AtCWD))?,
             path: result.path,
+            name: result.name,
             flags,
         };
 
@@ -320,12 +331,43 @@ impl FsEnvironment {
     pub fn exec(&self, file_descriptor: usize) -> common::Result<(crate::mm::ProcessMap, usize)> {
         crate::exec::exec(self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?)
     }
+
+    fn get_path_to(&self, open_file: &OpenFile) -> String {
+        let root = self.root.lock();
+        //debug!("root path is {:?}, root name is {:?}, open_file path is {:?}", root.path, root.name, open_file.path);
+
+        // try to format the path relative to the root path if possible
+        for (index, name) in root.path.iter().chain(Some(&root.name)).enumerate() {
+            if open_file.path.get(index) != Some(name) {
+                if open_file.path.is_empty() && open_file.name == ".." {
+                    return "/..".to_string();
+                } else {
+                    let joined = open_file.path.join("/");
+                    return format!("/../{joined}{}{}", if joined.is_empty() { "" } else { "/" }, open_file.name);
+                }
+            }
+        }
+
+        let joined = open_file.path[root.path.len() + 1..].join("/");
+        format!("/{joined}{}{}", if joined.is_empty() { "" } else { "/" }, open_file.name)
+    }
+
+    /// gets the path to the current working directory of the current process
+    pub fn get_cwd_path(&self) -> String {
+        self.get_path_to(&self.cwd.lock())
+    }
+
+    /// gets the path of the file pointed to by the given file descriptor
+    pub fn get_path(&self, file_descriptor: usize) -> common::Result<String> {
+        Ok(self.get_path_to(self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?))
+    }
 }
 
-fn concat_slices(a: &[String], b: &[String]) -> Vec<String> {
+fn concat_slices(a: &[String], b: &str, c: &[String]) -> Vec<String> {
     let mut new_vec = a.to_vec();
-    new_vec.reserve_exact(b.len());
-    new_vec.extend_from_slice(b);
+    new_vec.reserve_exact(c.len() + 1);
+    new_vec.push(b.to_string());
+    new_vec.extend_from_slice(c);
     new_vec
 }
 
@@ -348,6 +390,7 @@ impl Default for FsEnvironment {
 struct OpenFile {
     descriptor: Box<dyn FileDescriptor>,
     path: Vec<String>,
+    name: String,
     flags: common::OpenFlags,
 }
 
@@ -356,6 +399,7 @@ impl OpenFile {
         Ok(Self {
             descriptor: self.descriptor.dup()?,
             path: self.path.clone(),
+            name: self.name.clone(),
             flags: self.flags,
         })
     }

@@ -233,6 +233,7 @@ impl VecBitSet {
 pub struct ConsistentIndexArray<T> {
     array: Vec<Option<T>>,
     bit_set: VecBitSet,
+    max_index: usize,
 }
 
 impl<T> ConsistentIndexArray<T> {
@@ -240,6 +241,7 @@ impl<T> ConsistentIndexArray<T> {
         Self {
             array: Vec::new(),
             bit_set: VecBitSet::new(),
+            max_index: 0,
         }
     }
 
@@ -260,6 +262,9 @@ impl<T> ConsistentIndexArray<T> {
 
         self.array[index] = Some(item);
         self.bit_set.set(index);
+        if index > self.max_index {
+            self.max_index = index;
+        }
 
         Ok(())
     }
@@ -283,6 +288,9 @@ impl<T> ConsistentIndexArray<T> {
         while !self.array.is_empty() && self.array[self.array.len() - 1].is_none() {
             self.array.pop();
         }
+        if self.max_index == index {
+            self.max_index = self.array.len();
+        }
 
         item
     }
@@ -290,10 +298,23 @@ impl<T> ConsistentIndexArray<T> {
     pub fn clear(&mut self) {
         self.bit_set.clear_all();
         self.array.clear();
+        self.max_index = 0;
     }
 
     pub fn num_entries(&self) -> usize {
         self.bit_set.bits_used
+    }
+
+    pub fn contains(&self, index: usize) -> bool {
+        self.bit_set.test(index)
+    }
+
+    pub fn iter<'a>(&'a self) -> core::iter::FilterMap<core::slice::Iter<'a, Option<T>>, impl FnMut(&'a Option<T>) -> Option<&'a T>> {
+        self.array.iter().filter_map(move |item| item.as_ref())
+    }
+
+    pub fn max_index(&self) -> usize {
+        self.max_index
     }
 }
 

@@ -28,20 +28,29 @@ pub fn exec(descriptor: &dyn crate::fs::FileDescriptor) -> common::Result<(crate
     for header in headers.iter() {
         match header.p_type {
             goblin::elf::program_header::PT_LOAD => {
+                debug!("{header:?}");
+
+                // align virtual address to specified alignment
+                let offset = header.p_vaddr % header.p_align;
+                let base_addr = header.p_vaddr - offset;
+                let file_offset = header.p_offset - offset;
+                let region_len = header.p_memsz + offset;
+
+                // create mapping
                 let mapping = crate::mm::Mapping::new(
                     if header.p_filesz == 0 {
                         crate::mm::MappingKind::Anonymous
                     } else {
                         crate::mm::MappingKind::FileCopy {
                             file_descriptor: descriptor.dup()?,
-                            offset: header.p_offset as i64,
-                            len: header.p_filesz as usize,
+                            file_offset: file_offset.try_into().map_err(|_| Errno::ValueOverflow)?,
                         }
                     },
-                    crate::mm::ContiguousRegion::new(header.p_vaddr as usize, header.p_memsz as usize),
+                    crate::mm::ContiguousRegion::new(base_addr.try_into().map_err(|_| Errno::ValueOverflow)?, region_len.try_into().map_err(|_| Errno::ValueOverflow)?),
                     crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
                 );
-                map.map(mapping, false);
+
+                map.add_mapping(mapping, false, true)?;
             }
             goblin::elf::program_header::PT_INTERP => return Err(Errno::ExecutableFormatErr),
             _ => (),

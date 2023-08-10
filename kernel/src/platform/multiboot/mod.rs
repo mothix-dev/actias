@@ -300,6 +300,7 @@ pub fn kmain() {
 
     let mut environment = crate::fs::FsEnvironment::new();
     environment.namespace.lock().insert("sysfs".to_string(), alloc::boxed::Box::new(crate::fs::sys::SysFs));
+    environment.namespace.lock().insert("procfs".to_string(), alloc::boxed::Box::new(crate::fs::proc::ProcFs));
 
     if let Some(region) = initrd_region {
         let filesystem = crate::fs::tar::TarFilesystem::new(region);
@@ -307,9 +308,6 @@ pub fn kmain() {
         let fd = environment.open(0, "/../initrd", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
         environment.chroot(fd).unwrap();
     }
-
-    use crate::fs::Filesystem;
-    crate::fs::print_tree(&environment.get_root_dir());
 
     let fd = environment.open(0, "/../sysfs/debug", common::OpenFlags::Write | common::OpenFlags::AtCWD).unwrap();
     environment.dup2(fd, 1).unwrap();
@@ -323,22 +321,26 @@ pub fn kmain() {
     let stack_size = 0x1000 * 4;
     let split_addr = crate::arch::PROPERTIES.kernel_region.base;
 
-    /*map.map(
+    map.add_mapping(
         crate::mm::Mapping::new(
             crate::mm::MappingKind::Anonymous,
             crate::mm::ContiguousRegion::new(split_addr - stack_size * 2, stack_size + stack_size / 2),
             crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
         ),
         false,
-    );*/
-    map.map(
+        true,
+    )
+    .unwrap();
+    map.add_mapping(
         crate::mm::Mapping::new(
             crate::mm::MappingKind::Anonymous,
             crate::mm::ContiguousRegion::new(split_addr - stack_size, stack_size),
-            /*crate::mm::MemoryProtection::Read | */ crate::mm::MemoryProtection::Write,
+            crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
         ),
         false,
-    );
+        true,
+    )
+    .unwrap();
 
     let memory_map_a = Arc::new(Mutex::new(map));
     let task_a = Arc::new(Mutex::new(crate::sched::Task {
@@ -356,11 +358,13 @@ pub fn kmain() {
         .insert(crate::process::Process {
             threads: spin::RwLock::new(vec![task_a.clone()]),
             memory_map: memory_map_a,
-            environment,
+            environment: environment.clone(),
         })
         .unwrap();
     task_a.lock().pid = Some(pid_a);
     scheduler.push_task(task_a);
+
+    crate::fs::print_tree(&environment.get_fs_list());
 
     crate::get_global_state().cpus.read()[0].start_context_switching();
 }

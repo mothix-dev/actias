@@ -1,6 +1,6 @@
 use crate::{arch::bsp::RegisterContext, mm::PageDirectory};
 use common::Syscalls;
-use log::error;
+use log::{error, trace};
 
 pub type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
 
@@ -54,6 +54,8 @@ fn exit_process(registers: &mut Registers, code: usize) {
     };
 
     if let Some(pid) = pid && let Some(process) = global_state.process_table.read().get(pid) {
+        trace!("exiting process {pid}");
+
         // ensure threads won't be scheduled again
         for thread in process.threads.read().iter() {
             thread.lock().is_valid = false;

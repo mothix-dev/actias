@@ -23,7 +23,7 @@ macro_rules! count {
 
 macro_rules! make_sysfs {
     ( $($name:tt => $type:ident),+ $(,)? ) => {
-        const SYS_FS_FILES: [&'static str; count!($($name),*)] = [$($name),*];
+        const SYS_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
 
         impl super::FileDescriptor for SysFsRoot {
             fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {

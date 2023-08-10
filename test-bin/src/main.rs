@@ -53,7 +53,7 @@ pub extern "C" fn _start() {
 }
 
 #[panic_handler]
-pub fn panic_implementation(info: &core::panic::PanicInfo) -> ! {
+pub fn panic_implementation(_info: &core::panic::PanicInfo) -> ! {
     write_message("panic!");
 
     let syscall_num = common::Syscalls::Exit as u32;

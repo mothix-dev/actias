@@ -95,6 +95,16 @@ impl ProcessTable {
     pub fn iter_mut(&mut self) -> alloc::collections::btree_map::IterMut<'_, usize, Process> {
         self.process_map.iter_mut()
     }
+
+    /// gets the PID limit
+    pub fn max_pid(&self) -> usize {
+        self.max_pid
+    }
+
+    /// checks whether the given pid exists in the table
+    pub fn contains(&self, pid: usize) -> bool {
+        self.used_map.test(pid)
+    }
 }
 
 pub struct Process {
