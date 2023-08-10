@@ -290,12 +290,14 @@ impl Scheduler {
 
     /// figures out whether or not a task is currently running based on registers
     pub fn is_running_task(&self, registers: &Registers) -> bool {
-        let stack_pointer = registers.stack_pointer() as *const u8;
-        if stack_pointer as usize >= PROPERTIES.kernel_region.base && stack_pointer as usize - PROPERTIES.kernel_region.base < PROPERTIES.kernel_region.length {
-            let wait_around_stack = self.wait_around_stack.lock();
+        let instruction_pointer = registers.instruction_pointer() as *const u8;
+        if instruction_pointer as usize >= PROPERTIES.kernel_region.base && instruction_pointer as usize - PROPERTIES.kernel_region.base < PROPERTIES.kernel_region.length {
+            /*let wait_around_stack = self.wait_around_stack.lock();
+            let stack_pointer = registers.stack_pointer() as *const u8;
 
             // make sure we're not in the waiting around stack, since that's in the kernel area but shouldn't be treated as part of the kernel
-            stack_pointer >= &wait_around_stack[0] && stack_pointer <= &wait_around_stack[wait_around_stack.len() - 1]
+            stack_pointer >= &wait_around_stack[0] && stack_pointer <= &wait_around_stack[wait_around_stack.len() - 1]*/
+            false
         } else {
             true
         }

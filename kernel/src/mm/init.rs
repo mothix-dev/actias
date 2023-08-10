@@ -328,7 +328,7 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(
                 None::<&crate::arch::PageDirectory>,
                 addr,
                 Some(super::PageFrame {
-                    addr: manager.alloc_frame().expect("couldn't allocate memory for kernel heap"),
+                    addr: manager.alloc_frame(None).expect("couldn't allocate memory for kernel heap"),
                     present: true,
                     writable: true,
                     ..Default::default()

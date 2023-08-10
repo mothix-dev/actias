@@ -73,7 +73,6 @@ impl From<PageTableEntry> for PageFrame {
             writable: flags & PageTableFlags::ReadWrite.bits > 0,
             copy_on_write: flags & PageTableFlags::CopyOnWrite.bits > 0,
             executable: true,
-            referenced: flags & PageTableFlags::Referenced.bits > 0,
         }
     }
 }
@@ -98,10 +97,6 @@ impl TryFrom<PageFrame> for PageTableEntry {
 
         if frame.copy_on_write {
             flags |= PageTableFlags::CopyOnWrite;
-        }
-
-        if frame.referenced {
-            flags |= PageTableFlags::Referenced;
         }
 
         Ok(PageTableEntry::new(frame.addr, flags))
@@ -160,9 +155,6 @@ enum PageTableFlags {
 
     /// if this bit is set and the writable bit is not, the page will be copied into a new page when written to
     CopyOnWrite = 1 << 9,
-
-    /// signifies that this page may have more than one reference and should be cleaned up with the reference counter
-    Referenced = 1 << 10,
 }
 
 impl fmt::Display for PageTableFlags {
@@ -211,10 +203,6 @@ impl fmt::Display for PageTableFlags {
 
         if (*self & Self::CopyOnWrite).bits() > 0 {
             write!(f, ", copy on write")?;
-        }
-
-        if (*self & Self::Referenced).bits() > 0 {
-            write!(f, ", reference counted")?;
         }
 
         write!(f, " }}")

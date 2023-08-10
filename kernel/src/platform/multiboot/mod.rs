@@ -226,6 +226,7 @@ pub fn kmain() {
     });
     manager.register(crate::arch::interrupts::Exceptions::PageFault as usize, |regs| {
         let fault_addr = unsafe { x86::controlregs::cr2() };
+        let error_code = crate::arch::interrupts::PageFaultErrorCode::from(regs.error_code);
 
         let global_state = crate::get_global_state();
         let scheduler = global_state.cpus.read()[0].scheduler.clone();
@@ -233,7 +234,11 @@ pub fn kmain() {
         if scheduler.is_running_task(regs) {
             if let Some(task) = scheduler.get_current_task() {
                 let mut task = task.lock();
-                if !task.memory_map.lock().page_fault(fault_addr, crate::arch::interrupts::PageFaultErrorCode::from(regs.error_code).into()) {
+                if !task
+                    .memory_map
+                    .lock()
+                    .page_fault(&task.memory_map, fault_addr, error_code.into())
+                {
                     debug!("page fault in process {}", task.pid.unwrap_or_default());
                     task.is_valid = false;
                     scheduler.context_switch(regs, scheduler.clone(), false);
@@ -245,7 +250,7 @@ pub fn kmain() {
             unsafe {
                 asm!("cli");
             }
-            error!("page fault @ {fault_addr:#x} in kernel mode");
+            error!("page fault @ {fault_addr:#x} in kernel mode: {error_code}");
             info!("register dump: {regs:#?}");
             panic!("exception in kernel mode");
         }
@@ -316,40 +321,44 @@ pub fn kmain() {
     }
 
     let fd = environment.open(0, "/init", common::OpenFlags::Read | common::OpenFlags::AtCWD).unwrap();
-    let (mut map, entry) = environment.exec(fd).unwrap();
+    let (arc_map, entry) = environment.exec(fd).unwrap();
 
     let stack_size = 0x1000 * 4;
     let split_addr = crate::arch::PROPERTIES.kernel_region.base;
 
-    map.add_mapping(
-        crate::mm::Mapping::new(
-            crate::mm::MappingKind::Anonymous,
-            crate::mm::ContiguousRegion::new(split_addr - stack_size * 2, stack_size + stack_size / 2),
-            crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
-        ),
-        false,
-        true,
-    )
-    .unwrap();
-    map.add_mapping(
-        crate::mm::Mapping::new(
-            crate::mm::MappingKind::Anonymous,
-            crate::mm::ContiguousRegion::new(split_addr - stack_size, stack_size),
-            crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
-        ),
-        false,
-        true,
-    )
-    .unwrap();
+    {
+        let mut map = arc_map.lock();
+        map.add_mapping(
+            &arc_map,
+            crate::mm::Mapping::new(
+                crate::mm::MappingKind::Anonymous,
+                crate::mm::ContiguousRegion::new(split_addr - stack_size, stack_size),
+                crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
+            ),
+            false,
+            true,
+        )
+        .unwrap();
+        map.add_mapping(
+            &arc_map,
+            crate::mm::Mapping::new(
+                crate::mm::MappingKind::Anonymous,
+                crate::mm::ContiguousRegion::new(split_addr - stack_size * 2, stack_size + stack_size / 2),
+                crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
+            ),
+            false,
+            true,
+        )
+        .unwrap();
+    }
 
-    let memory_map_a = Arc::new(Mutex::new(map));
     let task_a = Arc::new(Mutex::new(crate::sched::Task {
         is_valid: true,
         registers: InterruptRegisters::from_fn(entry as *const _, stack_ptr, true),
         niceness: 0,
         exec_mode: crate::sched::ExecMode::Running,
         cpu_time: 0,
-        memory_map: memory_map_a.clone(),
+        memory_map: arc_map.clone(),
         pid: None,
     }));
     let pid_a = global_state
@@ -357,7 +366,7 @@ pub fn kmain() {
         .write()
         .insert(crate::process::Process {
             threads: spin::RwLock::new(vec![task_a.clone()]),
-            memory_map: memory_map_a,
+            memory_map: arc_map,
             environment: environment.clone(),
         })
         .unwrap();

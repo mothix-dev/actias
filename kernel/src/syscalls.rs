@@ -23,6 +23,7 @@ pub fn syscall_handler(registers: &mut Registers, num: u32, arg0: usize, arg1: u
         Ok(Syscalls::Truncate) => registers.syscall_return(truncate(arg0, arg1).map(|_| 0).map_err(|e| e as usize)),
         Ok(Syscalls::Unlink) => registers.syscall_return(unlink(arg0, arg1, arg2, arg3).map(|_| 0).map_err(|e| e as usize)),
         Ok(Syscalls::Write) => registers.syscall_return(write(arg0, arg1, arg2).map_err(|e| e as usize)),
+        Ok(Syscalls::Fork) => todo!(),
         Err(err) => error!("invalid syscall {num} ({err})"),
     }
 }

@@ -1,13 +1,19 @@
 use core::ptr::NonNull;
 
 use crate::{arch::PhysicalAddress, array::BitSet};
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+use common::Errno;
 use log::{debug, trace};
+use spin::Mutex;
 
 /// an error that can be returned from paging operations
 pub enum PagingError {
     NoAvailableFrames,
-    FrameUnused,
-    FrameInUse,
     AllocError,
     BadFrame,
     BadAddress,
@@ -19,14 +25,23 @@ impl core::fmt::Debug for PagingError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(f, "{}", match self {
             Self::NoAvailableFrames => "no available frames (out of memory)",
-            Self::FrameUnused => "frame is unused",
-            Self::FrameInUse => "frame already in use",
             Self::AllocError => "error allocating memory",
             Self::BadFrame => "bad frame",
             Self::BadAddress => "address not mapped",
             Self::Invalid => "invalid request",
             Self::IOError => "input/output error",
         })
+    }
+}
+
+impl From<PagingError> for Errno {
+    fn from(value: PagingError) -> Self {
+        match value {
+            PagingError::NoAvailableFrames | PagingError::AllocError => Errno::OutOfMemory,
+            PagingError::Invalid | PagingError::BadFrame => Errno::InvalidArgument,
+            PagingError::BadAddress => Errno::BadAddress,
+            PagingError::IOError => Errno::IOError,
+        }
     }
 }
 
@@ -39,10 +54,13 @@ pub struct PageManager {
     pub frame_set: BitSet,
 
     /// the page size of this page manager
-    pub page_size: usize,
+    page_size: usize,
 
     /// how many pages in this page manager are reserved and inaccessible
     pub num_reserved: usize,
+
+    /// stores references to page frames to allow for them to be shared and mapped out
+    frame_references: BTreeMap<PhysicalAddress, Vec<FrameReference>>,
 }
 
 impl PageManager {
@@ -57,15 +75,21 @@ impl PageManager {
             frame_set,
             page_size,
             num_reserved: 0,
+            frame_references: BTreeMap::new(),
         }
     }
 
     /// allocates a frame in memory, returning its physical address without assigning it to any page directories
-    pub fn alloc_frame(&mut self) -> Result<PhysicalAddress, PagingError> {
+    pub fn alloc_frame(&mut self, reference: Option<FrameReference>) -> Result<PhysicalAddress, PagingError> {
         if let Some(idx) = self.frame_set.first_unset() {
             self.frame_set.set(idx);
 
-            Ok(idx as PhysicalAddress * self.page_size as PhysicalAddress)
+            let addr = idx as PhysicalAddress * self.page_size as PhysicalAddress;
+            if let Some(reference) = reference {
+                self.add_reference(addr, reference);
+            }
+
+            Ok(addr)
         } else {
             Err(PagingError::NoAvailableFrames)
         }
@@ -76,12 +100,11 @@ impl PageManager {
         self.frame_set.first_unset().map(|i| (i as PhysicalAddress) * (self.page_size as PhysicalAddress))
     }
 
-    /// sets a frame in our list of frames as used, preventing it from being allocated elsewhere
+    /// sets a frame in the list of frames as used, preventing it from being allocated elsewhere
     ///
     /// # Arguments
     ///
-    /// * `dir` - a page table, used to get page size
-    /// * `addr` - the address of the frame
+    /// * `addr` - the physical address of the frame
     pub fn set_frame_used(&mut self, addr: PhysicalAddress) {
         assert!(addr % self.page_size as PhysicalAddress == 0, "frame address is not page aligned");
 
@@ -92,16 +115,27 @@ impl PageManager {
         trace!("first_unset is now {:?}", self.frame_set.first_unset());
     }
 
-    /// sets a frame in our list of frames as free, allowing it to be allocated elsewhere
+    /// sets a frame in the list of frames as free if it has no more references, allowing it to be allocated elsewhere
     ///
     /// # Arguments
     ///
-    /// * `dir` - a page table, used to get page size
-    /// * `addr` - the address of the frame
-    pub fn free_frame(&mut self, addr: PhysicalAddress) {
+    /// * `addr` - the physical address of the frame
+    /// * `map` - a reference to which memory map references this frame, if any
+    pub fn free_frame(&mut self, addr: PhysicalAddress, map: Option<&Mutex<super::ProcessMap>>) {
         assert!(addr % self.page_size as PhysicalAddress == 0, "frame address is not page aligned");
+        let mut should_free = true;
 
-        self.frame_set.clear((addr / self.page_size as PhysicalAddress).try_into().unwrap());
+        if let Some(list) = self.frame_references.get_mut(&addr) {
+            if let Some(map) = map {
+                // remove any references that match the given page directory, and clean up any dangling references at the same time
+                list.retain(|r| !r.map.upgrade().map(|a| Arc::as_ptr(&a) == map as *const _).unwrap_or_default());
+            }
+            should_free = list.is_empty();
+        }
+
+        if should_free {
+            self.frame_set.clear((addr / self.page_size as PhysicalAddress).try_into().unwrap());
+        }
     }
 
     /// prints out information about this page directory
@@ -117,6 +151,29 @@ impl PageManager {
             (bits_used * 100) / size
         );
     }
+
+    /// adds the given reference to the reference list for the given page
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - the physical address of the frame
+    /// * `reference` - information about what memory map holds the reference to the frame and where it's mapped in that memory map
+    pub fn add_reference(&mut self, addr: PhysicalAddress, reference: FrameReference) {
+        if let Some(list) = self.frame_references.get_mut(&addr) {
+            list.push(reference);
+        } else {
+            self.frame_references.insert(addr, vec![reference]);
+        }
+    }
+}
+
+/// stores information for a reference to a page frame
+pub struct FrameReference {
+    /// the process map referencing this page frame
+    pub map: Weak<Mutex<super::ProcessMap>>,
+
+    /// the virtual address this page frame is mapped at
+    pub addr: usize,
 }
 
 /// hardware agnostic form of a page frame
@@ -143,9 +200,6 @@ pub struct PageFrame {
 
     /// whether this page should be copied upon attempting to write to it (requires writable flag to be disabled)
     pub copy_on_write: bool,
-
-    /// whether this page has more than one reference and its freeing should be handled by the reference counter
-    pub referenced: bool,
 }
 
 impl core::fmt::Debug for PageFrame {
@@ -157,7 +211,6 @@ impl core::fmt::Debug for PageFrame {
             .field("writable", &self.writable)
             .field("executable", &self.executable)
             .field("copy_on_write", &self.copy_on_write)
-            .field("referenced", &self.referenced)
             .finish()
     }
 }

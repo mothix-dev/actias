@@ -24,6 +24,7 @@ pub enum Syscalls {
     Truncate,
     Unlink,
     Write,
+    Fork,
 }
 
 /// flags passed to the open() syscall

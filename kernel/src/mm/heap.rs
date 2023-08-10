@@ -68,7 +68,7 @@ impl HeapAllocator {
                     // allocate and map in new pages for the heap
                     for i in (current_top..new_top).step_by(PROPERTIES.page_size) {
                         let page = Some(super::PageFrame {
-                            addr: page_manager.alloc_frame().map_err(|_| HeapAllocError)?,
+                            addr: page_manager.alloc_frame(None).map_err(|_| HeapAllocError)?,
                             present: true,
                             writable: true,
                             ..Default::default()
@@ -107,7 +107,7 @@ impl HeapAllocator {
                         // free and unmap any pages for the heap that were allocated before failing
                         for i in (current_top..new_top).step_by(PROPERTIES.page_size) {
                             if let Some(page) = page_dir.get_page(i) {
-                                page_manager.free_frame(page.addr);
+                                page_manager.free_frame(page.addr, None);
 
                                 if page_dir.set_page_no_alloc(None::<&crate::arch::PageDirectory>, i, None, None).is_err() {
                                     error!("couldn't remove page when cleaning up failed heap expansion");

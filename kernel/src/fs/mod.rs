@@ -328,7 +328,7 @@ impl FsEnvironment {
         Ok(())
     }
 
-    pub fn exec(&self, file_descriptor: usize) -> common::Result<(crate::mm::ProcessMap, usize)> {
+    pub fn exec(&self, file_descriptor: usize) -> common::Result<(Arc<Mutex<crate::mm::ProcessMap>>, usize)> {
         crate::exec::exec(self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?)
     }
 
