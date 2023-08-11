@@ -73,9 +73,6 @@ impl Timer {
             if jiffy >= expires_at && expires_at != u64::MAX {
                 let next = (timer.callback.lock())(registers, jiffy).unwrap_or(u64::MAX);
                 let _ = timer.expires_at.compare_exchange(expires_at, next, Ordering::Release, Ordering::Relaxed);
-            } else {
-                // break out of the loop since we keep the timer queue sorted
-                break;
             }
         }
     }
