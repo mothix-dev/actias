@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use bitmask_enum::bitmask;
-use core::{arch::asm, ffi::c_void, pin::Pin};
+use core::{ffi::c_void, pin::Pin};
 use num_enum::TryFromPrimitive;
 use x86::{
     dtables::{lidt, DescriptorTablePointer},

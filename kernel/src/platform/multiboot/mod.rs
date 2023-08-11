@@ -196,7 +196,7 @@ pub fn kmain() {
         let stack_manager = crate::arch::gdt::init(0x1000 * 8);
         let timer = alloc::sync::Arc::new(crate::timer::Timer::new(10000));
         let interrupt_manager = Arc::new(Mutex::new(crate::arch::InterruptManager::new()));
-        let scheduler = alloc::sync::Arc::new(crate::sched::Scheduler::new(timer.clone(), crate::get_global_state().page_directory.clone()));
+        let scheduler = crate::sched::Scheduler::new(crate::get_global_state().page_directory.clone(), &timer);
         crate::get_global_state().cpus.write().push(crate::cpu::CPU {
             timer: timer.clone(),
             stack_manager,
@@ -230,7 +230,7 @@ pub fn kmain() {
                     unsafe {
                         asm!("sti");
                     }
-                    scheduler.context_switch(regs, scheduler.clone(), false);
+                    scheduler.context_switch(regs);
                 } else {
                     error!("exception in kernel mode: {info}");
                     info!("register dump: {regs:#?}");
@@ -258,7 +258,7 @@ pub fn kmain() {
                         }
                     }
 
-                    scheduler.context_switch(regs, scheduler.clone(), false);
+                    scheduler.context_switch(regs);
                 } else {
                     error!("page fault @ {fault_addr:#x} in kernel mode: {error_code}");
                     info!("register dump: {regs:#?}");
@@ -299,12 +299,14 @@ pub fn kmain() {
                     task.lock().calc_cpu_time(total_load_avg.try_into().unwrap());
                 }
             }
-
-            let timer = global_state.cpus.read()[0].timer.clone();
-            timer.timeout_in(timer.hz(), |_| every_second());
         }
 
-        every_second();
+        let timer = &crate::get_global_state().cpus.read()[0].timer;
+        let hz = timer.hz();
+        timer.add_timeout(move |_, jiffies| -> Option<u64> {
+            every_second();
+            Some(jiffies + hz)
+        }).expires_at.store(0, core::sync::atomic::Ordering::Release);
 
         let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
 

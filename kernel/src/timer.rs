@@ -1,28 +1,26 @@
-use alloc::{boxed::Box, collections::VecDeque};
-use core::sync::atomic::{AtomicUsize, Ordering};
-use crossbeam::queue::SegQueue;
-use log::{error, warn};
-use spin::Mutex;
+use alloc::{boxed::Box, vec::Vec, sync::Arc};
+use core::sync::atomic::{Ordering, AtomicU64};
+use log::warn;
+use spin::{Mutex, RwLock};
 
 type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
 
-struct Timeout {
-    expires_at: u64,
-    callback: Box<dyn FnMut(&mut Registers)>,
+pub trait TimeoutCallback = FnMut(&mut Registers, u64) -> Option<u64>;
+
+/// contains the expiration time and callback for a timeout
+pub struct Timeout {
+    /// when this timeout expires and the callback should run. if set to u64::MAX, this timeout will never expire
+    pub expires_at: AtomicU64,
+
+    /// the callback to run when this timeout expires
+    pub callback: Mutex<Box<dyn TimeoutCallback>>,
 }
 
-#[cfg(not(target_has_atomic = "64"))]
-pub type AtomicJiffies = AtomicUsize;
-
-#[cfg(target_has_atomic = "64")]
-pub type AtomicJiffies = AtomicU64;
-
+/// a timer that manages any number of timeouts and runs their callbacks when they expire
 pub struct Timer {
-    jiffies: AtomicJiffies,
+    jiffies: AtomicU64,
     hz: u64,
-    timers: Mutex<VecDeque<Timeout>>,
-    add_queue: SegQueue<Timeout>,
-    remove_queue: SegQueue<u64>,
+    timers: RwLock<Vec<Arc<Timeout>>>,
 }
 
 unsafe impl Send for Timer {}
@@ -32,42 +30,33 @@ impl Timer {
     /// creates a new timer with the specified tick rate
     pub fn new(hz: u64) -> Self {
         Self {
-            jiffies: AtomicJiffies::new(0),
+            jiffies: AtomicU64::new(0),
             hz,
-            timers: Mutex::new(VecDeque::new()),
-            add_queue: SegQueue::new(),
-            remove_queue: SegQueue::new(),
+            timers: RwLock::new(Vec::new()),
         }
     }
 
-    /// adds a timeout that'll expire at a specific point in time
-    pub fn timeout_at<F: FnMut(&mut Registers) + 'static>(&self, expires_at: u64, callback: F) {
-        self.add_queue.push(Timeout {
-            expires_at,
-            callback: Box::new(callback),
-        });
-    }
-
-    /// adds a timeout that'll expire in the given amount of ticks in the future
-    pub fn timeout_in<F: FnMut(&mut Registers) + 'static>(&self, expires_in: u64, callback: F) -> u64 {
-        let expires_at = self.jiffies.load(Ordering::SeqCst) as u64 + expires_in;
-        self.timeout_at(expires_at, callback);
-        expires_at
-    }
-
-    /// removes any timeouts that expire at the given time
+    /// adds a timeout that can be set to expire at a certain point in time
     ///
-    /// TODO: is it worth hashing callbacks and using them as keys to remove individual timeouts?
-    /// TODO: this deadlocks sometimes, need to find a better solution than crossbeam
-    pub fn remove(&self, expires_at: u64) {
-        self.remove_queue.push(expires_at);
+    /// callbacks are given the register context from the timer interrupt and the current timer jiffies count,
+    /// and can return `Some(any number)` to have the timeout occur at that time. if `None` is returned,
+    /// the timeout will be set to not trigger again until specified otherwise
+    ///
+    /// the newly added timeout won't trigger automatically, and must be set to do so manually
+    pub fn add_timeout<F: TimeoutCallback + 'static>(&self, callback: F) -> Arc<Timeout> {
+        let timeout = Arc::new(Timeout {
+            expires_at: AtomicU64::new(u64::MAX),
+            callback: Mutex::new(Box::new(callback)),
+        });
+        self.timers.write().push(timeout.clone());
+        timeout
     }
 
-    #[allow(clippy::comparison_chain)] // don't want the performance hit here
+    /// ticks the timer, running any expired timeouts
     pub fn tick(&self, registers: &mut Registers) {
         let jiffy = self.jiffies.fetch_add(1, Ordering::SeqCst);
 
-        let mut timers = match self.timers.try_lock() {
+        let timers = match self.timers.try_read() {
             Some(timers) => timers,
             None => {
                 warn!("timer state is locked, timers will expire late");
@@ -77,53 +66,23 @@ impl Timer {
 
         (crate::arch::PROPERTIES.enable_interrupts)();
 
-        // add new timers to the queue
-        while let Some(timer) = self.add_queue.pop() {
-            if let Err(err) = timers.try_reserve(1) {
-                error!("couldn't reserve memory for new timer: {err}");
-                self.add_queue.push(timer);
-                break;
-            } else {
-                match timers.iter().position(|t| t.expires_at >= timer.expires_at) {
-                    // keep the timer queue sorted
-                    Some(index) => timers.insert(index, timer),
-                    None => timers.push_back(timer),
-                }
-            }
-        }
-
-        // remove any timers to be removed
-        fn remove_timers(remove_queue: &SegQueue<u64>, timers: &mut VecDeque<Timeout>) {
-            while let Some(expires_at) = remove_queue.pop() {
-                for (index, timer) in timers.iter().enumerate() {
-                    if timer.expires_at == expires_at {
-                        timers.remove(index);
-                        break;
-                    } else if timer.expires_at > expires_at {
-                        break;
-                    }
-                }
-            }
-        }
-        remove_timers(&self.remove_queue, &mut timers);
-
         // process any expired timers
-        while let Some(timer) = timers.front() {
-            if jiffy as u64 >= timer.expires_at {
-                (timers.pop_front().unwrap().callback)(registers);
+        for timer in timers.iter() {
+            let expires_at = timer.expires_at.load(Ordering::Acquire);
+
+            if jiffy >= expires_at && expires_at != u64::MAX {
+                let next = (timer.callback.lock())(registers, jiffy).unwrap_or(u64::MAX);
+                let _ = timer.expires_at.compare_exchange(expires_at, next, Ordering::Release, Ordering::Relaxed);
             } else {
                 // break out of the loop since we keep the timer queue sorted
                 break;
             }
         }
-
-        // remove any timers that were queued to be removed in other timer handlers
-        remove_timers(&self.remove_queue, &mut timers);
     }
 
     /// returns the current jiffies counter of the timer
     pub fn jiffies(&self) -> u64 {
-        self.jiffies.load(Ordering::SeqCst) as u64
+        self.jiffies.load(Ordering::SeqCst)
     }
 
     /// returns the timer's hz value (how many ticks per second)

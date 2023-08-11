@@ -69,7 +69,7 @@ fn exit_process(registers: &mut Registers, code: usize) {
     }
 
     // force a context switch so we don't have to wait for a timer
-    scheduler.context_switch(registers, scheduler.clone(), false);
+    scheduler.context_switch(registers);
 }
 
 struct ProcessGuard<'a> {

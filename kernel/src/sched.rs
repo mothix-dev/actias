@@ -4,7 +4,7 @@
 use crate::{
     arch::{bsp::RegisterContext, PROPERTIES},
     mm::{PageDirTracker, PageDirectory},
-    timer::Timer,
+    timer::{Timer, Timeout},
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
@@ -87,8 +87,8 @@ pub struct Scheduler {
     /// the task that's currently running
     current_task: Mutex<Option<Arc<Mutex<Task>>>>,
 
-    /// the timer used for scheduling
-    timer: Arc<Timer>,
+    /// the timeout used for scheduling
+    timeout: Arc<Timeout>,
 
     /// the stack used when waiting around for a task to be queued
     wait_around_stack: Mutex<Pin<Box<[u8]>>>,
@@ -107,14 +107,11 @@ pub struct Scheduler {
 
     /// whether to force a context switch to happen regardless of whether or not we're in kernel mode
     force_context_switch: AtomicBool,
-
-    /// when the preemption timeout will occur
-    timeout: crate::timer::AtomicJiffies,
 }
 
 impl Scheduler {
-    pub fn new(timer: Arc<Timer>, kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>) -> Self {
-        Self {
+    pub fn new(kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>, timer: &Timer) -> Arc<Self> {
+        let new = Arc::new(Self {
             run_queues: {
                 let mut v = Vec::with_capacity(MAX_PRIORITY + 1);
                 for _i in 0..=MAX_PRIORITY {
@@ -123,19 +120,27 @@ impl Scheduler {
                 v.try_into().unwrap()
             },
             current_task: Mutex::new(None),
-            timer,
+            timeout: timer.add_timeout(|_, _| None),
             wait_around_stack: Mutex::new(Box::into_pin(vec![0_u8; WAIT_STACK_SIZE].into_boxed_slice())),
             kernel_page_directory,
             ready_tasks: AtomicUsize::new(0),
             load_avg: AtomicUsize::new(0),
             is_dropped: Arc::new(AtomicBool::new(false)),
             force_context_switch: AtomicBool::new(false),
-            timeout: crate::timer::AtomicJiffies::new(0),
+        });
+
+        // register the timeout
+        {
+            let arc_self = new.clone();
+            *new.timeout.callback.lock() = Box::new(move |registers, jiffies| arc_self.context_switch_timeout(registers, jiffies));
         }
+
+        new
     }
 
     pub fn force_next_context_switch(&self) {
         self.force_context_switch.store(true, Ordering::SeqCst);
+        self.timeout.expires_at.store(0, Ordering::Release);
     }
 
     /// calculates the load average of the scheduler. should only be called once per second
@@ -184,16 +189,27 @@ impl Scheduler {
         None
     }
 
-    /// performs a context switch,
-    pub fn context_switch(&self, registers: &mut Registers, arc_self: Arc<Self>, from_timer: bool) {
+    /// performs a manual context switch
+    pub fn context_switch(&self, registers: &mut Registers) {
+        // maybe not the best idea since it'll immediately fire if the timeout was disabled earlier, but it's probably fine
+        let mut jiffies = self.timeout.expires_at.load(Ordering::Acquire);
+        if jiffies == u64::MAX {
+            jiffies = 0;
+        }
+
+        let new = self.context_switch_timeout(registers, jiffies).unwrap_or(u64::MAX);
+        let _ = self.timeout.expires_at.compare_exchange(jiffies, new, Ordering::Release, Ordering::Relaxed);
+    }
+
+    /// performs a context switch
+    fn context_switch_timeout(&self, registers: &mut Registers, jiffies: u64) -> Option<u64> {
         if self.is_dropped.load(Ordering::SeqCst) {
-            return;
+            return None;
         }
 
         // skip context switching if the kernel is busy doing something
         if !self.is_running_task(registers) && !self.force_context_switch.load(Ordering::SeqCst) {
-            self.timer.timeout_in(0, move |registers| arc_self.context_switch(registers, arc_self.clone(), true));
-            return;
+            return Some(0);
         }
 
         self.force_context_switch.store(false, Ordering::SeqCst);
@@ -237,19 +253,11 @@ impl Scheduler {
                     map.page_directory.check_synchronize();
                     map.page_directory.switch_to();
                 }
-
-                let timeout = self
-                    .timer
-                    .timeout_in(TIME_SLICE * self.timer.millis(), move |registers| arc_self.context_switch(registers, arc_self.clone(), true));
-
-                if from_timer {
-                    self.timeout.store(timeout.try_into().unwrap(), Ordering::SeqCst);
-                } else {
-                    self.timer.remove(self.timeout.swap(timeout.try_into().unwrap(), Ordering::SeqCst) as u64);
-                }
             }
 
             *self.current_task.lock() = Some(task);
+
+            Some(jiffies + TIME_SLICE)
         } else {
             // technically not safe or correct because the lock isn't held while waiting, but also i don't care
             let stack = {
@@ -263,11 +271,9 @@ impl Scheduler {
                 self.kernel_page_directory.lock().switch_to();
             }
 
-            if !from_timer {
-                self.timer.remove(self.timeout.swap(0, Ordering::SeqCst) as u64);
-            }
-
             trace!("no more tasks, waiting...");
+
+            None
         }
     }
 
@@ -287,17 +293,7 @@ impl Scheduler {
 
     /// figures out whether or not a task is currently running based on registers
     pub fn is_running_task(&self, registers: &Registers) -> bool {
-        let instruction_pointer = registers.instruction_pointer() as *const u8;
-        if instruction_pointer as usize >= PROPERTIES.kernel_region.base && instruction_pointer as usize - PROPERTIES.kernel_region.base < PROPERTIES.kernel_region.length {
-            /*let wait_around_stack = self.wait_around_stack.lock();
-            let stack_pointer = registers.stack_pointer() as *const u8;
-
-            // make sure we're not in the waiting around stack, since that's in the kernel area but shouldn't be treated as part of the kernel
-            stack_pointer >= &wait_around_stack[0] && stack_pointer <= &wait_around_stack[wait_around_stack.len() - 1]*/
-            false
-        } else {
-            true
-        }
+        !PROPERTIES.kernel_region.contains(registers.instruction_pointer() as usize)
     }
 }
 
