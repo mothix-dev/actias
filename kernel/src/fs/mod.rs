@@ -361,6 +361,29 @@ impl FsEnvironment {
     pub fn get_path(&self, file_descriptor: usize) -> common::Result<String> {
         Ok(self.get_path_to(self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?))
     }
+
+    /// clones this environment on fork, retaining a reference to the namespace but cloning all open file descriptors and closing any marked as close-on-exec
+    pub fn fork(&self) -> common::Result<Self> {
+        let mut file_descriptors = ConsistentIndexArray::new();
+
+        // duplicate all open file descriptors
+        {
+            let existing_fds = self.file_descriptors.lock();
+            for (index, open_file) in existing_fds.as_slice().iter().enumerate() {
+                if let Some(file) = open_file {
+                    file_descriptors.set(index, file.duplicate()?).map_err(|_| Errno::OutOfMemory)?;
+                }
+            }
+        }
+
+        Ok(Self {
+            namespace: self.namespace.clone(),
+            cwd: Arc::new(Mutex::new(self.cwd.lock().duplicate()?)),
+            root: Arc::new(Mutex::new(self.root.lock().duplicate()?)),
+            fs_list: self.fs_list.clone(),
+            file_descriptors: Arc::new(Mutex::new(file_descriptors)),
+        })
+    }
 }
 
 fn concat_slices(a: &[String], b: &str, c: &[String]) -> Vec<String> {

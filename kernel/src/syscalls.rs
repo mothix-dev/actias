@@ -1,6 +1,8 @@
 use crate::{arch::bsp::RegisterContext, mm::PageDirectory};
+use alloc::{sync::Arc, vec::Vec};
 use common::Syscalls;
 use log::{error, trace};
+use spin::{Mutex, RwLock};
 
 pub type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
 
@@ -23,7 +25,10 @@ pub fn syscall_handler(registers: &mut Registers, num: u32, arg0: usize, arg1: u
         Ok(Syscalls::Truncate) => registers.syscall_return(truncate(arg0, arg1).map(|_| 0).map_err(|e| e as usize)),
         Ok(Syscalls::Unlink) => registers.syscall_return(unlink(arg0, arg1, arg2, arg3).map(|_| 0).map_err(|e| e as usize)),
         Ok(Syscalls::Write) => registers.syscall_return(write(arg0, arg1, arg2).map_err(|e| e as usize)),
-        Ok(Syscalls::Fork) => todo!(),
+        Ok(Syscalls::Fork) => {
+            let result = fork(registers).map_err(|e| e as usize);
+            registers.syscall_return(result);
+        }
         Err(err) => error!("invalid syscall {num} ({err})"),
     }
 }
@@ -50,7 +55,7 @@ fn exit_process(registers: &mut Registers, code: usize) {
     // get pid for current task and mark it as invalid at the same time
     let pid = {
         let mut task = current_task.lock();
-        task.is_valid = false;
+        task.exec_mode = crate::sched::ExecMode::Exited;
         task.pid
     };
 
@@ -59,7 +64,7 @@ fn exit_process(registers: &mut Registers, code: usize) {
 
         // ensure threads won't be scheduled again
         for thread in process.threads.read().iter() {
-            thread.lock().is_valid = false;
+            thread.lock().exec_mode = crate::sched::ExecMode::Exited;
         }
     }
 
@@ -151,19 +156,28 @@ fn dup2(file_descriptor: usize, other_fd: usize) -> common::Result<()> {
 /// syscall handler for `open`
 fn open(at: usize, path: usize, path_len: usize, flags: usize) -> common::Result<usize> {
     let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
+    let current_process = get_current_process()?;
 
-    // TODO: verify that all pages here are mapped in
+    current_process
+        .memory_map
+        .lock()
+        .map_in_area(&current_process.memory_map, path, path_len, crate::mm::MemoryProtection::Read)?;
     let buf = unsafe { core::slice::from_raw_parts(path as *const u8, path_len) };
     let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
 
-    get_current_process()?.environment.open(at, path, flags.try_into().map_err(|_| common::Errno::InvalidArgument)?)
+    current_process.environment.open(at, path, flags.try_into().map_err(|_| common::Errno::InvalidArgument)?)
 }
 
 /// syscall handler for `read`
 fn read(file_descriptor: usize, buf: usize, buf_len: usize) -> common::Result<usize> {
-    // TODO: verify that all pages here are mapped in
+    let current_process = get_current_process()?;
+
+    current_process
+        .memory_map
+        .lock()
+        .map_in_area(&current_process.memory_map, buf, buf_len, crate::mm::MemoryProtection::Write)?;
     let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, buf_len) };
-    get_current_process()?.environment.read(file_descriptor, buf)
+    current_process.environment.read(file_descriptor, buf)
 }
 
 /// syscall handler for `seek`
@@ -177,11 +191,16 @@ fn seek(file_descriptor: usize, offset: usize, kind: usize) -> common::Result<us
 
 /// syscall handler for `stat`
 fn stat(file_descriptor: usize, buf: usize) -> common::Result<()> {
+    let current_process = get_current_process()?;
+
+    current_process
+        .memory_map
+        .lock()
+        .map_in_area(&current_process.memory_map, buf, core::mem::size_of::<common::FileStat>(), crate::mm::MemoryProtection::Write)?;
     let buf = buf as *mut common::FileStat;
-    // TODO: verify that the entirety of buf is mapped in
 
     unsafe {
-        *buf = get_current_process()?.environment.stat(file_descriptor)?;
+        *buf = current_process.environment.stat(file_descriptor)?;
     }
 
     Ok(())
@@ -195,17 +214,91 @@ fn truncate(file_descriptor: usize, len: usize) -> common::Result<()> {
 /// syscall handler for `unlink`
 fn unlink(at: usize, path: usize, path_len: usize, flags: usize) -> common::Result<()> {
     let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
+    let current_process = get_current_process()?;
 
-    // TODO: verify that all pages here are mapped in
+    current_process
+        .memory_map
+        .lock()
+        .map_in_area(&current_process.memory_map, path, path_len, crate::mm::MemoryProtection::Read)?;
     let buf = unsafe { core::slice::from_raw_parts(path as *const u8, path_len) };
     let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
 
-    get_current_process()?.environment.unlink(at, path, flags.try_into().map_err(|_| common::Errno::InvalidArgument)?)
+    current_process.environment.unlink(at, path, flags.try_into().map_err(|_| common::Errno::InvalidArgument)?)
 }
 
 /// syscall handler for `write`
 fn write(file_descriptor: usize, buf: usize, buf_len: usize) -> common::Result<usize> {
-    // TODO: verify that all pages here are mapped in
+    let current_process = get_current_process()?;
+
+    current_process
+        .memory_map
+        .lock()
+        .map_in_area(&current_process.memory_map, buf, buf_len, crate::mm::MemoryProtection::Read)?;
     let buf = unsafe { core::slice::from_raw_parts(buf as *mut u8, buf_len) };
-    get_current_process()?.environment.write(file_descriptor, buf)
+
+    current_process.environment.write(file_descriptor, buf)
+}
+
+/// syscall handler for `fork`
+fn fork(registers: &Registers) -> common::Result<usize> {
+    let global_state = crate::get_global_state();
+
+    // TODO: detect current CPU
+    let scheduler = &global_state.cpus.read()[0].scheduler;
+
+    let current_task = match scheduler.get_current_task() {
+        Some(task) => task,
+        None => unreachable!(),
+    };
+
+    // get the current task's pid and save its registers
+    #[allow(clippy::clone_on_copy)]
+    let pid = {
+        let mut current_task = current_task.lock();
+
+        current_task.registers = registers.clone();
+        // set the child's return value here since there's no way of knowing which task this is in the list
+        current_task.registers.syscall_return(Ok(0));
+
+        current_task.pid.ok_or(common::Errno::NoSuchProcess)?
+    };
+
+    let mut process_table = global_state.process_table.write();
+    let process = process_table.get_mut(pid).ok_or(common::Errno::NoSuchProcess)?;
+
+    // clone the memory map and filesystem environment
+    let memory_map = process.memory_map.lock().fork(true)?;
+    let environment = process.environment.fork()?;
+
+    // clone the threads
+    let mut threads = Vec::with_capacity(process.threads.read().len());
+    #[allow(clippy::clone_on_copy)]
+    for task in process.threads.read().iter() {
+        let task = task.lock();
+
+        threads.push(Arc::new(Mutex::new(crate::sched::Task {
+            registers: task.registers.clone(),
+            exec_mode: task.exec_mode,
+            niceness: task.niceness,
+            cpu_time: task.cpu_time,
+            memory_map: memory_map.clone(),
+            pid: None,
+        })));
+    }
+
+    // add new process to process table
+    let threads = RwLock::new(threads);
+    let new_pid = process_table.insert(crate::process::Process { threads, memory_map, environment }).unwrap();
+
+    // update PIDs of all threads in the new process
+    for task in process_table.get(new_pid).unwrap().threads.read().iter() {
+        {
+            let mut task = task.lock();
+            task.pid = Some(new_pid);
+        }
+
+        scheduler.push_task(task.clone());
+    }
+
+    Ok(new_pid)
 }

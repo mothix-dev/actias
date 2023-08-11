@@ -23,6 +23,12 @@ pub struct ArchProperties {
 
     /// function that'll halt execution of the current CPU
     pub halt: fn() -> !,
+
+    /// function to enable interrupts on the current CPU
+    pub enable_interrupts: fn(),
+
+    /// function to disable interrupts on the current CPU
+    pub disable_interrupts: fn(),
 }
 
 pub trait RegisterContext: Clone {

@@ -1,10 +1,12 @@
 use crate::{sched::Scheduler, timer::Timer};
 use alloc::sync::Arc;
 use log::debug;
+use spin::Mutex;
 
 pub struct CPU {
     pub timer: Arc<Timer>,
     pub stack_manager: crate::arch::StackManager,
+    pub interrupt_manager: Arc<Mutex<crate::arch::InterruptManager>>,
     pub scheduler: Arc<Scheduler>,
 }
 
@@ -15,6 +17,7 @@ impl CPU {
         self.scheduler.force_next_context_switch();
         self.timer.timeout_at(0, move |registers| scheduler.context_switch(registers, scheduler.clone(), true));
 
+        (crate::arch::PROPERTIES.enable_interrupts)();
         crate::sched::wait_around();
     }
 }

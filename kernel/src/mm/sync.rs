@@ -77,13 +77,13 @@ impl<D: PageDirectory> PageDirectory for PageDirTracker<D> {
 pub struct PageDirSync<D: PageDirectory> {
     sync_from: Arc<Mutex<PageDirTracker<D>>>,
     page_dir: D,
-    split_addr: usize,
+    kernel_region: super::ContiguousRegion<usize>,
     updates: usize,
 }
 
 impl<D: PageDirectory> PageDirSync<D> {
     /// creates a new PageDirSync set to synchronize from the given page directory and initially synchronizes it
-    pub fn sync_from(dir: Arc<Mutex<PageDirTracker<D>>>, split_addr: usize) -> Result<Self, super::PagingError> {
+    pub fn sync_from(dir: Arc<Mutex<PageDirTracker<D>>>, kernel_region: super::ContiguousRegion<usize>) -> Result<Self, super::PagingError> {
         let guard = dir.lock();
         let page_dir = D::new(&*guard)?;
         let updates = guard.updates;
@@ -92,7 +92,7 @@ impl<D: PageDirectory> PageDirSync<D> {
         let mut state = Self {
             sync_from: dir,
             page_dir,
-            split_addr,
+            kernel_region,
             updates,
         };
         state.force_synchronize();
@@ -132,7 +132,7 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<D> {
     }
 
     fn get_page(&self, addr: usize) -> Option<super::PageFrame> {
-        if addr >= self.split_addr {
+        if self.kernel_region.contains((addr / Self::PAGE_SIZE) * Self::PAGE_SIZE) {
             self.sync_from.lock().get_page(addr)
         } else {
             self.page_dir.get_page(addr)
@@ -145,13 +145,13 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<D> {
             let current_dir = SyncVirtToPhys { sync_from: self.sync_from.clone() };
             let current_dir = Some(&current_dir);
 
-            if addr >= self.split_addr {
+            if self.kernel_region.contains((addr / Self::PAGE_SIZE) * Self::PAGE_SIZE) {
                 self.sync_from.lock().set_page(current_dir, addr, page)
             } else {
                 self.page_dir.set_page(current_dir, addr, page)
             }
         } else {
-            if addr >= self.split_addr {
+            if self.kernel_region.contains((addr / Self::PAGE_SIZE) * Self::PAGE_SIZE) {
                 self.sync_from.lock().set_page(current_dir, addr, page)
             } else {
                 self.page_dir.set_page(current_dir, addr, page)
@@ -165,13 +165,13 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<D> {
             let current_dir = SyncVirtToPhys { sync_from: self.sync_from.clone() };
             let current_dir = Some(&current_dir);
 
-            if addr >= self.split_addr {
+            if self.kernel_region.contains((addr / Self::PAGE_SIZE) * Self::PAGE_SIZE) {
                 self.sync_from.lock().set_page_no_alloc(current_dir, addr, page, reserved_memory)
             } else {
                 self.page_dir.set_page_no_alloc(current_dir, addr, page, reserved_memory)
             }
         } else {
-            if addr >= self.split_addr {
+            if self.kernel_region.contains((addr / Self::PAGE_SIZE) * Self::PAGE_SIZE) {
                 self.sync_from.lock().set_page_no_alloc(current_dir, addr, page, reserved_memory)
             } else {
                 self.page_dir.set_page_no_alloc(current_dir, addr, page, reserved_memory)
@@ -200,7 +200,7 @@ impl<D: PageDirectory> PageDirectory for PageDirSync<D> {
     }
 
     fn virt_to_phys(&self, virt: usize) -> Option<crate::arch::PhysicalAddress> {
-        if virt >= self.split_addr {
+        if self.kernel_region.contains((virt / Self::PAGE_SIZE) * Self::PAGE_SIZE) {
             self.sync_from.lock().virt_to_phys(virt)
         } else {
             self.page_dir.virt_to_phys(virt)

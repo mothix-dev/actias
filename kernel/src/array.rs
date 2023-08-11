@@ -230,6 +230,7 @@ impl VecBitSet {
     }
 }
 
+#[derive(Clone)]
 pub struct ConsistentIndexArray<T> {
     array: Vec<Option<T>>,
     bit_set: VecBitSet,
@@ -309,8 +310,8 @@ impl<T> ConsistentIndexArray<T> {
         self.bit_set.test(index)
     }
 
-    pub fn iter<'a>(&'a self) -> core::iter::FilterMap<core::slice::Iter<'a, Option<T>>, impl FnMut(&'a Option<T>) -> Option<&'a T>> {
-        self.array.iter().filter_map(move |item| item.as_ref())
+    pub fn as_slice(&self) -> &[Option<T>] {
+        &self.array
     }
 
     pub fn max_index(&self) -> usize {

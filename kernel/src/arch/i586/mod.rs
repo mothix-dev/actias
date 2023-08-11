@@ -22,6 +22,8 @@ pub const PROPERTIES: ArchProperties = ArchProperties {
     heap_init_size: 0x100000,
     wait_for_interrupt,
     halt,
+    enable_interrupts,
+    disable_interrupts,
 };
 
 /// the physical address size for this architecture
@@ -48,5 +50,17 @@ fn halt() -> ! {
         unsafe {
             asm!("cli; hlt");
         }
+    }
+}
+
+fn enable_interrupts() {
+    unsafe {
+        asm!("sti");
+    }
+}
+
+fn disable_interrupts() {
+    unsafe {
+        asm!("cli");
     }
 }

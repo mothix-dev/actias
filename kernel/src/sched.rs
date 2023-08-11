@@ -13,6 +13,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use crossbeam::queue::SegQueue;
+use log::trace;
 use spin::Mutex;
 
 type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
@@ -52,10 +53,6 @@ pub enum ExecMode {
 
 /// a schedulable task, which can be a process, a thread, or something else entirely
 pub struct Task {
-    /// whether this task is valid or not.
-    /// used when a task is queued for execution but needs to be removed from the queue before executing
-    pub is_valid: bool,
-
     /// the register context of this task
     pub registers: Registers,
 
@@ -176,7 +173,7 @@ impl Scheduler {
             if let Some(task) = self.run_queues[i].pop() {
                 self.ready_tasks.fetch_sub(1, Ordering::SeqCst);
 
-                if !task.lock().is_valid {
+                if task.lock().exec_mode != ExecMode::Running {
                     continue;
                 }
 
@@ -195,8 +192,6 @@ impl Scheduler {
 
         // skip context switching if the kernel is busy doing something
         if !self.is_running_task(registers) && !self.force_context_switch.load(Ordering::SeqCst) {
-            use log::debug;
-            debug!("missed");
             self.timer.timeout_in(0, move |registers| arc_self.context_switch(registers, arc_self.clone(), true));
             return;
         }
@@ -271,6 +266,8 @@ impl Scheduler {
             if !from_timer {
                 self.timer.remove(self.timeout.swap(0, Ordering::SeqCst) as u64);
             }
+
+            trace!("no more tasks, waiting...");
         }
     }
 

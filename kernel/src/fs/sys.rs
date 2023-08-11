@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, vec::Vec};
 use common::{Errno, OpenFlags, Permissions};
 use core::sync::atomic::AtomicUsize;
-use log::debug;
+use log::{log, Level};
 
 pub struct SysFs;
 
@@ -87,19 +87,99 @@ macro_rules! make_sysfs {
 }
 
 make_sysfs![
-    "debug" => Debug,
+    "log" => LogFs,
 ];
 
-/// simple way to allow programs to print debug info to the kernel log
-struct Debug;
+/// directory containing files for each log level, to allow programs to easily write to the kernel log if there's no other output method available
+struct LogFs {
+    seek_pos: AtomicUsize,
+}
 
-impl Debug {
+impl LogFs {
     fn new() -> Self {
-        Self
+        Self {
+            seek_pos: AtomicUsize::new(0),
+        }
     }
 }
 
-impl super::FileDescriptor for Debug {
+const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
+
+impl super::FileDescriptor for LogFs {
+    fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+        if flags & OpenFlags::Create != OpenFlags::None {
+            return Err(Errno::ReadOnlyFilesystem);
+        }
+
+        match name {
+            "error" => Ok(Box::new(Logger::new(Level::Error))),
+            "warn" => Ok(Box::new(Logger::new(Level::Warn))),
+            "info" => Ok(Box::new(Logger::new(Level::Info))),
+            "debug" => Ok(Box::new(Logger::new(Level::Debug))),
+            "trace" => Ok(Box::new(Logger::new(Level::Trace))),
+            _ => Err(Errno::NoSuchFileOrDir),
+        }
+    }
+
+    fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
+        let pos = self.seek_pos.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+
+        if pos >= LOG_LEVELS.len() {
+            self.seek_pos.store(LOG_LEVELS.len(), core::sync::atomic::Ordering::SeqCst);
+            Ok(0)
+        } else {
+            let entry = &LOG_LEVELS[pos];
+            let mut data = Vec::new();
+            data.extend_from_slice(&(0_u32.to_ne_bytes()));
+            data.extend_from_slice(entry.as_bytes());
+            data.push(0);
+
+            if buf.len() > data.len() {
+                buf[..data.len()].copy_from_slice(&data);
+                Ok(data.len())
+            } else {
+                buf.copy_from_slice(&data[..buf.len()]);
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
+        super::seek_helper(&self.seek_pos, offset, kind, LOG_LEVELS.len().try_into().map_err(|_| Errno::ValueOverflow)?)
+    }
+
+    fn stat(&self) -> common::Result<common::FileStat> {
+        Ok(common::FileStat {
+            mode: common::FileMode {
+                permissions: common::Permissions::OwnerRead
+                | common::Permissions::OwnerExecute
+                | common::Permissions::GroupRead
+                | common::Permissions::GroupExecute
+                | common::Permissions::OtherRead
+                | common::Permissions::OtherExecute,
+                kind: common::FileKind::Directory,
+            },
+            ..Default::default()
+        })
+    }
+
+    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
+        Ok(Box::new(Self { seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)) }))
+    }
+}
+
+/// simple way to allow programs to print debug info to the kernel log
+struct Logger {
+    level: Level,
+}
+
+impl Logger {
+    fn new(level: Level) -> Self {
+        Self { level }
+    }
+}
+
+impl super::FileDescriptor for Logger {
     fn stat(&self) -> common::Result<common::FileStat> {
         Ok(common::FileStat {
             mode: common::FileMode {
@@ -111,11 +191,11 @@ impl super::FileDescriptor for Debug {
     }
 
     fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        debug!(target: "sysfs/debug", "{}", core::str::from_utf8(buf).map_err(|_| Errno::InvalidArgument)?);
+        log!(target: "sysfs/log", self.level, "{}", core::str::from_utf8(buf).map_err(|_| Errno::InvalidArgument)?);
         Ok(buf.len())
     }
 
     fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
-        Ok(Box::new(Self))
+        Ok(Box::new(Self { level: self.level }))
     }
 }

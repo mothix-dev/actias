@@ -443,12 +443,6 @@ pub struct InterruptRegisters {
 
 impl crate::arch::bsp::RegisterContext for InterruptRegisters {
     fn from_fn(func: *const extern "C" fn(), stack: *mut u8, is_user_mode: bool) -> Self {
-        // read the current eflags
-        let eflags;
-        unsafe {
-            asm!("pushfd; pop {}", out(reg) eflags);
-        }
-
         let ring = if is_user_mode { Ring::Ring3 } else { Ring::Ring0 };
         let offset = if is_user_mode { 2 } else { 0 };
 
@@ -459,7 +453,7 @@ impl crate::arch::bsp::RegisterContext for InterruptRegisters {
             ebp: (stack as usize).try_into().unwrap(),
             esp: (stack as usize).try_into().unwrap(),
             eip: (func as usize).try_into().unwrap(),
-            eflags,
+            eflags: (1 << 1) | (1 << 9), // enable interrupts
             ..Default::default()
         }
     }
@@ -527,6 +521,7 @@ impl Interrupt {
         let handler_trampoline = vec![
             0x6a, 0x00,                     // push   0x0
             0x60,                           // pusha
+            0xfa,                           // cli
             0x66, 0x8c, 0xd8,               // mov    ax,ds
             0x50,                           // push   eax
             0x66, 0xb8, 0x10, 0x00,         // mov    ax,0x10

@@ -58,6 +58,7 @@ impl Timer {
     /// removes any timeouts that expire at the given time
     ///
     /// TODO: is it worth hashing callbacks and using them as keys to remove individual timeouts?
+    /// TODO: this deadlocks sometimes, need to find a better solution than crossbeam
     pub fn remove(&self, expires_at: u64) {
         self.remove_queue.push(expires_at);
     }
@@ -73,6 +74,8 @@ impl Timer {
                 return;
             }
         };
+
+        (crate::arch::PROPERTIES.enable_interrupts)();
 
         // add new timers to the queue
         while let Some(timer) = self.add_queue.pop() {
