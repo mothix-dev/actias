@@ -1,5 +1,5 @@
-use alloc::{boxed::Box, vec::Vec, sync::Arc};
-use core::sync::atomic::{Ordering, AtomicU64};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicU64, Ordering};
 use log::warn;
 use spin::{Mutex, RwLock};
 
@@ -15,6 +15,9 @@ pub struct Timeout {
     /// the callback to run when this timeout expires
     pub callback: Mutex<Box<dyn TimeoutCallback>>,
 }
+
+unsafe impl Send for Timeout {}
+unsafe impl Sync for Timeout {}
 
 /// a timer that manages any number of timeouts and runs their callbacks when they expire
 pub struct Timer {

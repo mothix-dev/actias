@@ -1,19 +1,8 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use common::{Errno, OpenFlags, Permissions};
-use core::sync::atomic::AtomicUsize;
-use log::{log, Level};
+use log::{error, log, Level};
 
-pub struct SysFs;
-
-impl super::Filesystem for SysFs {
-    fn get_root_dir(&self) -> Box<dyn super::FileDescriptor> {
-        Box::new(SysFsRoot { seek_pos: AtomicUsize::new(0) })
-    }
-}
-
-pub struct SysFsRoot {
-    seek_pos: AtomicUsize,
-}
+pub struct SysFsRoot;
 
 // https://danielkeep.github.io/tlborm/book/blk-counting.html
 macro_rules! count {
@@ -26,42 +15,35 @@ macro_rules! make_sysfs {
         const SYS_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
 
         impl super::FileDescriptor for SysFsRoot {
-            fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+            fn open(&self, name: String, flags: OpenFlags) -> common::Result<Box<dyn super::FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
 
-                match name {
+                match name.as_str() {
                     $($name => Ok(Box::new($type::new())),),*
                     _ => Err(Errno::NoSuchFileOrDir),
                 }
             }
 
-            fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-                let pos = self.seek_pos.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
 
-                if pos >= SYS_FS_FILES.len() {
-                    self.seek_pos.store(SYS_FS_FILES.len(), core::sync::atomic::Ordering::SeqCst);
-                    Ok(0)
+            fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+                let position: usize = match position.try_into() {
+                    Ok(position) => position,
+                    Err(_) => return callback(Err(Errno::ValueOverflow), false),
+                };
+
+                if position >= SYS_FS_FILES.len() {
+                    callback(Ok(&[]), false);
                 } else {
-                    let entry = &SYS_FS_FILES[pos];
+                    let entry = SYS_FS_FILES[position];
                     let mut data = Vec::new();
                     data.extend_from_slice(&(0_u32.to_ne_bytes()));
                     data.extend_from_slice(entry.as_bytes());
                     data.push(0);
 
-                    if buf.len() > data.len() {
-                        buf[..data.len()].copy_from_slice(&data);
-                        Ok(data.len())
-                    } else {
-                        buf.copy_from_slice(&data[..buf.len()]);
-                        Ok(buf.len())
-                    }
+                    callback(Ok(&data), false);
                 }
-            }
-
-            fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-                super::seek_helper(&self.seek_pos, offset, kind, SYS_FS_FILES.len().try_into().map_err(|_| Errno::ValueOverflow)?)
             }
 
             fn stat(&self) -> common::Result<common::FileStat> {
@@ -78,10 +60,6 @@ macro_rules! make_sysfs {
                     ..Default::default()
                 })
             }
-
-            fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
-                Ok(Box::new(Self { seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)) }))
-            }
         }
     };
 }
@@ -91,27 +69,23 @@ make_sysfs![
 ];
 
 /// directory containing files for each log level, to allow programs to easily write to the kernel log if there's no other output method available
-struct LogFs {
-    seek_pos: AtomicUsize,
-}
+struct LogFs;
 
 impl LogFs {
     fn new() -> Self {
-        Self {
-            seek_pos: AtomicUsize::new(0),
-        }
+        Self
     }
 }
 
 const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
 impl super::FileDescriptor for LogFs {
-    fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
         if flags & OpenFlags::Create != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
 
-        match name {
+        match name.as_str() {
             "error" => Ok(Box::new(Logger::new(Level::Error))),
             "warn" => Ok(Box::new(Logger::new(Level::Warn))),
             "info" => Ok(Box::new(Logger::new(Level::Info))),
@@ -121,50 +95,38 @@ impl super::FileDescriptor for LogFs {
         }
     }
 
-    fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        let pos = self.seek_pos.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        let position: usize = match position.try_into() {
+            Ok(position) => position,
+            Err(_) => return callback(Err(Errno::ValueOverflow), false),
+        };
 
-        if pos >= LOG_LEVELS.len() {
-            self.seek_pos.store(LOG_LEVELS.len(), core::sync::atomic::Ordering::SeqCst);
-            Ok(0)
+        if position >= 5 {
+            callback(Ok(&[]), false);
         } else {
-            let entry = &LOG_LEVELS[pos];
+            let entry = LOG_LEVELS[position];
             let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(entry.as_bytes());
             data.push(0);
 
-            if buf.len() > data.len() {
-                buf[..data.len()].copy_from_slice(&data);
-                Ok(data.len())
-            } else {
-                buf.copy_from_slice(&data[..buf.len()]);
-                Ok(buf.len())
-            }
+            callback(Ok(&data), false);
         }
-    }
-
-    fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        super::seek_helper(&self.seek_pos, offset, kind, LOG_LEVELS.len().try_into().map_err(|_| Errno::ValueOverflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
         Ok(common::FileStat {
             mode: common::FileMode {
                 permissions: common::Permissions::OwnerRead
-                | common::Permissions::OwnerExecute
-                | common::Permissions::GroupRead
-                | common::Permissions::GroupExecute
-                | common::Permissions::OtherRead
-                | common::Permissions::OtherExecute,
+                    | common::Permissions::OwnerExecute
+                    | common::Permissions::GroupRead
+                    | common::Permissions::GroupExecute
+                    | common::Permissions::OtherRead
+                    | common::Permissions::OtherExecute,
                 kind: common::FileKind::Directory,
             },
             ..Default::default()
         })
-    }
-
-    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
-        Ok(Box::new(Self { seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)) }))
     }
 }
 
@@ -190,12 +152,21 @@ impl super::FileDescriptor for Logger {
         })
     }
 
-    fn write(&self, buf: &[u8]) -> common::Result<usize> {
-        log!(target: "sysfs/log", self.level, "{}", core::str::from_utf8(buf).map_err(|_| Errno::InvalidArgument)?);
-        Ok(buf.len())
-    }
+    fn write(&self, _position: i64, length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+        let mut buf = Vec::new();
+        if buf.try_reserve_exact(length).is_err() {
+            callback(Err(Errno::OutOfMemory), false);
+            return;
+        }
+        for _i in 0..length {
+            buf.push(0);
+        }
 
-    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
-        Ok(Box::new(Self { level: self.level }))
+        callback(Ok(&mut buf), false);
+
+        match core::str::from_utf8(&buf) {
+            Ok(str) => log!(target: "sysfs/log", self.level, "{str}"),
+            Err(err) => error!("couldn't parse string for log level {}: {err}", self.level),
+        }
     }
 }

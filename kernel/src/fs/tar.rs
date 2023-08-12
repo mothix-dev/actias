@@ -7,7 +7,7 @@ use alloc::{
     vec::Vec,
 };
 use common::{Errno, OpenFlags};
-use core::{ffi::CStr, fmt, mem::size_of, str, sync::atomic::AtomicUsize};
+use core::{ffi::CStr, fmt, mem::size_of, str};
 use generic_array::{
     typenum::{U12, U8},
     ArrayLength, GenericArray,
@@ -207,6 +207,16 @@ impl<N: ArrayLength<u8>> fmt::Debug for TarNumber<N> {
     }
 }
 
+impl<N: ArrayLength<u8>> From<usize> for TarNumber<N> {
+    fn from(value: usize) -> Self {
+        let mut data: GenericArray<u8, N> = Default::default();
+        let width = data.len();
+        data.clone_from_slice(format!("{value:0width$o}").as_bytes());
+
+        Self { data }
+    }
+}
+
 /// type of file that can be stored in a tar archive
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -332,111 +342,92 @@ impl<'a> Iterator for TarIterator<'a> {
     }
 }
 
-pub struct TarFilesystem {
-    root: TarDirectory,
-}
+pub fn parse_tar(data: &[u8]) -> TarDirectory {
+    let mut root = TarDirectory {
+        dir_entries: Vec::new(),
+        header: None,
+    };
 
-impl TarFilesystem {
-    pub fn new(data: &[u8]) -> Self {
-        let mut root = TarDirectory {
-            dir_entries: Vec::new(),
-            seek_pos: AtomicUsize::new(0),
-            header: None,
+    for entry in TarIterator::new(data) {
+        // get full filename if this is ustar
+        let filename = if entry.header.ustar_indicator() == "ustar " {
+            format!("{}{}", entry.header.filename_prefix(), entry.header.name())
+        } else {
+            entry.header.name().to_string()
         };
 
-        for entry in TarIterator::new(data) {
-            // get full filename if this is ustar
-            let filename = if entry.header.ustar_indicator() == "ustar " {
-                format!("{}{}", entry.header.filename_prefix(), entry.header.name())
-            } else {
-                entry.header.name().to_string()
-            };
+        // split path into its components
+        let components = filename.split('/').filter(|name| *name != ".").collect::<Vec<_>>();
 
-            // split path into its components
-            let components = filename.split('/').filter(|name| *name != ".").collect::<Vec<_>>();
+        let path;
+        let name;
 
-            let path;
-            let name;
-
-            // get actual filename and path
-            if entry.header.kind() == EntryKind::Directory {
-                path = &components[..components.len() - 2];
-                name = components[components.len() - 2];
-            } else {
-                path = &components[..components.len() - 1];
-                name = components[components.len() - 1];
-            }
-
-            // recursively search the built filesystem to add this file or directory
-            fn enter_container(path: &[&str], container: &mut TarDirectory, entry: &TarEntry<'_>, filename: &str) {
-                let name = if let Some(name) = path.first() {
-                    name
-                } else {
-                    // add this file/directory to the container and return
-                    let file = match entry.header.kind() {
-                        EntryKind::Directory => DirFile::Directory(TarDirectory {
-                            dir_entries: Vec::new(),
-                            seek_pos: AtomicUsize::new(0),
-                            header: Some(entry.header.clone()),
-                        }),
-                        EntryKind::SymLink => DirFile::File(TarFile {
-                            data: entry.header.link_name().as_bytes().into(),
-                            header: entry.header.clone(),
-                            seek_pos: AtomicUsize::new(0),
-                        }),
-                        _ => DirFile::File(TarFile {
-                            data: entry.contents.into(),
-                            header: entry.header.clone(),
-                            seek_pos: AtomicUsize::new(0),
-                        }),
-                    };
-                    container.dir_entries.push(DirEntry { name: filename.to_string(), file });
-
-                    return;
-                };
-
-                let new_container = container.dir_entries.iter_mut().find(|entry| entry.name == *name);
-
-                if let Some(dir_entry) = new_container {
-                    match &mut dir_entry.file {
-                        DirFile::File(_) => panic!("can't treat a file as a directory"),
-                        DirFile::Directory(ref mut dir) => enter_container(&path[1..], dir, entry, filename),
-                    };
-                } else {
-                    let mut new_container = TarDirectory {
-                        dir_entries: Vec::new(),
-                        seek_pos: AtomicUsize::new(0),
-                        header: None,
-                    };
-                    enter_container(&path[1..], &mut new_container, entry, filename);
-                    container.dir_entries.push(DirEntry {
-                        name: name.to_string(),
-                        file: DirFile::Directory(new_container),
-                    });
-                }
-            }
-
-            enter_container(path, &mut root, &entry, name);
+        // get actual filename and path
+        if entry.header.kind() == EntryKind::Directory {
+            path = &components[..components.len() - 2];
+            name = components[components.len() - 2];
+        } else {
+            path = &components[..components.len() - 1];
+            name = components[components.len() - 1];
         }
 
-        Self { root }
-    }
-}
+        // recursively search the built filesystem to add this file or directory
+        fn enter_container(path: &[&str], container: &mut TarDirectory, entry: &TarEntry<'_>, filename: &str) {
+            let name = if let Some(name) = path.first() {
+                name
+            } else {
+                // add this file/directory to the container and return
+                let file = match entry.header.kind() {
+                    EntryKind::Directory => DirFile::Directory(TarDirectory {
+                        dir_entries: Vec::new(),
+                        header: Some(entry.header.clone()),
+                    }),
+                    EntryKind::SymLink => {
+                        let mut header = entry.header.clone();
+                        let data: Box<[u8]> = header.link_name().as_bytes().into();
+                        header.file_size = data.len().into();
 
-impl super::Filesystem for TarFilesystem {
-    fn get_root_dir(&self) -> alloc::boxed::Box<dyn super::FileDescriptor> {
-        Box::new(TarDirectory {
-            dir_entries: self.root.dir_entries.clone(),
-            seek_pos: AtomicUsize::new(0),
-            header: self.root.header.clone(),
-        })
+                        DirFile::File(TarFile { data, header })
+                    }
+                    _ => DirFile::File(TarFile {
+                        data: entry.contents.into(),
+                        header: entry.header.clone(),
+                    }),
+                };
+                container.dir_entries.push(DirEntry { name: filename.to_string(), file });
+
+                return;
+            };
+
+            let new_container = container.dir_entries.iter_mut().find(|entry| entry.name == *name);
+
+            if let Some(dir_entry) = new_container {
+                match &mut dir_entry.file {
+                    DirFile::File(_) => panic!("can't treat a file as a directory"),
+                    DirFile::Directory(ref mut dir) => enter_container(&path[1..], dir, entry, filename),
+                };
+            } else {
+                let mut new_container = TarDirectory {
+                    dir_entries: Vec::new(),
+                    header: None,
+                };
+                enter_container(&path[1..], &mut new_container, entry, filename);
+                container.dir_entries.push(DirEntry {
+                    name: name.to_string(),
+                    file: DirFile::Directory(new_container),
+                });
+            }
+        }
+
+        enter_container(path, &mut root, &entry, name);
     }
+
+    root
 }
 
 pub struct TarFile {
     data: Box<[u8]>,
     header: Header,
-    seek_pos: AtomicUsize,
 }
 
 impl Clone for TarFile {
@@ -444,42 +435,20 @@ impl Clone for TarFile {
         Self {
             data: self.data.clone(),
             header: self.header.clone(),
-            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
         }
     }
 }
 
 impl super::FileDescriptor for TarFile {
-    fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        let pos = self.seek_pos.fetch_add(buf.len(), core::sync::atomic::Ordering::SeqCst);
-
-        if pos >= self.data.len() {
-            self.seek_pos.store(self.data.len(), core::sync::atomic::Ordering::SeqCst);
-            Ok(0)
-        } else if pos + buf.len() > self.data.len() {
-            let len = self.data.len() - pos;
-            buf[..len].copy_from_slice(&self.data[pos..]);
-            Ok(len)
-        } else {
-            buf.copy_from_slice(&self.data[pos..pos + buf.len()]);
-            Ok(buf.len())
+    fn read(&self, position: i64, length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        match position.try_into() {
+            Ok(position) => callback(Ok(&self.data[position..position + length]), false),
+            Err(_) => callback(Err(Errno::ValueOverflow), false),
         }
-    }
-
-    fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        super::seek_helper(&self.seek_pos, offset, kind, self.data.len().try_into().map_err(|_| Errno::ValueOverflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
         (&self.header).try_into()
-    }
-
-    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
-        Ok(Box::new(Self {
-            data: self.data.clone(),
-            header: self.header.clone(),
-            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
-        }))
     }
 }
 
@@ -498,7 +467,6 @@ struct DirEntry {
 
 pub struct TarDirectory {
     dir_entries: Vec<DirEntry>,
-    seek_pos: AtomicUsize,
     header: Option<Header>,
 }
 
@@ -507,13 +475,12 @@ impl Clone for TarDirectory {
         Self {
             dir_entries: self.dir_entries.clone(),
             header: self.header.clone(),
-            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
         }
     }
 }
 
 impl super::FileDescriptor for TarDirectory {
-    fn open(&self, name: &str, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> common::Result<Box<dyn super::FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -530,31 +497,23 @@ impl super::FileDescriptor for TarDirectory {
         Err(Errno::NoSuchFileOrDir)
     }
 
-    fn read(&self, buf: &mut [u8]) -> common::Result<usize> {
-        let pos = self.seek_pos.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        let position: usize = match position.try_into() {
+            Ok(position) => position,
+            Err(_) => return callback(Err(Errno::ValueOverflow), false),
+        };
 
-        if pos >= self.dir_entries.len() {
-            self.seek_pos.store(self.dir_entries.len(), core::sync::atomic::Ordering::SeqCst);
-            Ok(0)
+        if position >= self.dir_entries.len() {
+            callback(Ok(&[]), false);
         } else {
-            let entry = &self.dir_entries[pos];
+            let entry = &self.dir_entries[position];
             let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(entry.name.as_bytes());
             data.push(0);
 
-            if buf.len() > data.len() {
-                buf[..data.len()].copy_from_slice(&data);
-                Ok(data.len())
-            } else {
-                buf.copy_from_slice(&data[..buf.len()]);
-                Ok(buf.len())
-            }
+            callback(Ok(&data), false);
         }
-    }
-
-    fn seek(&self, offset: i64, kind: common::SeekKind) -> common::Result<u64> {
-        super::seek_helper(&self.seek_pos, offset, kind, self.dir_entries.len().try_into().map_err(|_| Errno::ValueOverflow)?)
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {
@@ -574,13 +533,5 @@ impl super::FileDescriptor for TarDirectory {
                 ..Default::default()
             })
         }
-    }
-
-    fn dup(&self) -> common::Result<Box<dyn super::FileDescriptor>> {
-        Ok(Box::new(Self {
-            dir_entries: self.dir_entries.clone(),
-            seek_pos: AtomicUsize::new(self.seek_pos.load(core::sync::atomic::Ordering::SeqCst)),
-            header: self.header.clone(),
-        }))
     }
 }

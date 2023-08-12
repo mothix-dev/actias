@@ -110,5 +110,5 @@ impl ProcessTable {
 pub struct Process {
     pub threads: RwLock<Vec<Arc<Mutex<Task>>>>,
     pub memory_map: Arc<Mutex<crate::mm::ProcessMap>>,
-    pub environment: crate::fs::FsEnvironment,
+    pub environment: Arc<crate::fs::FsEnvironment>,
 }

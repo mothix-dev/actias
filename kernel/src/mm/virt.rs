@@ -288,44 +288,43 @@ impl Mapping {
                         page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
                         crate::arch::PageDirectory::flush_page(aligned_addr);
                     }
-                }
-                MappingKind::FileCopy { ref file_descriptor, file_offset } => {
-                    // allocate and zero out new page
-                    let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
-                        map: Arc::downgrade(map),
-                        addr: aligned_addr,
-                    }))?;
-                    let mut page = crate::mm::PageFrame {
-                        addr: phys_addr,
-                        present: true,
-                        writable: true,
-                        executable: self.protection & MemoryProtection::Execute != MemoryProtection::None,
-                        user_mode: true,
-                        ..Default::default()
-                    };
-                    page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
-                    crate::arch::PageDirectory::flush_page(aligned_addr);
+                } /*MappingKind::FileCopy { ref file_descriptor, file_offset } => {
+                      // allocate and zero out new page
+                      let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
+                          map: Arc::downgrade(map),
+                          addr: aligned_addr,
+                      }))?;
+                      let mut page = crate::mm::PageFrame {
+                          addr: phys_addr,
+                          present: true,
+                          writable: true,
+                          executable: self.protection & MemoryProtection::Execute != MemoryProtection::None,
+                          user_mode: true,
+                          ..Default::default()
+                      };
+                      page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
+                      crate::arch::PageDirectory::flush_page(aligned_addr);
 
-                    let slice = unsafe { core::slice::from_raw_parts_mut(aligned_addr as *mut u8, PROPERTIES.page_size) };
+                      let slice = unsafe { core::slice::from_raw_parts_mut(aligned_addr as *mut u8, PROPERTIES.page_size) };
 
-                    // copy in file data
-                    let mut region_offset: i64 = (self.region.base - aligned_addr).try_into().map_err(|_| Errno::ValueOverflow)?;
-                    if region_offset < 0 {
-                        warn!("TODO: handle negative region offset");
-                        region_offset = 0;
-                    }
+                      // copy in file data
+                      let mut region_offset: i64 = (self.region.base - aligned_addr).try_into().map_err(|_| Errno::ValueOverflow)?;
+                      if region_offset < 0 {
+                          warn!("TODO: handle negative region offset");
+                          region_offset = 0;
+                      }
 
-                    file_descriptor.seek(file_offset + region_offset, common::SeekKind::Set)?;
-                    let bytes_read = file_descriptor.read(slice)?;
-                    slice[bytes_read..].fill(0);
+                      file_descriptor.seek(file_offset + region_offset, common::SeekKind::Set)?;
+                      let bytes_read = file_descriptor.read(slice)?;
+                      slice[bytes_read..].fill(0);
 
-                    // remap page as read-only if required
-                    if self.protection & MemoryProtection::Write == MemoryProtection::None {
-                        page.writable = false;
-                        page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
-                        crate::arch::PageDirectory::flush_page(aligned_addr);
-                    }
-                }
+                      // remap page as read-only if required
+                      if self.protection & MemoryProtection::Write == MemoryProtection::None {
+                          page.writable = false;
+                          page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
+                          crate::arch::PageDirectory::flush_page(aligned_addr);
+                      }
+                  }*/
             }
         }
 
@@ -392,30 +391,29 @@ impl Mapping {
                     region: self.region,
                     protection: self.protection,
                 })
-            }
-            MappingKind::FileCopy { ref file_descriptor, file_offset } => {
-                for i in (0..self.region.length).step_by(PROPERTIES.page_size) {
-                    let addr = self.region.base + i;
+            } /*MappingKind::FileCopy { ref file_descriptor, file_offset } => {
+                  for i in (0..self.region.length).step_by(PROPERTIES.page_size) {
+                      let addr = self.region.base + i;
 
-                    if let Some(page) = page_directory.get_page(addr) {
-                        crate::get_global_state()
-                            .page_manager
-                            .lock()
-                            .add_reference(page.addr, super::FrameReference { map: Arc::downgrade(arc_map), addr });
+                      if let Some(page) = page_directory.get_page(addr) {
+                          crate::get_global_state()
+                              .page_manager
+                              .lock()
+                              .add_reference(page.addr, super::FrameReference { map: Arc::downgrade(arc_map), addr });
 
-                        map.page_directory.set_page(None::<&crate::arch::PageDirectory>, addr, Some(page))?;
-                    }
-                }
+                          map.page_directory.set_page(None::<&crate::arch::PageDirectory>, addr, Some(page))?;
+                      }
+                  }
 
-                Ok(Mapping {
-                    kind: MappingKind::FileCopy {
-                        file_descriptor: file_descriptor.dup()?,
-                        file_offset,
-                    },
-                    region: self.region,
-                    protection: self.protection,
-                })
-            }
+                  Ok(Mapping {
+                      kind: MappingKind::FileCopy {
+                          file_descriptor: file_descriptor.dup()?,
+                          file_offset,
+                      },
+                      region: self.region,
+                      protection: self.protection,
+                  })
+              }*/
         }
     }
 
@@ -427,7 +425,7 @@ impl Mapping {
 
 pub enum MappingKind {
     Anonymous,
-    FileCopy { file_descriptor: Box<dyn crate::fs::FileDescriptor>, file_offset: i64 },
+    //FileCopy { file_descriptor: Box<dyn crate::fs::FileDescriptor>, file_offset: i64 },
 }
 
 #[bitmask]

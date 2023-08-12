@@ -4,7 +4,7 @@
 use crate::{
     arch::{bsp::RegisterContext, PROPERTIES},
     mm::{PageDirTracker, PageDirectory},
-    timer::{Timer, Timeout},
+    timer::{Timeout, Timer},
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{

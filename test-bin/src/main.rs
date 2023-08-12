@@ -119,7 +119,7 @@ fn write_message(message: &str) {
 #[no_mangle]
 pub extern "C" fn _start() {
     unsafe {
-        *(0xcffffffc as *mut u32) = 0xe621;
+        *(0xdffffffc as *mut u32) = 0xe621;
     }
 
     if unsafe { syscall_0_args(Syscalls::IsComputerOn).unwrap() } == 1 {
