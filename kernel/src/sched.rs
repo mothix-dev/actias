@@ -315,6 +315,7 @@ pub struct BlockedState {
     current_task: Arc<Mutex<Task>>,
     scheduler: Arc<Scheduler>,
     blocked_flag: Arc<AtomicBool>,
+    was_blocked: bool,
 }
 
 impl BlockedState {
@@ -325,33 +326,37 @@ impl BlockedState {
 
     /// returns the given value to the task and resumes execution
     pub fn syscall_return(self, result: common::Result<usize>, blocked: bool) {
-        {
-            let mut task_guard = self.current_task.lock();
-            task_guard.exec_mode = ExecMode::Running;
-            task_guard.registers.syscall_return(result.map_err(|e| e as usize));
-        }
+        if self.blocked_flag.swap(false, core::sync::atomic::Ordering::SeqCst) {
+            {
+                let mut task_guard = self.current_task.lock();
+                task_guard.exec_mode = ExecMode::Running;
+                task_guard.registers.syscall_return(result.map_err(|e| e as usize));
+            }
 
-        // if this request blocked, push the task back onto the queue so it'll execute Soon™
-        if blocked {
-            self.scheduler.push_task(self.current_task);
+            // if this request blocked, push the task back onto the queue so it'll execute Soon™
+            if blocked {
+                self.scheduler.push_task(self.current_task);
+            }
         }
-
-        self.blocked_flag.store(false, core::sync::atomic::Ordering::SeqCst);
     }
 
     /// resumes execution of the task without returning a value
     pub fn bare_return(self, blocked: bool) {
-        {
-            let mut task_guard = self.current_task.lock();
-            task_guard.exec_mode = ExecMode::Running;
-        }
+        if self.blocked_flag.swap(false, core::sync::atomic::Ordering::SeqCst) {
+            self.current_task.lock().exec_mode = ExecMode::Running;
 
-        // if this request blocked, push the task back onto the queue so it'll execute Soon™
-        if blocked {
-            self.scheduler.push_task(self.current_task);
-        }
+            // if this request blocked, push the task back onto the queue so it'll execute Soon™
+            if blocked {
+                self.scheduler.push_task(self.current_task);
+            }
 
-        self.blocked_flag.store(false, core::sync::atomic::Ordering::SeqCst);
+            self.blocked_flag.store(false, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// gets whether the task was blocked beforehand
+    pub fn was_blocked(&self) -> bool {
+        self.was_blocked
     }
 }
 
@@ -381,12 +386,12 @@ pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl F
                 registers.syscall_return(Err(common::Errno::NoSuchProcess as usize));
             }
             return;
-        },
+        }
     };
 
     if let Some(process) = global_state.process_table.read().get(pid) {
         // set the process as blocked so if the write call blocks it won't keep executing
-        current_task.lock().exec_mode = ExecMode::Blocked;
+        let was_blocked = core::mem::replace(&mut current_task.lock().exec_mode, ExecMode::Blocked) == ExecMode::Blocked;
 
         // keeps track of whether the request blocks or not so that
         let blocked_flag = Arc::new(AtomicBool::new(true));
@@ -395,6 +400,7 @@ pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl F
             current_task: current_task.clone(),
             scheduler: scheduler.clone(),
             blocked_flag: blocked_flag.clone(),
+            was_blocked,
         }) {
             current_task.lock().exec_mode = ExecMode::Running;
             if is_syscall {

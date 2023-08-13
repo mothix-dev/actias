@@ -44,7 +44,6 @@ impl ProcessMap {
         mapping.region.length = ((mapping.region.length + PROPERTIES.page_size - 1) / PROPERTIES.page_size) * PROPERTIES.page_size;
 
         assert!(!mapping.region.overlaps(PROPERTIES.kernel_region), "mapping is inside kernel memory");
-        debug!("adding mapping over {:?}, {:?}", mapping.region, mapping.protection);
 
         let mut should_add = true;
         let mut to_remove = Vec::new();
@@ -171,7 +170,6 @@ impl ProcessMap {
 
             for mapping in self.map.iter() {
                 let new_mapping = mapping.fork(&mut self.page_directory, &new_map, &mut new, is_current)?;
-                debug!("mapping over {:?}", new_mapping.region);
                 new.map.push(new_mapping);
             }
         }
@@ -337,9 +335,9 @@ impl Mapping {
                                     Ok(slice) => slice,
                                     Err(_) => todo!(),
                                 };
-    
+
                                 debug!("slice len is {}", slice.len());
-    
+
                                 if blocked {
                                     todo!();
                                 } else {
@@ -348,12 +346,12 @@ impl Mapping {
                                     page_slice[..slice.len()].copy_from_slice(slice);
                                     page_slice[slice.len()..].fill(0);
                                 }
-    
+
                                 // remap page as read-only if required
                                 if protection & MemoryProtection::Write == MemoryProtection::None {
                                     let mut page = page;
                                     page.writable = false;
-    
+
                                     if !blocked {
                                         // this is Very Bad and depends on the fact that this is the last step in the faulting process, no other state is accessed after the map is re-locked
                                         unsafe {
@@ -361,7 +359,7 @@ impl Mapping {
                                         }
                                     }
                                     map.lock().page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page)).unwrap();
-    
+
                                     if !blocked {
                                         crate::arch::PageDirectory::flush_page(aligned_addr);
                                     }

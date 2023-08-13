@@ -4,10 +4,10 @@ use crate::{
     arch::{bsp::RegisterContext, PROPERTIES},
     fs::FsEnvironment,
     mm::PageDirectory,
-    sched::{block_until, ExecMode},
+    sched::block_until,
 };
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
-use common::{Errno, Result, Syscalls, FileStat};
+use common::{Errno, FileStat, Result, Syscalls};
 use log::{error, trace};
 use spin::{Mutex, RwLock};
 
@@ -166,13 +166,16 @@ fn dup2(file_descriptor: usize, other_fd: usize) -> Result<()> {
 
 /// syscall handler for `open`
 fn open(registers: &mut Registers, at: usize, path: usize, path_len: usize, flags: usize) {
-    block_until(registers, true, |process, state| {
-        let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
+    if let Err(err) = get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, path, path_len, crate::mm::MemoryProtection::Read)) {
+        registers.syscall_return(Err(err as usize));
+    }
 
-        process.memory_map.lock().map_in_area(&process.memory_map, registers, path, path_len, crate::mm::MemoryProtection::Read)?;
-        if state.task().lock().exec_mode == ExecMode::Blocked {
+    block_until(registers, true, |process, state| {
+        if state.was_blocked() {
             panic!("TODO: delay syscall completion until blocked area is mapped in");
         }
+
+        let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
 
         let buf = unsafe { core::slice::from_raw_parts(path as *const u8, path_len) };
         let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
@@ -191,9 +194,13 @@ fn open(registers: &mut Registers, at: usize, path: usize, path_len: usize, flag
 
 /// syscall handler for `read`
 fn read(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: usize) {
+    let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)) {
+        Ok(addrs) => addrs,
+        Err(err) => return registers.syscall_return(Err(err as usize)),
+    };
+
     block_until(registers, true, |process, state| {
-        let addrs = process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)?;
-        if state.task().lock().exec_mode == ExecMode::Blocked {
+        if state.was_blocked() {
             panic!("TODO: delay syscall completion until blocked area is mapped in");
         }
 
@@ -252,10 +259,14 @@ fn seek(registers: &mut Registers, file_descriptor: usize, offset: usize, kind: 
 
 /// syscall handler for `stat`
 fn stat(registers: &mut Registers, file_descriptor: usize, buf: usize) {
+    let buf_len = size_of::<FileStat>();
+    let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Write)) {
+        Ok(addrs) => addrs,
+        Err(err) => return registers.syscall_return(Err(err as usize)),
+    };
+
     block_until(registers, true, |process, state| {
-        let buf_len = size_of::<FileStat>();
-        let addrs = process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)?;
-        if state.task().lock().exec_mode == ExecMode::Blocked {
+        if state.was_blocked() {
             panic!("TODO: delay syscall completion until blocked area is mapped in");
         }
 
@@ -313,13 +324,16 @@ fn truncate(registers: &mut Registers, file_descriptor: usize, len: usize) {
 
 /// syscall handler for `unlink`
 fn unlink(registers: &mut Registers, at: usize, path: usize, path_len: usize, flags: usize) {
-    block_until(registers, true, |process, state| {
-        let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
+    if let Err(err) = get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, path, path_len, crate::mm::MemoryProtection::Read)) {
+        return registers.syscall_return(Err(err as usize));
+    }
 
-        process.memory_map.lock().map_in_area(&process.memory_map, registers, path, path_len, crate::mm::MemoryProtection::Read)?;
-        if state.task().lock().exec_mode == ExecMode::Blocked {
+    block_until(registers, true, |process, state| {
+        if state.was_blocked() {
             panic!("TODO: delay syscall completion until blocked area is mapped in");
         }
+
+        let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
 
         let buf = unsafe { core::slice::from_raw_parts(path as *const u8, path_len) };
         let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
@@ -338,9 +352,13 @@ fn unlink(registers: &mut Registers, at: usize, path: usize, path_len: usize, fl
 
 /// syscall handler for `write`
 fn write(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: usize) {
+    let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)) {
+        Ok(addrs) => addrs,
+        Err(err) => return registers.syscall_return(Err(err as usize)),
+    };
+
     block_until(registers, true, |process, state| {
-        let addrs = process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)?;
-        if state.task().lock().exec_mode == ExecMode::Blocked {
+        if state.was_blocked() {
             panic!("TODO: delay syscall completion until blocked area is mapped in");
         }
 

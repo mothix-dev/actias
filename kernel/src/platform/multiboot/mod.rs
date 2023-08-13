@@ -249,13 +249,14 @@ pub fn kmain() {
 
                 if scheduler.is_running_task(regs) {
                     if let Some(task) = scheduler.get_current_task() {
-                        let mut task = task.lock();
                         unsafe {
                             asm!("sti");
                         }
-                        if task.memory_map.lock().page_fault(&task.memory_map, regs, fault_addr, error_code.into()) {
+                        let memory_map = task.lock().memory_map.clone();
+                        if memory_map.lock().page_fault(&memory_map, regs, fault_addr, error_code.into()) {
                             return;
                         } else {
+                            let mut task = task.lock();
                             debug!("page fault in process {}", task.pid.unwrap_or_default());
                             task.exec_mode = crate::sched::ExecMode::Exited;
                         }
