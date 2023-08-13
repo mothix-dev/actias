@@ -362,6 +362,15 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(
         });
     }
 
+    match crate::get_global_state().cmdline.read().parsed.get("log_level").map(|s| s.as_str()) {
+        Some("error") => log::set_max_level(log::LevelFilter::Error),
+        Some("warn") => log::set_max_level(log::LevelFilter::Warn),
+        Some("info") => log::set_max_level(log::LevelFilter::Info),
+        Some("debug") => log::set_max_level(log::LevelFilter::Debug),
+        Some("trace") => log::set_max_level(log::LevelFilter::Trace),
+        _ => (),
+    }
+
     debug!("cmdline parsed as {:?}", crate::get_global_state().cmdline.read().parsed);
 
     debug!("shrinking bump allocator");

@@ -1,9 +1,12 @@
 use super::PageDirectory;
-use crate::arch::{PhysicalAddress, PROPERTIES};
+use crate::{
+    arch::{PhysicalAddress, PROPERTIES},
+    mm::FrameReference,
+};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use bitmask_enum::bitmask;
 use common::Errno;
-use log::{debug, trace};
+use log::{debug, error, trace};
 use spin::Mutex;
 
 pub type Registers = <crate::arch::InterruptManager as crate::arch::bsp::InterruptManager>::Registers;
@@ -284,6 +287,7 @@ impl Mapping {
                     page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
                     crate::arch::PageDirectory::flush_page(aligned_addr);
 
+                    // TODO: map page into kernel memory first to zero it out to prevent any multi-CPU race conditions
                     unsafe {
                         core::slice::from_raw_parts_mut(aligned_addr as *mut u8, PROPERTIES.page_size).fill(0);
                     }
@@ -295,24 +299,8 @@ impl Mapping {
                         crate::arch::PageDirectory::flush_page(aligned_addr);
                     }
                 }
-                MappingKind::FileCopy { file_handle, file_offset } => {
+                MappingKind::File { file_handle, file_offset } => {
                     debug!("copying in file at {aligned_addr:#x} - {file_offset:#x} ({:?})", self.region);
-
-                    // allocate and zero out new page
-                    let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
-                        map: Arc::downgrade(map),
-                        addr: aligned_addr,
-                    }))?;
-                    let page = crate::mm::PageFrame {
-                        addr: phys_addr,
-                        present: true,
-                        writable: true,
-                        executable: self.protection & MemoryProtection::Execute != MemoryProtection::None,
-                        user_mode: true,
-                        ..Default::default()
-                    };
-                    page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
-                    crate::arch::PageDirectory::flush_page(aligned_addr);
 
                     // copy in file data
                     let base: i64 = self.region.base.try_into().map_err(|_| Errno::ValueOverflow)?;
@@ -323,51 +311,53 @@ impl Mapping {
 
                     assert!(region_offset >= 0, "region_offset can't be less than zero");
 
-                    let protection = self.protection;
                     let map = map.clone();
+                    let protection = self.protection;
 
                     crate::sched::block_until(registers, false, |_process, state| {
-                        file_handle.make_request(crate::fs::Request::Read {
-                            position: file_offset + region_offset,
-                            length: PROPERTIES.page_size,
-                            callback: Box::new(move |res, blocked| {
-                                let slice = match res {
-                                    Ok(slice) => slice,
-                                    Err(_) => todo!(),
-                                };
+                        file_handle.get_page(
+                            file_offset + region_offset,
+                            Box::new(move |res, blocked| {
+                                match res {
+                                    Some(addr) => {
+                                        // add a reference to this page, tying it to this map
+                                        crate::get_global_state().page_manager.lock().add_reference(addr, FrameReference {
+                                            map: Arc::downgrade(&map),
+                                            addr: aligned_addr,
+                                        });
 
-                                debug!("slice len is {}", slice.len());
-
-                                if blocked {
-                                    todo!();
-                                } else {
-                                    // read didn't block so just copy directly into memory
-                                    let page_slice = unsafe { core::slice::from_raw_parts_mut(aligned_addr as *mut u8, PROPERTIES.page_size) };
-                                    page_slice[..slice.len()].copy_from_slice(slice);
-                                    page_slice[slice.len()..].fill(0);
-                                }
-
-                                // remap page as read-only if required
-                                if protection & MemoryProtection::Write == MemoryProtection::None {
-                                    let mut page = page;
-                                    page.writable = false;
-
-                                    if !blocked {
-                                        // this is Very Bad and depends on the fact that this is the last step in the faulting process, no other state is accessed after the map is re-locked
-                                        unsafe {
-                                            map.force_unlock();
+                                        if !blocked {
+                                            // this is Very Bad and depends on the fact that this is the last step in the faulting process, no other state is accessed after the map is re-locked
+                                            unsafe {
+                                                map.force_unlock();
+                                            }
                                         }
-                                    }
-                                    map.lock().page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page)).unwrap();
+                                        map.lock()
+                                            .page_directory
+                                            .set_page(
+                                                None::<&crate::arch::PageDirectory>,
+                                                aligned_addr,
+                                                Some(crate::mm::PageFrame {
+                                                    addr,
+                                                    present: true,
+                                                    writable: protection & MemoryProtection::Write != MemoryProtection::None,
+                                                    executable: protection & MemoryProtection::Execute != MemoryProtection::None,
+                                                    user_mode: true,
+                                                    ..Default::default()
+                                                }),
+                                            )
+                                            .unwrap();
 
-                                    if !blocked {
-                                        crate::arch::PageDirectory::flush_page(aligned_addr);
+                                        if !blocked {
+                                            crate::arch::PageDirectory::flush_page(aligned_addr);
+                                        }
+
+                                        state.bare_return(blocked);
                                     }
+                                    None => error!("TODO: properly kill blocked page faulted process"), // this is fine since it'll just stay blocked so can't continue with invalid state
                                 }
-
-                                state.bare_return(blocked);
                             }),
-                        });
+                        );
                         Ok(())
                     });
                 }
@@ -432,7 +422,7 @@ impl Mapping {
                     }
                 }
             }
-            MappingKind::FileCopy { .. } => {
+            MappingKind::File { .. } => {
                 for i in (0..self.region.length).step_by(PROPERTIES.page_size) {
                     let addr = self.region.base + i;
 
@@ -460,7 +450,7 @@ impl Mapping {
 #[derive(Clone)]
 pub enum MappingKind {
     Anonymous,
-    FileCopy { file_handle: Arc<crate::fs::FileHandle>, file_offset: i64 },
+    File { file_handle: Arc<crate::fs::FileHandle>, file_offset: i64 },
 }
 
 #[bitmask]

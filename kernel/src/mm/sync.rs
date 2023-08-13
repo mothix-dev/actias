@@ -260,3 +260,44 @@ impl<D: PageDirectory> PageDirectory for SyncVirtToPhys<D> {
         self.sync_from.lock().virt_to_phys(virt)
     }
 }
+
+pub struct LockedPageDir<D: PageDirectory>(pub Arc<Mutex<PageDirTracker<D>>>);
+
+impl<D: PageDirectory> PageDirectory for LockedPageDir<D> {
+    const PAGE_SIZE: usize = D::PAGE_SIZE;
+    type RawKernelArea = D::RawKernelArea;
+    type Reserved = D::Reserved;
+
+    fn new(_current_dir: &impl PageDirectory) -> Result<Self, super::PagingError>
+    where Self: Sized {
+        Err(super::PagingError::Invalid)
+    }
+
+    fn get_page(&self, addr: usize) -> Option<super::PageFrame> {
+        self.0.lock().get_page(addr)
+    }
+
+    fn set_page(&mut self, current_dir: Option<&impl PageDirectory>, addr: usize, page: Option<super::PageFrame>) -> Result<(), super::PagingError> {
+        self.0.lock().set_page(current_dir, addr, page)
+    }
+
+    fn set_page_no_alloc(&mut self, current_dir: Option<&impl PageDirectory>, addr: usize, page: Option<super::PageFrame>, reserved_memory: Option<Self::Reserved>) -> Result<(), super::PagingError> {
+        self.0.lock().set_page_no_alloc(current_dir, addr, page, reserved_memory)
+    }
+
+    unsafe fn switch_to(&self) {
+        self.0.lock().switch_to();
+    }
+
+    fn flush_page(addr: usize) {
+        D::flush_page(addr);
+    }
+
+    fn get_raw_kernel_area(&self) -> &Self::RawKernelArea {
+        unimplemented!();
+    }
+
+    unsafe fn set_raw_kernel_area(&mut self, _area: &Self::RawKernelArea) {
+        unimplemented!();
+    }
+}

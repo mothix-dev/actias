@@ -71,7 +71,7 @@ pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallb
                                         if header.p_filesz == 0 {
                                             crate::mm::MappingKind::Anonymous
                                         } else {
-                                            crate::mm::MappingKind::FileCopy {
+                                            crate::mm::MappingKind::File {
                                                 file_handle: handle.clone(),
                                                 file_offset: match file_offset.try_into() {
                                                     Ok(offset) => offset,

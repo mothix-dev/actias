@@ -4,7 +4,10 @@ pub mod proc;
 pub mod sys;
 pub mod tar;
 
-use crate::array::ConsistentIndexArray;
+use crate::{
+    arch::{PhysicalAddress, PROPERTIES},
+    array::ConsistentIndexArray,
+};
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
@@ -96,6 +99,15 @@ pub trait Filesystem: Send + Sync {
     ///
     /// if state must be locked to complete this request, it must be unlocked before calling its callback
     fn make_request(&self, handle: HandleNum, request: Request);
+
+    /// gets the physical address for a page frame containing data for the given file handle at the given position to be mapped into a process' memory map on a page fault or similar
+    ///
+    /// # Arguments
+    /// * `map` - a reference to the memory map that the page will be mapped into, used for reference counting
+    /// * `handle` - the file handle whose contents are to be mapped into memory
+    /// * `offset` - the offset into the file pointed to by `handle` that memory should be mapped from. must be page aligned
+    /// * `callback` - a function to call with the result of this function and whether any operations would have required the process to block until completion
+    fn get_page(&self, handle: HandleNum, offset: i64, callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>);
 }
 
 type NamespaceMap = Arc<RwLock<BTreeMap<String, Arc<dyn Filesystem>>>>;
@@ -835,6 +847,11 @@ impl FileHandle {
     pub fn make_request(&self, request: Request) {
         self.filesystem.make_request(self.handle.load(Ordering::SeqCst), request);
     }
+
+    /// see `Filesystem::get_page`
+    pub fn get_page(&self, offset: i64, callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {
+        self.filesystem.get_page(self.handle.load(Ordering::SeqCst), offset, callback);
+    }
 }
 
 impl Drop for FileHandle {
@@ -1051,6 +1068,13 @@ impl Filesystem for KernelFs {
             Request::Write { length, position, callback } => descriptor.write(position, length, callback),
         }
     }
+
+    fn get_page(&self, handle: HandleNum, position: i64, callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {
+        match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.get_page(position, callback),
+            None => callback(None, false),
+        };
+    }
 }
 
 #[allow(unused_variables)]
@@ -1099,5 +1123,35 @@ pub trait FileDescriptor: Send + Sync {
     /// writes data from this buffer to this file descriptor
     fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
         callback(Err(Errno::FuncNotSupported), false);
+    }
+
+    /// see `Filesystem::get_page`
+    fn get_page(&self, position: i64, callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {
+        let phys_addr = match crate::get_global_state().page_manager.lock().alloc_frame(None) {
+            Ok(phys_addr) => phys_addr,
+            Err(_) => return callback(None, false),
+        };
+
+        self.read(
+            position,
+            PROPERTIES.page_size,
+            Box::new(move |res, blocked| {
+                let slice = match res {
+                    Ok(slice) => slice,
+                    Err(_) => return callback(None, blocked),
+                };
+
+                let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
+                unsafe {
+                    match crate::mm::map_memory(&mut page_directory, &[phys_addr], |page_slice| {
+                        page_slice[..slice.len()].copy_from_slice(slice);
+                        page_slice[slice.len()..].fill(0);
+                    }) {
+                        Ok(_) => callback(Some(phys_addr), blocked),
+                        Err(_) => callback(None, blocked),
+                    }
+                }
+            }),
+        );
     }
 }

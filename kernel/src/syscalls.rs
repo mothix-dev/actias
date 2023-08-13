@@ -251,7 +251,7 @@ fn seek(registers: &mut Registers, file_descriptor: usize, offset: usize, kind: 
             file_descriptor,
             (offset as isize) as i64,
             kind.try_into().map_err(|_| common::Errno::InvalidArgument)?,
-            Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)),
+            Box::new(move |res, blocked| state.syscall_return(res.map(|val| (val as isize) as usize), blocked)),
         );
         Ok(())
     });

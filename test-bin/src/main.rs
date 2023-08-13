@@ -110,15 +110,38 @@ unsafe fn syscall_4_args(num: Syscalls, arg0: u32, arg1: u32, arg2: u32, arg3: u
     }
 }
 
+fn read(fd: usize, slice: &mut [u8]) -> Result<usize> {
+    unsafe { syscall_3_args(common::Syscalls::Read, fd.try_into().unwrap(), slice.as_mut_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
+}
+
+fn write(fd: usize, slice: &[u8]) -> Result<usize> {
+    unsafe { syscall_3_args(common::Syscalls::Write, fd.try_into().unwrap(), slice.as_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
+}
+
+fn seek(fd: usize, offset: isize, kind: common::SeekKind) -> Result<isize> {
+    unsafe { syscall_3_args(common::Syscalls::Seek, fd.try_into().unwrap(), (offset as i32) as u32, kind as u32).map(|val| (val as i32) as isize) }
+}
+
 fn write_message(message: &str) {
+    write(1, message.as_bytes()).unwrap();
+}
+
+fn open(at: usize, path: &str, flags: common::OpenFlags) -> Result<usize> {
     unsafe {
-        syscall_3_args(common::Syscalls::Write, 1, message.as_bytes().as_ptr() as u32, message.as_bytes().len() as u32).unwrap();
+        syscall_4_args(
+            common::Syscalls::Open,
+            at.try_into().unwrap(),
+            path.as_bytes().as_ptr() as u32,
+            path.as_bytes().len() as u32,
+            flags.into(),
+        )
+        .map(|fd| fd as usize)
     }
 }
 
 #[no_mangle]
 pub extern "C" fn _start() {
-    unsafe {
+    /*unsafe {
         *(0xdfffcffc as *mut u32) = 0xe621;
     }
 
@@ -154,7 +177,13 @@ pub extern "C" fn _start() {
         } else if uwu == 0xe6 {
             write_message(":)");
         }
-    }
+    }*/
+
+    write_message(":3c");
+
+    let fd = open(0, "/../sysfs/mem", common::OpenFlags::ReadWrite | common::OpenFlags::AtCWD).unwrap();
+    seek(fd, 0xb8000, common::SeekKind::Set).unwrap();
+    write(fd, &[0x55, 0x0f, 0x77, 0x0f, 0x55, 0x0f]).unwrap();
 
     unsafe {
         syscall_0_args(Syscalls::Exit).unwrap();

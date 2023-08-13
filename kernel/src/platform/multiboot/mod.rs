@@ -188,15 +188,6 @@ pub fn kmain() {
         debug!("alloc now {}k (@ {:?})", init_memory_map.bump_alloc_area.len() / 1024, init_memory_map.bump_alloc_area.as_ptr());
         let initrd_region = crate::mm::init_memory_manager(init_memory_map, memory_map_entries, cmdline, initrd_region);
 
-        match crate::get_global_state().cmdline.read().parsed.get("log_level").map(|s| s.as_str()) {
-            Some("error") => log::set_max_level(log::LevelFilter::Error),
-            Some("warn") => log::set_max_level(log::LevelFilter::Warn),
-            Some("info") => log::set_max_level(log::LevelFilter::Info),
-            Some("debug") => log::set_max_level(log::LevelFilter::Debug),
-            Some("trace") => log::set_max_level(log::LevelFilter::Trace),
-            _ => (),
-        }
-
         let stack_manager = crate::arch::gdt::init(0x1000 * 8);
         let timer = alloc::sync::Arc::new(crate::timer::Timer::new(10000));
         let interrupt_manager = Arc::new(Mutex::new(crate::arch::InterruptManager::new()));
