@@ -11,7 +11,7 @@
 #![feature(panic_info_message)]
 #![feature(pointer_byte_offsets)]
 #![feature(trait_alias)]
-#![allow(clippy::arc_with_non_send_sync)] // spin::Mutex doesn't implement Send or Sync for some reason???
+//#![allow(clippy::arc_with_non_send_sync)] // spin::Mutex doesn't implement Send or Sync for some reason???
 
 extern crate alloc;
 

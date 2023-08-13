@@ -5,27 +5,27 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use common::{Errno, OpenFlags};
+use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
 use spin::Mutex;
 
 /// procfs root directory
 pub struct ProcRoot;
 
 impl super::FileDescriptor for ProcRoot {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
 
         let pid = name.parse::<usize>().map_err(|_| Errno::InvalidArgument)?;
         if crate::get_global_state().process_table.read().contains(pid) {
-            Ok(Box::new(ProcessDir { pid }))
+            Ok(Arc::new(ProcessDir { pid }))
         } else {
-            Err(common::Errno::NoSuchFileOrDir)
+            Err(Errno::NoSuchFileOrDir)
         }
     }
 
-    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -43,16 +43,11 @@ impl super::FileDescriptor for ProcRoot {
         }
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::Directory,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::Directory,
             },
             ..Default::default()
         })
@@ -74,18 +69,18 @@ macro_rules! make_procfs {
         const PROC_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
 
         impl super::FileDescriptor for ProcessDir {
-            fn open(&self, name: String, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
 
                 match name.as_str() {
-                    $($name => Ok(Box::new($type::new(self.pid)?)),)*
+                    $($name => Ok(Arc::new($type::new(self.pid)?)),)*
                     _ => Err(Errno::NoSuchFileOrDir),
                 }
             }
 
-            fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+            fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
                 let position: usize = match position.try_into() {
                     Ok(position) => position,
                     Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -104,16 +99,16 @@ macro_rules! make_procfs {
                 }
             }
 
-            fn stat(&self) -> common::Result<common::FileStat> {
-                Ok(common::FileStat {
-                    mode: common::FileMode {
-                        permissions: common::Permissions::OwnerRead
-                        | common::Permissions::OwnerExecute
-                        | common::Permissions::GroupRead
-                        | common::Permissions::GroupExecute
-                        | common::Permissions::OtherRead
-                        | common::Permissions::OtherExecute,
-                        kind: common::FileKind::Directory,
+            fn stat(&self) -> Result<FileStat> {
+                Ok(FileStat {
+                    mode: FileMode {
+                        permissions: Permissions::OwnerRead
+                        | Permissions::OwnerExecute
+                        | Permissions::GroupRead
+                        | Permissions::GroupExecute
+                        | Permissions::OtherRead
+                        | Permissions::OtherExecute,
+                        kind: FileKind::Directory,
                     },
                     ..Default::default()
                 })
@@ -134,13 +129,13 @@ pub struct CwdLink {
 }
 
 impl CwdLink {
-    fn new(pid: usize) -> common::Result<Self> {
+    fn new(pid: usize) -> Result<Self> {
         Ok(Self { pid })
     }
 }
 
 impl super::FileDescriptor for CwdLink {
-    fn read(&self, _position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let path = match crate::get_global_state().process_table.read().get(self.pid) {
             Some(process) => process.environment.get_cwd_path(),
             None => return callback(Err(Errno::NoSuchProcess), false),
@@ -150,16 +145,11 @@ impl super::FileDescriptor for CwdLink {
         callback(Ok(data), false);
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::SymLink,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::SymLink,
             },
             ..Default::default()
         })
@@ -172,11 +162,11 @@ pub struct FilesDir {
 }
 
 impl FilesDir {
-    fn new(pid: usize) -> common::Result<Self> {
+    fn new(pid: usize) -> Result<Self> {
         Ok(Self { pid })
     }
 
-    fn get_file_descriptors(&self) -> common::Result<Arc<Mutex<crate::array::ConsistentIndexArray<super::OpenFile>>>> {
+    fn get_file_descriptors(&self) -> Result<Arc<Mutex<crate::array::ConsistentIndexArray<super::OpenFile>>>> {
         let process_table = crate::get_global_state().process_table.read();
         let process = process_table.get(self.pid).ok_or(Errno::NoSuchProcess)?;
         Ok(process.environment.file_descriptors.clone())
@@ -184,20 +174,20 @@ impl FilesDir {
 }
 
 impl super::FileDescriptor for FilesDir {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
 
         let fd = name.parse::<usize>().map_err(|_| Errno::InvalidArgument)?;
         if self.get_file_descriptors()?.lock().contains(fd) {
-            Ok(Box::new(ProcessFd { pid: self.pid, fd }))
+            Ok(Arc::new(ProcessFd { pid: self.pid, fd }))
         } else {
-            Err(common::Errno::NoSuchFileOrDir)
+            Err(Errno::NoSuchFileOrDir)
         }
     }
 
-    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -221,16 +211,11 @@ impl super::FileDescriptor for FilesDir {
         }
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::Directory,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::Directory,
             },
             ..Default::default()
         })
@@ -244,7 +229,7 @@ pub struct ProcessFd {
 }
 
 impl super::FileDescriptor for ProcessFd {
-    fn read(&self, _position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let process_table = crate::get_global_state().process_table.read();
         let process = match process_table.get(self.pid) {
             Some(process) => process,
@@ -259,16 +244,11 @@ impl super::FileDescriptor for ProcessFd {
         callback(Ok(data), false);
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::SymLink,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::SymLink,
             },
             ..Default::default()
         })
@@ -281,13 +261,13 @@ pub struct PidFile {
 }
 
 impl PidFile {
-    fn new(pid: usize) -> common::Result<Self> {
+    fn new(pid: usize) -> Result<Self> {
         Ok(Self { data: pid.to_string() })
     }
 }
 
 impl super::FileDescriptor for PidFile {
-    fn read(&self, position: i64, length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -296,11 +276,11 @@ impl super::FileDescriptor for PidFile {
         callback(Ok(&self.data.as_bytes()[position..position + length]), false);
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead | common::Permissions::GroupRead | common::Permissions::OtherRead,
-                kind: common::FileKind::Regular,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
+                kind: FileKind::Regular,
             },
             ..Default::default()
         })
@@ -314,7 +294,7 @@ pub struct MemoryDir {
 }
 
 impl MemoryDir {
-    fn new(pid: usize) -> common::Result<Self> {
+    fn new(pid: usize) -> Result<Self> {
         Ok(Self {
             pid,
             map: crate::get_global_state().process_table.read().get(pid).ok_or(Errno::NoSuchProcess)?.memory_map.clone(),
@@ -323,7 +303,7 @@ impl MemoryDir {
 }
 
 impl super::FileDescriptor for MemoryDir {
-    fn open(&self, name: String, flags: common::OpenFlags) -> common::Result<Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
         if flags & OpenFlags::Write != OpenFlags::None {
             return Err(Errno::OperationNotSupported);
         }
@@ -332,7 +312,7 @@ impl super::FileDescriptor for MemoryDir {
 
         for map in self.map.lock().map.iter() {
             if map.region().base == base {
-                return Ok(Box::new(AnonFile {
+                return Ok(Arc::new(AnonFile {
                     pid: self.pid,
                     map: self.map.clone(),
                     base,
@@ -344,7 +324,7 @@ impl super::FileDescriptor for MemoryDir {
         Err(Errno::NoSuchFileOrDir)
     }
 
-    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let map = self.map.lock();
 
         let position: usize = match position.try_into() {
@@ -362,17 +342,17 @@ impl super::FileDescriptor for MemoryDir {
         callback(Ok(&data), false);
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerWrite
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::Directory,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead
+                    | Permissions::OwnerWrite
+                    | Permissions::OwnerExecute
+                    | Permissions::GroupRead
+                    | Permissions::GroupExecute
+                    | Permissions::OtherRead
+                    | Permissions::OtherExecute,
+                kind: FileKind::Directory,
             },
             ..Default::default()
         })
@@ -387,7 +367,7 @@ pub struct AnonFile {
 }
 
 impl super::FileDescriptor for AnonFile {
-    fn chmod(&self, _permissions: common::Permissions) -> common::Result<()> {
+    fn chmod(&self, _permissions: Permissions) -> Result<()> {
         if !self.exists {
             Err(Errno::OperationNotSupported)
         } else {
@@ -395,17 +375,17 @@ impl super::FileDescriptor for AnonFile {
         }
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead | common::Permissions::OwnerWrite | common::Permissions::GroupRead | common::Permissions::OtherRead,
-                kind: common::FileKind::Regular,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::OtherRead,
+                kind: FileKind::Regular,
             },
             ..Default::default()
         })
     }
 
-    fn truncate(&self, _len: i64) -> common::Result<()> {
+    fn truncate(&self, _len: i64) -> Result<()> {
         if !self.exists {
             todo!();
         } else {

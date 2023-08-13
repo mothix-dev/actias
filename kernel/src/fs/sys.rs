@@ -1,5 +1,5 @@
-use alloc::{boxed::Box, string::String, vec::Vec};
-use common::{Errno, OpenFlags, Permissions};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
 use log::{error, log, Level};
 
 pub struct SysFsRoot;
@@ -15,19 +15,19 @@ macro_rules! make_sysfs {
         const SYS_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
 
         impl super::FileDescriptor for SysFsRoot {
-            fn open(&self, name: String, flags: OpenFlags) -> common::Result<Box<dyn super::FileDescriptor>> {
+            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
 
                 match name.as_str() {
-                    $($name => Ok(Box::new($type::new())),),*
+                    $($name => Ok(Arc::new($type::new())),),*
                     _ => Err(Errno::NoSuchFileOrDir),
                 }
             }
 
 
-            fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+            fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
                 let position: usize = match position.try_into() {
                     Ok(position) => position,
                     Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -46,16 +46,16 @@ macro_rules! make_sysfs {
                 }
             }
 
-            fn stat(&self) -> common::Result<common::FileStat> {
-                Ok(common::FileStat {
-                    mode: common::FileMode {
-                        permissions: common::Permissions::OwnerRead
-                        | common::Permissions::OwnerExecute
-                        | common::Permissions::GroupRead
-                        | common::Permissions::GroupExecute
-                        | common::Permissions::OtherRead
-                        | common::Permissions::OtherExecute,
-                        kind: common::FileKind::Directory,
+            fn stat(&self) -> Result<FileStat> {
+                Ok(FileStat {
+                    mode: FileMode {
+                        permissions: Permissions::OwnerRead
+                        | Permissions::OwnerExecute
+                        | Permissions::GroupRead
+                        | Permissions::GroupExecute
+                        | Permissions::OtherRead
+                        | Permissions::OtherExecute,
+                        kind: FileKind::Directory,
                     },
                     ..Default::default()
                 })
@@ -80,22 +80,22 @@ impl LogFs {
 const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
 impl super::FileDescriptor for LogFs {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
         if flags & OpenFlags::Create != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
 
         match name.as_str() {
-            "error" => Ok(Box::new(Logger::new(Level::Error))),
-            "warn" => Ok(Box::new(Logger::new(Level::Warn))),
-            "info" => Ok(Box::new(Logger::new(Level::Info))),
-            "debug" => Ok(Box::new(Logger::new(Level::Debug))),
-            "trace" => Ok(Box::new(Logger::new(Level::Trace))),
+            "error" => Ok(Arc::new(Logger::new(Level::Error))),
+            "warn" => Ok(Arc::new(Logger::new(Level::Warn))),
+            "info" => Ok(Arc::new(Logger::new(Level::Info))),
+            "debug" => Ok(Arc::new(Logger::new(Level::Debug))),
+            "trace" => Ok(Arc::new(Logger::new(Level::Trace))),
             _ => Err(Errno::NoSuchFileOrDir),
         }
     }
 
-    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -114,16 +114,11 @@ impl super::FileDescriptor for LogFs {
         }
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::Directory,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::Directory,
             },
             ..Default::default()
         })
@@ -142,17 +137,17 @@ impl Logger {
 }
 
 impl super::FileDescriptor for Logger {
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
                 permissions: Permissions::OwnerWrite | Permissions::GroupWrite | Permissions::OtherWrite,
-                kind: common::FileKind::CharSpecial,
+                kind: FileKind::CharSpecial,
             },
             ..Default::default()
         })
     }
 
-    fn write(&self, _position: i64, length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, _position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
         let mut buf = Vec::new();
         if buf.try_reserve_exact(length).is_err() {
             callback(Err(Errno::OutOfMemory), false);

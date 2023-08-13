@@ -119,14 +119,14 @@ fn write_message(message: &str) {
 #[no_mangle]
 pub extern "C" fn _start() {
     unsafe {
-        *(0xdffffffc as *mut u32) = 0xe621;
+        *(0xdfffcffc as *mut u32) = 0xe621;
     }
 
     if unsafe { syscall_0_args(Syscalls::IsComputerOn).unwrap() } == 1 {
         write_message("computer is on!");
     }
 
-    let uwu = unsafe { *(0xdffffffd as *mut u8) };
+    let uwu = unsafe { *(0xdfffcffd as *mut u8) };
     if uwu != 0xe6 {
         write_message(":(");
     }
@@ -137,7 +137,7 @@ pub extern "C" fn _start() {
         write_message("child process");
 
         unsafe {
-            *(0xdffffffc as *mut u32) = 0xe926;
+            *(0xdfffcffc as *mut u32) = 0xe926;
         }
     } else {
         write_message("parent process");
@@ -148,7 +148,7 @@ pub extern "C" fn _start() {
             }
         }
 
-        let uwu = unsafe { *(0xdffffffd as *mut u8) };
+        let uwu = unsafe { *(0xdfffcffd as *mut u8) };
         if uwu == 0xe9 {
             write_message(":(");
         } else if uwu == 0xe6 {

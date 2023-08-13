@@ -1,10 +1,9 @@
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc};
 use common::Errno;
 use log::debug;
 use spin::Mutex;
 
-pub fn exec(file: crate::fs::OpenFile, mut callback: Box<dyn crate::fs::RequestCallback<(Arc<Mutex<crate::mm::ProcessMap>>, usize)>>) {
-    let callback = Arc::new(Mutex::new(callback));
+pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallback<(Arc<Mutex<crate::mm::ProcessMap>>, usize)>>) {
     let handle = file.handle().clone();
 
     handle.clone().make_request(crate::fs::Request::Read {
@@ -13,23 +12,22 @@ pub fn exec(file: crate::fs::OpenFile, mut callback: Box<dyn crate::fs::RequestC
         callback: Box::new(move |res, first_blocked| {
             let buf = match res {
                 Ok(buf) => buf,
-                Err(err) => return (callback.lock())(Err(err), first_blocked),
+                Err(err) => return callback(Err(err), first_blocked),
             };
 
             let header = goblin::elf32::header::Header::from_bytes(match buf.try_into() {
                 Ok(buf) => buf,
-                Err(_) => return (callback.lock())(Err(Errno::ExecutableFormatErr), first_blocked),
+                Err(_) => return callback(Err(Errno::ExecutableFormatErr), first_blocked),
             });
 
             // sanity check
             if header.e_type != goblin::elf::header::ET_EXEC {
-                return (callback.lock())(Err(Errno::ExecutableFormatErr), first_blocked);
+                return callback(Err(Errno::ExecutableFormatErr), first_blocked);
             }
 
-            let header = Arc::new(header.clone());
-            let callback = callback.clone();
+            let header = Arc::new(*header);
 
-            handle.make_request(crate::fs::Request::Read {
+            handle.clone().make_request(crate::fs::Request::Read {
                 position: header.e_phoff.try_into().unwrap(),
                 length: header.e_phentsize as usize * header.e_phnum as usize,
                 callback: Box::new(move |res, second_blocked| {
@@ -37,7 +35,7 @@ pub fn exec(file: crate::fs::OpenFile, mut callback: Box<dyn crate::fs::RequestC
 
                     let buf = match res {
                         Ok(buf) => buf,
-                        Err(err) => return (callback.lock())(Err(err), blocked),
+                        Err(err) => return callback(Err(err), blocked),
                     };
                     let headers = goblin::elf32::program_header::ProgramHeader::from_bytes(buf, header.e_phnum as usize);
 
@@ -73,36 +71,38 @@ pub fn exec(file: crate::fs::OpenFile, mut callback: Box<dyn crate::fs::RequestC
                                         if header.p_filesz == 0 {
                                             crate::mm::MappingKind::Anonymous
                                         } else {
-                                            /*crate::mm::MappingKind::FileCopy {
-                                                file_descriptor: descriptor.dup()?,
-                                                file_offset: file_offset.try_into().map_err(|_| Errno::ValueOverflow)?,
-                                            }*/
-                                            todo!();
+                                            crate::mm::MappingKind::FileCopy {
+                                                file_handle: handle.clone(),
+                                                file_offset: match file_offset.try_into() {
+                                                    Ok(offset) => offset,
+                                                    Err(_) => return callback(Err(Errno::ValueOverflow), blocked),
+                                                },
+                                            }
                                         },
                                         crate::mm::ContiguousRegion::new(
                                             match base_addr.try_into() {
                                                 Ok(base) => base,
-                                                Err(_) => return (callback.lock())(Err(Errno::ValueOverflow), blocked),
+                                                Err(_) => return callback(Err(Errno::ValueOverflow), blocked),
                                             },
                                             match region_len.try_into() {
                                                 Ok(len) => len,
-                                                Err(_) => return (callback.lock())(Err(Errno::ValueOverflow), blocked),
+                                                Err(_) => return callback(Err(Errno::ValueOverflow), blocked),
                                             },
                                         ),
                                         protection,
                                     );
 
                                     if let Err(err) = map.add_mapping(&arc_map, mapping, false, true) {
-                                        return (callback.lock())(Err(err), blocked);
+                                        return callback(Err(err), blocked);
                                     }
                                 }
-                                goblin::elf::program_header::PT_INTERP => return (callback.lock())(Err(Errno::ExecutableFormatErr), blocked),
+                                goblin::elf::program_header::PT_INTERP => return callback(Err(Errno::ExecutableFormatErr), blocked),
                                 _ => (),
                             }
                         }
                     }
 
-                    (callback.lock())(Ok((arc_map, header.e_entry as usize)), blocked);
+                    callback(Ok((arc_map, header.e_entry as usize)), blocked);
                 }),
             });
         }),

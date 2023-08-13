@@ -4,6 +4,7 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use common::{Errno, OpenFlags};
@@ -440,9 +441,12 @@ impl Clone for TarFile {
 }
 
 impl super::FileDescriptor for TarFile {
-    fn read(&self, position: i64, length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         match position.try_into() {
-            Ok(position) => callback(Ok(&self.data[position..position + length]), false),
+            Ok(position) => {
+                let end: usize = position + length;
+                callback(Ok(&self.data[position..end.min(self.data.len())]), false);
+            }
             Err(_) => callback(Err(Errno::ValueOverflow), false),
         }
     }
@@ -480,7 +484,7 @@ impl Clone for TarDirectory {
 }
 
 impl super::FileDescriptor for TarDirectory {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<Box<dyn super::FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> common::Result<Arc<dyn super::FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -488,8 +492,8 @@ impl super::FileDescriptor for TarDirectory {
         for entry in self.dir_entries.iter() {
             if entry.name == name {
                 match entry.file {
-                    DirFile::Directory(ref dir) => return Ok(Box::new(dir.clone())),
-                    DirFile::File(ref file) => return Ok(Box::new(file.clone())),
+                    DirFile::Directory(ref dir) => return Ok(Arc::new(dir.clone())),
+                    DirFile::File(ref file) => return Ok(Arc::new(file.clone())),
                 }
             }
         }
@@ -497,7 +501,7 @@ impl super::FileDescriptor for TarDirectory {
         Err(Errno::NoSuchFileOrDir)
     }
 
-    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),

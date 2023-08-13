@@ -4,6 +4,7 @@
 use crate::{
     arch::{bsp::RegisterContext, PROPERTIES},
     mm::{PageDirTracker, PageDirectory},
+    process::Process,
     timer::{Timeout, Timer},
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
@@ -306,5 +307,109 @@ impl Drop for Scheduler {
 pub extern "C" fn wait_around() -> ! {
     loop {
         (crate::arch::PROPERTIES.wait_for_interrupt)();
+    }
+}
+
+/// the state used to resume execution of a blocked process once an async operation completes
+pub struct BlockedState {
+    current_task: Arc<Mutex<Task>>,
+    scheduler: Arc<Scheduler>,
+    blocked_flag: Arc<AtomicBool>,
+}
+
+impl BlockedState {
+    /// gets the task that'll be unblocked after the operation completes
+    pub fn task(&self) -> &Arc<Mutex<Task>> {
+        &self.current_task
+    }
+
+    /// returns the given value to the task and resumes execution
+    pub fn syscall_return(self, result: common::Result<usize>, blocked: bool) {
+        {
+            let mut task_guard = self.current_task.lock();
+            task_guard.exec_mode = ExecMode::Running;
+            task_guard.registers.syscall_return(result.map_err(|e| e as usize));
+        }
+
+        // if this request blocked, push the task back onto the queue so it'll execute Soon™
+        if blocked {
+            self.scheduler.push_task(self.current_task);
+        }
+
+        self.blocked_flag.store(false, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// resumes execution of the task without returning a value
+    pub fn bare_return(self, blocked: bool) {
+        {
+            let mut task_guard = self.current_task.lock();
+            task_guard.exec_mode = ExecMode::Running;
+        }
+
+        // if this request blocked, push the task back onto the queue so it'll execute Soon™
+        if blocked {
+            self.scheduler.push_task(self.current_task);
+        }
+
+        self.blocked_flag.store(false, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// sets up blocking a process until an async operation completes and cleanly handles its result
+///
+/// # Arguments
+/// * `registers` - the register context from the process
+/// * `callback` - a callback that's ran to set up the request, is given a reference to the process for convenience and a state that's used to send the result back to the process when the operation completes.
+/// if the callback returns an error, that error will be passed back to the process so it can immediately return back as normal
+#[allow(clippy::clone_on_copy)]
+pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl FnOnce(&Process, BlockedState) -> common::Result<()>) {
+    let global_state = crate::get_global_state();
+
+    // TODO: detect current CPU
+    let scheduler = global_state.cpus.read()[0].scheduler.clone();
+
+    let current_task = match scheduler.get_current_task() {
+        Some(task) => task,
+        None => unreachable!(),
+    };
+    current_task.lock().registers = registers.clone();
+
+    let pid = match current_task.lock().pid {
+        Some(pid) => pid,
+        None => {
+            if is_syscall {
+                registers.syscall_return(Err(common::Errno::NoSuchProcess as usize));
+            }
+            return;
+        },
+    };
+
+    if let Some(process) = global_state.process_table.read().get(pid) {
+        // set the process as blocked so if the write call blocks it won't keep executing
+        current_task.lock().exec_mode = ExecMode::Blocked;
+
+        // keeps track of whether the request blocks or not so that
+        let blocked_flag = Arc::new(AtomicBool::new(true));
+
+        if let Err(err) = callback(process, BlockedState {
+            current_task: current_task.clone(),
+            scheduler: scheduler.clone(),
+            blocked_flag: blocked_flag.clone(),
+        }) {
+            current_task.lock().exec_mode = ExecMode::Running;
+            if is_syscall {
+                registers.syscall_return(Err(err as usize));
+            }
+            return;
+        }
+
+        // if the request didn't block, simply load the latest version of the task's registers and return as normal
+        if !blocked_flag.load(core::sync::atomic::Ordering::SeqCst) {
+            *registers = current_task.lock().registers;
+        } else {
+            scheduler.context_switch(registers);
+        }
+    } else if is_syscall {
+        registers.syscall_return(Err(common::Errno::NoSuchProcess as usize));
     }
 }

@@ -14,14 +14,13 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use common::{Errno, FileKind, OpenFlags, SeekKind};
-use log::debug;
+use common::{Errno, FileKind, FileMode, FileStat, GroupId, OpenFlags, Permissions, Result, SeekKind, UnlinkFlags, UserId};
 use core::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use spin::{Mutex, RwLock};
 
 /// a callback ran when a filesystem request has been completed. it's passed the result of the operation, and whether the operation blocked before completing
 /// (so that any task associated with it won't be re-queued multiple times)
-pub trait RequestCallback<T> = FnMut(common::Result<T>, bool);
+pub trait RequestCallback<T> = FnOnce(Result<T>, bool);
 
 /// a handle denoting a unique open file in a filesystem
 pub type HandleNum = usize;
@@ -29,17 +28,10 @@ pub type HandleNum = usize;
 /// an async request that can be made to a filesystem. all requests are associated with a file handle, which isn't provided in the request object itself out of convenience
 pub enum Request {
     /// change the permissions of a file to those provided
-    Chmod {
-        permissions: common::Permissions,
-        callback: Box<dyn RequestCallback<()>>,
-    },
+    Chmod { permissions: Permissions, callback: Box<dyn RequestCallback<()>> },
 
     /// change the owner and group of a file to those provided
-    Chown {
-        owner: common::UserId,
-        group: common::GroupId,
-        callback: Box<dyn RequestCallback<()>>,
-    },
+    Chown { owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>> },
 
     /// close this file handle
     Close,
@@ -47,7 +39,7 @@ pub enum Request {
     /// open a new file in the directory pointed to by this file handle
     Open {
         name: String,
-        flags: common::OpenFlags,
+        flags: OpenFlags,
         callback: Box<dyn RequestCallback<HandleNum>>,
     },
 
@@ -59,7 +51,7 @@ pub enum Request {
     },
 
     /// get information about a file
-    Stat { callback: Box<dyn RequestCallback<common::FileStat>> },
+    Stat { callback: Box<dyn RequestCallback<FileStat>> },
 
     /// truncate a file to the given length
     Truncate { len: i64, callback: Box<dyn RequestCallback<()>> },
@@ -67,7 +59,7 @@ pub enum Request {
     /// remove a file from the directory pointed to by this file handle
     Unlink {
         name: String,
-        flags: common::UnlinkFlags,
+        flags: UnlinkFlags,
         callback: Box<dyn RequestCallback<()>>,
     },
 
@@ -81,7 +73,7 @@ pub enum Request {
 
 impl Request {
     /// calls the callback for this request with the given error and blocked state
-    pub fn callback_error(&mut self, error: Errno, blocked: bool) {
+    pub fn callback_error(self, error: Errno, blocked: bool) {
         match self {
             Self::Chmod { callback, .. } => callback(Err(error), blocked),
             Self::Chown { callback, .. } => callback(Err(error), blocked),
@@ -120,7 +112,7 @@ pub struct FsEnvironment {
 impl FsEnvironment {
     pub fn new() -> Self {
         let namespace = Arc::new(RwLock::new(BTreeMap::new()));
-        let fs_list = Arc::new(KernelFs::new(Box::new(FsList { namespace: namespace.clone() })));
+        let fs_list = Arc::new(KernelFs::new(Arc::new(FsList { namespace: namespace.clone() })));
         let fs_list_dir = OpenFile {
             handle: Arc::new(FileHandle {
                 filesystem: fs_list.clone(),
@@ -129,7 +121,7 @@ impl FsEnvironment {
             seek_pos: Arc::new(AtomicI64::new(0)),
             path: Arc::new(Mutex::new(AbsolutePath { path: vec![], name: "..".to_string() })),
             flags: RwLock::new(OpenFlags::Read),
-            kind: AtomicU8::new(common::FileKind::Directory as u8),
+            kind: AtomicU8::new(FileKind::Directory as u8),
         };
 
         Self {
@@ -142,14 +134,14 @@ impl FsEnvironment {
         }
     }
 
-    pub fn fork(&self) -> common::Result<Self> {
+    pub fn fork(&self) -> Result<Self> {
         let mut file_descriptors = ConsistentIndexArray::new();
 
         // duplicate all open file descriptors
         {
             let existing_fds = self.file_descriptors.lock();
             for (index, open_file) in existing_fds.as_slice().iter().enumerate() {
-                if let Some(file) = open_file && *file.flags.read() & common::OpenFlags::CloseOnExec != common::OpenFlags::None {
+                if let Some(file) = open_file && *file.flags.read() & OpenFlags::CloseOnExec == OpenFlags::None {
                     file_descriptors.set(index, file.clone()).map_err(|_| Errno::OutOfMemory)?;
                 }
             }
@@ -166,7 +158,7 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `chmod`, blocking
-    pub fn chmod(&self, file_descriptor: usize, permissions: common::Permissions, mut callback: Box<dyn RequestCallback<()>>) {
+    pub fn chmod(&self, file_descriptor: usize, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.chmod(permissions, callback);
         } else {
@@ -175,7 +167,7 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `chown`, blocking
-    pub fn chown(&self, file_descriptor: usize, owner: common::UserId, group: common::GroupId, mut callback: Box<dyn RequestCallback<()>>) {
+    pub fn chown(&self, file_descriptor: usize, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.chown(owner, group, callback);
         } else {
@@ -184,7 +176,7 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `close`, non-blocking
-    pub fn close(&self, file_descriptor: usize) -> common::Result<()> {
+    pub fn close(&self, file_descriptor: usize) -> Result<()> {
         self.file_descriptors.lock().remove(file_descriptor).ok_or(Errno::BadFile).map(|_| ())
     }
 
@@ -221,12 +213,12 @@ impl FsEnvironment {
             kind: FileKind,
             no_follow: bool,
             blocked: bool,
-            callback: Arc<Mutex<Box<dyn RequestCallback<PartiallyResolved>>>>,
+            callback: Box<dyn RequestCallback<PartiallyResolved>>,
         ) {
             let back = path.lock().pop_back();
             let component = match back {
                 Some(component) => component,
-                None => return (callback.lock())(Ok(PartiallyResolved::Handle(last.unwrap_or(at), AtomicU8::new(kind as u8))), blocked), // resolved!
+                None => return callback(Ok(PartiallyResolved::Handle(last.unwrap_or(at), AtomicU8::new(kind as u8))), blocked), // resolved!
             };
 
             // makes an open request for the next component in the path
@@ -240,7 +232,6 @@ impl FsEnvironment {
                         let prev = at.clone();
                         let path = path.clone();
                         let path_vec = path_vec.clone();
-                        let callback = callback.clone();
 
                         stat_step(
                             arc_self,
@@ -253,7 +244,7 @@ impl FsEnvironment {
                             callback,
                         );
                     }
-                    Err(err) => (callback.lock())(Err(err), blocked || open_blocked),
+                    Err(err) => callback(Err(err), blocked || open_blocked),
                 }),
             });
         }
@@ -266,7 +257,7 @@ impl FsEnvironment {
             path_vec: Arc<Mutex<Vec<String>>>,
             no_follow: bool,
             blocked: bool,
-            callback: Arc<Mutex<Box<dyn RequestCallback<PartiallyResolved>>>>,
+            callback: Box<dyn RequestCallback<PartiallyResolved>>,
         ) {
             // makes a stat request for the current component in the path and handles it accordingly
             at.clone().make_request(Request::Stat {
@@ -275,19 +266,18 @@ impl FsEnvironment {
                         let arc_self = arc_self.clone();
                         let last = last.clone();
                         let at = at.clone();
-                        let callback = callback.clone();
                         let path = path.clone();
                         let path_vec = path_vec.clone();
 
                         match stat.mode.kind {
-                            common::FileKind::Directory => (),
-                            common::FileKind::SymLink => {
+                            FileKind::Directory => (),
+                            FileKind::SymLink => {
                                 return symlink_step(arc_self, last, at, path, path_vec, no_follow, blocked || stat_blocked, callback, stat.size);
                             }
                             _ => {
                                 if path.lock().back().is_some() {
                                     // there are still more components in the path and this isn't a directory or a symlink to one, so give up
-                                    return (callback.lock())(Err(Errno::NotDirectory), blocked || stat_blocked);
+                                    return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
                                 }
                             }
                         }
@@ -296,7 +286,7 @@ impl FsEnvironment {
 
                         open_step(arc_self, last, at, path, path_vec, stat.mode.kind, no_follow, blocked || stat_blocked, callback);
                     }
-                    Err(err) => (callback.lock())(Err(err), blocked || stat_blocked),
+                    Err(err) => callback(Err(err), blocked || stat_blocked),
                 }),
             });
         }
@@ -309,12 +299,12 @@ impl FsEnvironment {
             path_vec: Arc<Mutex<Vec<String>>>,
             no_follow: bool,
             blocked: bool,
-            callback: Arc<Mutex<Box<dyn RequestCallback<PartiallyResolved>>>>,
+            callback: Box<dyn RequestCallback<PartiallyResolved>>,
             length: i64,
         ) {
             let length: usize = match length.try_into() {
                 Ok(length) => length,
-                Err(_) => return (callback.lock())(Err(Errno::FileTooBig), blocked),
+                Err(_) => return callback(Err(Errno::FileTooBig), blocked),
             };
 
             // makes a read request to read the target of the symlink
@@ -324,7 +314,6 @@ impl FsEnvironment {
                 callback: Box::new(move |res, read_blocked| {
                     let actual_blocked = blocked || read_blocked;
                     let arc_self = arc_self.clone();
-                    let callback = callback.clone();
 
                     let path_len = path.lock().len();
                     let absolute_path;
@@ -350,21 +339,21 @@ impl FsEnvironment {
                                     seek_pos: Arc::new(0.into()),
                                     path: Mutex::new(AbsolutePath { path: absolute_path, name: filename }).into(),
                                     flags: OpenFlags::Read.into(),
-                                    kind: AtomicU8::new(common::FileKind::Directory as u8),
+                                    kind: AtomicU8::new(FileKind::Directory as u8),
                                 }),
                                 str.to_string(),
                                 no_follow,
-                                Box::new(move |res, blocked| (callback.lock())(res.map(PartiallyResolved::Full), blocked || actual_blocked)),
+                                Box::new(move |res, blocked| callback(res.map(PartiallyResolved::Full), blocked || actual_blocked)),
                             ),
-                            Err(_) => (callback.lock())(Err(Errno::LinkSevered), actual_blocked),
+                            Err(_) => callback(Err(Errno::LinkSevered), actual_blocked),
                         },
-                        Err(err) => (callback.lock())(Err(err), actual_blocked),
+                        Err(err) => callback(Err(err), actual_blocked),
                     }
                 }),
             });
         }
 
-        open_step(arc_self, None, at, Mutex::new(path).into(), path_vec, FileKind::Regular, no_follow, false, Mutex::new(callback).into());
+        open_step(arc_self, None, at, Mutex::new(path).into(), path_vec, FileKind::Regular, no_follow, false, callback);
     }
 
     fn concat_slices(a: &[String], b: &str, c: &[String]) -> Vec<String> {
@@ -384,7 +373,7 @@ impl FsEnvironment {
     }
 
     /// resolves an absolute path in the filesystem (i.e. one that starts with /) after simplification
-    fn resolve_absolute_path(arc_self: Arc<Self>, mut path: Vec<String>, no_follow: bool, mut callback: Box<dyn RequestCallback<ResolvedHandle>>) {
+    fn resolve_absolute_path(arc_self: Arc<Self>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         let mut path_queue = Self::slice_to_deque(&path);
         let name = Arc::new(Mutex::new(path.pop().map(|n| n.to_string()).unwrap_or_else(|| "..".to_string())));
         let path = Arc::new(Mutex::new(path));
@@ -400,7 +389,7 @@ impl FsEnvironment {
                                 path: path.lock().to_vec(),
                                 name: name.lock().to_string(),
                             })),
-                            kind: AtomicU8::new(common::FileKind::Directory as u8),
+                            kind: AtomicU8::new(FileKind::Directory as u8),
                         }),
                         false,
                     );
@@ -450,7 +439,7 @@ impl FsEnvironment {
                         path: path.lock().to_vec(),
                         name: name.lock().to_string(),
                     })),
-                    kind: AtomicU8::new(common::FileKind::Directory as u8),
+                    kind: AtomicU8::new(FileKind::Directory as u8),
                 }),
                 false,
             );
@@ -458,7 +447,7 @@ impl FsEnvironment {
     }
 
     /// resolves a relative path in the filesystem (i.e. one that doesn't start with /) after simplification
-    fn resolve_relative_path(arc_self: Arc<Self>, at: Arc<FileHandle>, absolute_path: Vec<String>, mut path: Vec<String>, no_follow: bool, mut callback: Box<dyn RequestCallback<ResolvedHandle>>) {
+    fn resolve_relative_path(arc_self: Arc<Self>, at: Arc<FileHandle>, absolute_path: Vec<String>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         let path_queue = Self::slice_to_deque(&path);
         let name = Arc::new(Mutex::new(path.pop().map(|n| n.to_string()).unwrap_or_else(|| "..".to_string())));
         let absolute_path = Arc::new(Mutex::new(absolute_path));
@@ -492,7 +481,7 @@ impl FsEnvironment {
         );
     }
 
-    fn resolve_container(arc_self: Arc<Self>, at: Option<OpenFile>, path: String, no_follow: bool, mut callback: Box<dyn RequestCallback<ResolvedHandle>>) {
+    fn resolve_container(arc_self: Arc<Self>, at: Option<OpenFile>, path: String, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         match path.chars().next() {
             Some('/') => {
                 // parse absolute path
@@ -549,8 +538,8 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `open`, blocking
-    pub fn open(arc_self: Arc<Self>, at: usize, path: String, flags: common::OpenFlags, mut callback: Box<dyn RequestCallback<usize>>) {
-        let at = if flags & common::OpenFlags::AtCWD == common::OpenFlags::None {
+    pub fn open(arc_self: Arc<Self>, at: usize, path: String, flags: OpenFlags, callback: Box<dyn RequestCallback<usize>>) {
+        let at = if flags & OpenFlags::AtCWD == OpenFlags::None {
             match arc_self.file_descriptors.lock().get(at) {
                 Some(fd) => Some(fd.clone()),
                 None => return callback(Err(Errno::BadFile), false),
@@ -561,13 +550,12 @@ impl FsEnvironment {
 
         let file_descriptors = arc_self.file_descriptors.clone();
         let namespace = arc_self.namespace.clone();
-        let callback = Arc::new(Mutex::new(callback));
 
         Self::resolve_container(
             arc_self,
             at,
             path,
-            flags & common::OpenFlags::AtCWD != common::OpenFlags::None,
+            flags & OpenFlags::AtCWD != OpenFlags::None,
             Box::new(move |res, blocked| match res {
                 Ok(resolved) => {
                     if resolved.path.lock().path.is_empty() {
@@ -588,12 +576,11 @@ impl FsEnvironment {
                             };
 
                             // add the new handle to the file descriptor list
-                            (callback.lock())(file_descriptors.lock().add(open_file).map_err(|_| Errno::OutOfMemory), blocked);
+                            callback(file_descriptors.lock().add(open_file).map_err(|_| Errno::OutOfMemory), blocked);
                         } else {
-                            (callback.lock())(Err(Errno::NoSuchFileOrDir), blocked);
+                            callback(Err(Errno::NoSuchFileOrDir), blocked);
                         }
                     } else {
-                        let callback = callback.clone();
                         let name = resolved.path.lock().name.clone();
                         let path = resolved.path.clone();
                         let kind = resolved.kind.load(Ordering::SeqCst);
@@ -603,7 +590,7 @@ impl FsEnvironment {
                         // open the file with the proper flags
                         resolved.container.make_request(Request::Open {
                             name: name.to_string(),
-                            flags: flags & !(common::OpenFlags::CloseOnExec | common::OpenFlags::AtCWD),
+                            flags: flags & !(OpenFlags::CloseOnExec | OpenFlags::AtCWD),
                             callback: Box::new(move |res, open_blocked| match res {
                                 Ok(handle) => {
                                     let handle = FileHandle {
@@ -621,20 +608,20 @@ impl FsEnvironment {
                                     };
 
                                     // add the new handle to the file descriptor list
-                                    (callback.lock())(file_descriptors.lock().add(open_file).map_err(|_| Errno::OutOfMemory), blocked || open_blocked);
+                                    callback(file_descriptors.lock().add(open_file).map_err(|_| Errno::OutOfMemory), blocked || open_blocked);
                                 }
-                                Err(err) => (callback.lock())(Err(err), blocked || open_blocked),
+                                Err(err) => callback(Err(err), blocked || open_blocked),
                             }),
                         });
                     }
                 }
-                Err(err) => (callback.lock())(Err(err), blocked),
+                Err(err) => callback(Err(err), blocked),
             }),
         );
     }
 
     /// implements POSIX `read`, blocking
-    pub fn read(&self, file_descriptor: usize, length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    pub fn read(&self, file_descriptor: usize, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.read(length, callback);
         } else {
@@ -643,7 +630,7 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `seek`, partially blocking
-    pub fn seek(&self, file_descriptor: usize, offset: i64, kind: common::SeekKind, mut callback: Box<dyn RequestCallback<i64>>) {
+    pub fn seek(&self, file_descriptor: usize, offset: i64, kind: SeekKind, callback: Box<dyn RequestCallback<i64>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.seek(offset, kind, callback);
         } else {
@@ -652,7 +639,7 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `stat`, blocking
-    pub fn stat(&self, file_descriptor: usize, mut callback: Box<dyn RequestCallback<common::FileStat>>) {
+    pub fn stat(&self, file_descriptor: usize, callback: Box<dyn RequestCallback<FileStat>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.stat(callback);
         } else {
@@ -661,7 +648,7 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `truncate`, blocking
-    pub fn truncate(&self, file_descriptor: usize, len: i64, mut callback: Box<dyn RequestCallback<()>>) {
+    pub fn truncate(&self, file_descriptor: usize, len: i64, callback: Box<dyn RequestCallback<()>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.truncate(len, callback);
         } else {
@@ -670,8 +657,8 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `unlink`, blocking
-    pub fn unlink(arc_self: Arc<Self>, at: usize, path: String, flags: common::UnlinkFlags, mut callback: Box<dyn RequestCallback<()>>) {
-        let at = if flags & common::UnlinkFlags::AtCWD == common::UnlinkFlags::None {
+    pub fn unlink(arc_self: Arc<Self>, at: usize, path: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
+        let at = if flags & UnlinkFlags::AtCWD == UnlinkFlags::None {
             match arc_self.file_descriptors.lock().get(at) {
                 Some(fd) => Some(fd.clone()),
                 None => return callback(Err(Errno::BadFile), false),
@@ -680,8 +667,6 @@ impl FsEnvironment {
             None
         };
 
-        let callback = Arc::new(Mutex::new(callback));
-
         Self::resolve_container(
             arc_self,
             at,
@@ -689,23 +674,18 @@ impl FsEnvironment {
             false,
             Box::new(move |res, blocked| match res {
                 Ok(resolved) => {
-                    let callback = callback.clone();
                     let name = resolved.path.lock().name.to_string();
 
                     // unlink the file
-                    resolved.container.make_request(Request::Unlink {
-                        name,
-                        flags,
-                        callback: Box::new(move |res, blocked| (callback.lock())(res, blocked)),
-                    });
+                    resolved.container.make_request(Request::Unlink { name, flags, callback });
                 }
-                Err(err) => (callback.lock())(Err(err), blocked),
+                Err(err) => callback(Err(err), blocked),
             }),
         );
     }
 
     /// implements POSIX `write`, blocking
-    pub fn write(&self, file_descriptor: usize, length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    pub fn write(&self, file_descriptor: usize, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
         if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
             file.write(length, callback);
         } else {
@@ -714,13 +694,13 @@ impl FsEnvironment {
     }
 
     /// changes the root directory of this environment to the directory pointed to by the given file descriptor
-    pub fn chroot(&self, file_descriptor: usize) -> common::Result<()> {
+    pub fn chroot(&self, file_descriptor: usize) -> Result<()> {
         *self.root.write() = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
         Ok(())
     }
 
     /// changes the current working directory of this environment to the directory pointed to by the given file descriptor
-    pub fn chdir(&self, file_descriptor: usize) -> common::Result<()> {
+    pub fn chdir(&self, file_descriptor: usize) -> Result<()> {
         *self.cwd.write() = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
         Ok(())
     }
@@ -753,13 +733,31 @@ impl FsEnvironment {
     }
 
     /// gets the path of the file pointed to by the given file descriptor
-    pub fn get_path(&self, file_descriptor: usize) -> common::Result<String> {
+    pub fn get_path(&self, file_descriptor: usize) -> Result<String> {
         Ok(self.get_path_to(self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?))
     }
 
     /// gets the underlying open file object associated with the given file descriptor
     pub fn get_open_file(&self, file_descriptor: usize) -> Option<OpenFile> {
         self.file_descriptors.lock().get(file_descriptor).cloned()
+    }
+
+    /// implements POSIX dup()
+    pub fn dup(&self, file_descriptor: usize) -> common::Result<usize> {
+        let new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
+        *new_descriptor.flags.write() &= !common::OpenFlags::CloseOnExec;
+        self.file_descriptors.lock().add(new_descriptor).map_err(|_| Errno::OutOfMemory)
+    }
+
+    /// implements POSIX dup2()
+    pub fn dup2(&self, file_descriptor: usize, new_fd: usize) -> common::Result<()> {
+        if file_descriptor == new_fd {
+            Ok(())
+        } else {
+            let new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
+            *new_descriptor.flags.write() &= !common::OpenFlags::CloseOnExec;
+            self.file_descriptors.lock().set(new_fd, new_descriptor).map_err(|_| Errno::OutOfMemory)
+        }
     }
 }
 
@@ -786,19 +784,19 @@ struct FsList {
 }
 
 impl FileDescriptor for FsList {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<alloc::boxed::Box<dyn FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
 
         if name == ".." {
-            Ok(Box::new(self.clone()))
+            Ok(Arc::new(self.clone()))
         } else {
             Err(Errno::NoSuchFileOrDir)
         }
     }
 
-    fn read(&self, position: i64, _length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -816,16 +814,11 @@ impl FileDescriptor for FsList {
         }
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
-        Ok(common::FileStat {
-            mode: common::FileMode {
-                permissions: common::Permissions::OwnerRead
-                    | common::Permissions::OwnerExecute
-                    | common::Permissions::GroupRead
-                    | common::Permissions::GroupExecute
-                    | common::Permissions::OtherRead
-                    | common::Permissions::OtherExecute,
-                kind: common::FileKind::Directory,
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::Directory,
             },
             ..Default::default()
         })
@@ -854,7 +847,7 @@ pub struct OpenFile {
     handle: Arc<FileHandle>,
     seek_pos: Arc<AtomicI64>,
     path: Arc<Mutex<AbsolutePath>>,
-    flags: RwLock<common::OpenFlags>,
+    flags: RwLock<OpenFlags>,
     kind: AtomicU8,
 }
 
@@ -871,23 +864,23 @@ impl Clone for OpenFile {
 }
 
 impl OpenFile {
-    pub fn kind(&self) -> common::FileKind {
-        unsafe { core::mem::transmute::<u8, common::FileKind>(self.kind.load(Ordering::SeqCst)) }
+    pub fn kind(&self) -> FileKind {
+        unsafe { core::mem::transmute::<u8, FileKind>(self.kind.load(Ordering::SeqCst)) }
     }
 
     pub fn handle(&self) -> Arc<FileHandle> {
         self.handle.clone()
     }
 
-    pub fn chmod(&self, permissions: common::Permissions, callback: Box<dyn RequestCallback<()>>) {
+    pub fn chmod(&self, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
         self.handle.make_request(Request::Chmod { permissions, callback });
     }
 
-    pub fn chown(&self, owner: common::UserId, group: common::GroupId, callback: Box<dyn RequestCallback<()>>) {
+    pub fn chown(&self, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
         self.handle.make_request(Request::Chown { owner, group, callback });
     }
 
-    pub fn open(&self, name: String, flags: common::OpenFlags, mut callback: Box<dyn RequestCallback<FileHandle>>) {
+    pub fn open(&self, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<FileHandle>>) {
         let filesystem = self.handle.filesystem.clone();
         self.handle.make_request(Request::Open {
             name,
@@ -905,7 +898,7 @@ impl OpenFile {
         });
     }
 
-    pub fn read(&self, length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    pub fn read(&self, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
         let seek_pos = self.seek_pos.clone();
         let position = self.seek_pos.load(Ordering::SeqCst);
         let kind = self.kind();
@@ -934,7 +927,7 @@ impl OpenFile {
         });
     }
 
-    pub fn seek(&self, offset: i64, kind: common::SeekKind, mut callback: Box<dyn RequestCallback<i64>>) {
+    pub fn seek(&self, offset: i64, kind: SeekKind, callback: Box<dyn RequestCallback<i64>>) {
         match kind {
             SeekKind::Set => {
                 self.seek_pos.store(offset, Ordering::SeqCst);
@@ -955,7 +948,7 @@ impl OpenFile {
         }
     }
 
-    pub fn stat(&self, callback: Box<dyn RequestCallback<common::FileStat>>) {
+    pub fn stat(&self, callback: Box<dyn RequestCallback<FileStat>>) {
         self.handle.make_request(Request::Stat { callback });
     }
 
@@ -963,11 +956,11 @@ impl OpenFile {
         self.handle.make_request(Request::Truncate { len, callback });
     }
 
-    pub fn unlink(&self, name: String, flags: common::UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
+    pub fn unlink(&self, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
         self.handle.make_request(Request::Unlink { name, flags, callback });
     }
 
-    pub fn write(&self, length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    pub fn write(&self, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
         let seek_pos = self.seek_pos.clone();
         let position = self.seek_pos.load(Ordering::SeqCst);
         self.handle.make_request(Request::Write {
@@ -994,10 +987,8 @@ pub struct AbsolutePath {
     pub name: String,
 }
 
-type BoxedFileDescriptor = Arc<Mutex<Box<dyn FileDescriptor>>>;
-
 pub struct KernelFs {
-    file_handles: Mutex<ConsistentIndexArray<BoxedFileDescriptor>>,
+    file_handles: Mutex<ConsistentIndexArray<Arc<dyn FileDescriptor>>>,
 }
 
 // its literally in a mutex!!
@@ -1005,9 +996,9 @@ unsafe impl Send for KernelFs {}
 unsafe impl Sync for KernelFs {}
 
 impl KernelFs {
-    pub fn new(root: Box<dyn FileDescriptor>) -> Self {
+    pub fn new(root: Arc<dyn FileDescriptor>) -> Self {
         let mut file_handles = ConsistentIndexArray::new();
-        file_handles.set(0, Arc::new(Mutex::new(root))).unwrap();
+        file_handles.set(0, root).unwrap();
 
         Self {
             file_handles: Mutex::new(file_handles),
@@ -1020,23 +1011,19 @@ impl Filesystem for KernelFs {
         0
     }
 
-    fn make_request(&self, handle: HandleNum, mut request: Request) {
+    fn make_request(&self, handle: HandleNum, request: Request) {
         let descriptor = match self.file_handles.lock().get(handle) {
             Some(descriptor) => descriptor.clone(),
             None => return request.callback_error(Errno::BadFile, false),
         };
 
-        if descriptor.is_locked() {
-            debug!("deadlock :(");
-        }
-
         match request {
-            Request::Chmod { permissions, mut callback } => {
-                let res = descriptor.lock().chmod(permissions);
+            Request::Chmod { permissions, callback } => {
+                let res = descriptor.chmod(permissions);
                 callback(res, false);
             }
-            Request::Chown { owner, group, mut callback } => {
-                let res = descriptor.lock().chown(owner, group);
+            Request::Chown { owner, group, callback } => {
+                let res = descriptor.chown(owner, group);
                 callback(res, false);
             }
             Request::Close => {
@@ -1044,46 +1031,43 @@ impl Filesystem for KernelFs {
                     self.file_handles.lock().remove(handle);
                 }
             }
-            Request::Open { name, flags, mut callback } => {
-                let res = descriptor
-                    .lock()
-                    .open(name, flags)
-                    .and_then(|desc| self.file_handles.lock().add(Arc::new(Mutex::new(desc))).map_err(|_| Errno::OutOfMemory));
+            Request::Open { name, flags, callback } => {
+                let res = descriptor.open(name, flags).and_then(|desc| self.file_handles.lock().add(desc).map_err(|_| Errno::OutOfMemory));
                 callback(res, false);
             }
-            Request::Read { position, length, callback } => descriptor.lock().read(position, length, callback),
-            Request::Stat { mut callback } => {
-                let res = descriptor.lock().stat();
+            Request::Read { position, length, callback } => descriptor.read(position, length, callback),
+            Request::Stat { callback } => {
+                let res = descriptor.stat();
                 callback(res, false);
             }
-            Request::Truncate { len, mut callback } => {
-                let res = descriptor.lock().truncate(len);
+            Request::Truncate { len, callback } => {
+                let res = descriptor.truncate(len);
                 callback(res, false);
             }
-            Request::Unlink { name, flags, mut callback } => {
-                let res = descriptor.lock().unlink(name, flags);
+            Request::Unlink { name, flags, callback } => {
+                let res = descriptor.unlink(name, flags);
                 callback(res, false);
             }
-            Request::Write { length, position, callback } => descriptor.lock().write(position, length, callback),
+            Request::Write { length, position, callback } => descriptor.write(position, length, callback),
         }
     }
 }
 
 #[allow(unused_variables)]
-pub trait FileDescriptor {
+pub trait FileDescriptor: Send + Sync {
     /// changes the access permissions of the file pointed to by this file descriptor
-    fn chmod(&self, permissions: common::Permissions) -> common::Result<()> {
+    fn chmod(&self, permissions: Permissions) -> Result<()> {
         Err(Errno::FuncNotSupported)
     }
 
     /// changes the owner and/or group for the file pointed to by this file descriptor
-    fn chown(&self, owner: common::UserId, group: common::GroupId) -> common::Result<()> {
+    fn chown(&self, owner: UserId, group: GroupId) -> Result<()> {
         Err(Errno::FuncNotSupported)
     }
 
     /// opens the file with the given name in the directory pointed to by this file descriptor, returning a new file descriptor to the file on success.
     /// the filename must not contain slash characters
-    fn open(&self, name: String, flags: common::OpenFlags) -> common::Result<Box<dyn FileDescriptor>> {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         Err(Errno::FuncNotSupported)
     }
 
@@ -1094,26 +1078,26 @@ pub trait FileDescriptor {
     /// if this file descriptor points to a directory, its entries will be read in order, one per every read() call,
     /// where every directory entry is formatted as its serial number as a native-endian u32 (4 bytes), followed by the bytes of its name with no null terminator.
     /// if a directory entry exceeds the given buffer length, it should be truncated to the buffer length.
-    fn read(&self, position: i64, length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
         callback(Err(Errno::FuncNotSupported), false);
     }
 
     /// gets information about the file pointed to by this file descriptor
-    fn stat(&self) -> common::Result<common::FileStat>;
+    fn stat(&self) -> Result<FileStat>;
 
     /// shrinks or extends the file pointed to by this file descriptor to the given length
-    fn truncate(&self, len: i64) -> common::Result<()> {
+    fn truncate(&self, len: i64) -> Result<()> {
         Err(Errno::FuncNotSupported)
     }
 
     /// removes a reference to a file in the directory pointed to by this file descriptor from the filesystem,
     /// where it can then be deleted if no processes are using it or if there are no hard links to it
-    fn unlink(&self, name: String, flags: common::UnlinkFlags) -> common::Result<()> {
+    fn unlink(&self, name: String, flags: UnlinkFlags) -> Result<()> {
         Err(Errno::FuncNotSupported)
     }
 
     /// writes data from this buffer to this file descriptor
-    fn write(&self, position: i64, length: usize, mut callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
         callback(Err(Errno::FuncNotSupported), false);
     }
 }

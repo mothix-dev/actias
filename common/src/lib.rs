@@ -11,6 +11,7 @@ use num_enum::TryFromPrimitive;
 pub enum Syscalls {
     IsComputerOn,
     Exit,
+    Chdir,
     Chmod,
     Chown,
     Chroot,
