@@ -310,18 +310,31 @@ impl super::FileDescriptor for MemoryDir {
 
         let base = usize::from_str_radix(&name, 16).map_err(|_| Errno::InvalidArgument)?;
 
-        for map in self.map.lock().map.iter() {
-            if map.region().base == base {
-                return Ok(Arc::new(AnonFile {
-                    pid: self.pid,
-                    map: self.map.clone(),
-                    base,
-                    exists: true,
-                }));
+        if flags & OpenFlags::Create != OpenFlags::None {
+            // create file, directory, or symlink based on flags
+            // mapping for file will be inserted when it's given permissions with chmod and a size with truncate
+            // mapping for directory will be inserted when the `target` file/symlink is created in it as with normal files/symlinks
+            // mapping for symlink will be inserted when it's given a target and permissions with chmod
+            // TODO: how should symlinks be created? maybe a special flag
+            todo!();
+        } else {
+            for map in self.map.lock().map.iter() {
+                if map.region().base == base {
+                    match map.kind() {
+                        crate::mm::MappingKind::Anonymous => {
+                            return Ok(Arc::new(AnonMem {
+                                pid: self.pid,
+                                map: self.map.clone(),
+                                base,
+                            }))
+                        }
+                        crate::mm::MappingKind::File { .. } => todo!(), // need to get the path somehow and make a symlink
+                    }
+                }
             }
-        }
 
-        Err(Errno::NoSuchFileOrDir)
+            Err(Errno::NoSuchFileOrDir)
+        }
     }
 
     fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
@@ -332,7 +345,11 @@ impl super::FileDescriptor for MemoryDir {
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
 
-        let entry = format!("{:0width$x}", map.map.get(position).unwrap().region().base, width = core::mem::size_of::<usize>() * 2);
+        let map = match map.map.get(position) {
+            Some(map) => map,
+            None => return callback(Ok(&[]), false),
+        };
+        let entry = format!("{:0width$x}", map.region().base, width = core::mem::size_of::<usize>() * 2);
 
         let mut data = Vec::new();
         data.extend_from_slice(&(0_u32.to_ne_bytes()));
@@ -359,26 +376,17 @@ impl super::FileDescriptor for MemoryDir {
     }
 }
 
-pub struct AnonFile {
+pub struct AnonMem {
     pid: usize,
     map: Arc<Mutex<crate::mm::ProcessMap>>,
     base: usize,
-    exists: bool,
 }
 
-impl super::FileDescriptor for AnonFile {
-    fn chmod(&self, _permissions: Permissions) -> Result<()> {
-        if !self.exists {
-            Err(Errno::OperationNotSupported)
-        } else {
-            todo!();
-        }
-    }
-
+impl super::FileDescriptor for AnonMem {
     fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
-                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::OtherRead,
+                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead,
                 kind: FileKind::Regular,
             },
             ..Default::default()
@@ -386,10 +394,22 @@ impl super::FileDescriptor for AnonFile {
     }
 
     fn truncate(&self, _len: i64) -> Result<()> {
-        if !self.exists {
-            todo!();
-        } else {
-            Err(Errno::OperationNotSupported)
-        }
+        // change the size of the mapping to the given size
+        todo!();
+    }
+
+    fn read(&self, _position: i64, _length: usize, _callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        // read much like sysfs/mem
+        todo!();
+    }
+
+    fn write(&self, _position: i64, _length: usize, _callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+        // write much like sysfs/mem
+        todo!();
+    }
+
+    fn get_page(&self, _position: i64, _callback: Box<dyn FnOnce(Option<crate::arch::PhysicalAddress>, bool)>) {
+        // get page much like sysfs/mem, gotta figure out how to do this without deadlocks
+        todo!();
     }
 }

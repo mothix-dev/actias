@@ -186,7 +186,7 @@ impl super::FileDescriptor for MemFile {
     fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
-                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::GroupWrite | Permissions::OtherRead | Permissions::OtherWrite,
+                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::GroupWrite,
                 kind: FileKind::Regular,
             },
             ..Default::default()

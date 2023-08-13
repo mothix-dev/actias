@@ -154,7 +154,7 @@ impl FsEnvironment {
             let existing_fds = self.file_descriptors.lock();
             for (index, open_file) in existing_fds.as_slice().iter().enumerate() {
                 if let Some(file) = open_file && *file.flags.read() & OpenFlags::CloseOnExec == OpenFlags::None {
-                    file_descriptors.set(index, file.clone()).map_err(|_| Errno::OutOfMemory)?;
+                    file_descriptors.set(index, file.duplicate()).map_err(|_| Errno::OutOfMemory)?;
                 }
             }
         }
@@ -171,7 +171,8 @@ impl FsEnvironment {
 
     /// implements POSIX `chmod`, blocking
     pub fn chmod(&self, file_descriptor: usize, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.chmod(permissions, callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -180,7 +181,8 @@ impl FsEnvironment {
 
     /// implements POSIX `chown`, blocking
     pub fn chown(&self, file_descriptor: usize, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.chown(owner, group, callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -634,7 +636,8 @@ impl FsEnvironment {
 
     /// implements POSIX `read`, blocking
     pub fn read(&self, file_descriptor: usize, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.read(length, callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -643,7 +646,8 @@ impl FsEnvironment {
 
     /// implements POSIX `seek`, partially blocking
     pub fn seek(&self, file_descriptor: usize, offset: i64, kind: SeekKind, callback: Box<dyn RequestCallback<i64>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.seek(offset, kind, callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -652,7 +656,8 @@ impl FsEnvironment {
 
     /// implements POSIX `stat`, blocking
     pub fn stat(&self, file_descriptor: usize, callback: Box<dyn RequestCallback<FileStat>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.stat(callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -661,7 +666,8 @@ impl FsEnvironment {
 
     /// implements POSIX `truncate`, blocking
     pub fn truncate(&self, file_descriptor: usize, len: i64, callback: Box<dyn RequestCallback<()>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.truncate(len, callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -698,7 +704,8 @@ impl FsEnvironment {
 
     /// implements POSIX `write`, blocking
     pub fn write(&self, file_descriptor: usize, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
-        if let Some(file) = self.file_descriptors.lock().get(file_descriptor) {
+        let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
+        if let Some(file) = file {
             file.write(length, callback);
         } else {
             callback(Err(Errno::BadFile), false);
@@ -751,12 +758,12 @@ impl FsEnvironment {
 
     /// gets the underlying open file object associated with the given file descriptor
     pub fn get_open_file(&self, file_descriptor: usize) -> Option<OpenFile> {
-        self.file_descriptors.lock().get(file_descriptor).cloned()
+        self.file_descriptors.lock().get(file_descriptor).map(|file| file.duplicate())
     }
 
     /// implements POSIX dup()
     pub fn dup(&self, file_descriptor: usize) -> common::Result<usize> {
-        let new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
+        let new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.duplicate();
         *new_descriptor.flags.write() &= !common::OpenFlags::CloseOnExec;
         self.file_descriptors.lock().add(new_descriptor).map_err(|_| Errno::OutOfMemory)
     }
@@ -766,7 +773,7 @@ impl FsEnvironment {
         if file_descriptor == new_fd {
             Ok(())
         } else {
-            let new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
+            let new_descriptor = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.duplicate();
             *new_descriptor.flags.write() &= !common::OpenFlags::CloseOnExec;
             self.file_descriptors.lock().set(new_fd, new_descriptor).map_err(|_| Errno::OutOfMemory)
         }
@@ -872,7 +879,7 @@ impl Clone for OpenFile {
     fn clone(&self) -> Self {
         Self {
             handle: self.handle.clone(),
-            seek_pos: Arc::new(AtomicI64::new(self.seek_pos.load(Ordering::SeqCst))),
+            seek_pos: self.seek_pos.clone(),
             path: self.path.clone(),
             flags: RwLock::new(*self.flags.read()),
             kind: AtomicU8::new(self.kind.load(Ordering::SeqCst)),
@@ -881,6 +888,16 @@ impl Clone for OpenFile {
 }
 
 impl OpenFile {
+    pub fn duplicate(&self) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            seek_pos: Arc::new(AtomicI64::new(self.seek_pos.load(Ordering::SeqCst))),
+            path: self.path.clone(),
+            flags: RwLock::new(*self.flags.read()),
+            kind: AtomicU8::new(self.kind.load(Ordering::SeqCst)),
+        }
+    }
+
     pub fn kind(&self) -> FileKind {
         unsafe { core::mem::transmute::<u8, FileKind>(self.kind.load(Ordering::SeqCst)) }
     }

@@ -445,6 +445,11 @@ impl Mapping {
     pub fn region(&self) -> &super::ContiguousRegion<usize> {
         &self.region
     }
+
+    /// gets what kind of mapping this is
+    pub fn kind(&self) -> &MappingKind {
+        &self.kind
+    }
 }
 
 #[derive(Clone)]

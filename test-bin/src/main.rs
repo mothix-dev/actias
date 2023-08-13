@@ -185,6 +185,16 @@ pub extern "C" fn _start() {
     seek(fd, 0xb8000, common::SeekKind::Set).unwrap();
     write(fd, &[0x55, 0x0f, 0x77, 0x0f, 0x55, 0x0f]).unwrap();
 
+    let fd = open(0, "/../procfs/1/files", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::Directory).unwrap();
+    let mut buf = [0; 256];
+    loop {
+        let bytes_read = read(fd, &mut buf).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        write(1, &buf[..bytes_read]).unwrap();
+    }
+
     unsafe {
         syscall_0_args(Syscalls::Exit).unwrap();
     }
