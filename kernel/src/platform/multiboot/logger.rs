@@ -55,7 +55,8 @@ struct Logger {
 
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.max_level
+        //metadata.level() <= self.max_level
+        true
     }
 
     #[allow(unused_must_use)]
@@ -102,7 +103,7 @@ impl Log for Logger {
 
 /// our logger that we will log things with
 static LOGGER: Logger = Logger {
-    max_level: LevelFilter::Trace,
+    max_level: LevelFilter::Info,
     //lock: AtomicU32::new(0),
 };
 

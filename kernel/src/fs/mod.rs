@@ -19,6 +19,7 @@ use alloc::{
 };
 use common::{Errno, FileKind, FileMode, FileStat, GroupId, OpenFlags, Permissions, Result, SeekKind, UnlinkFlags, UserId};
 use core::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
+use log::trace;
 use spin::{Mutex, RwLock};
 
 /// a callback ran when a filesystem request has been completed. it's passed the result of the operation, and whether the operation blocked before completing
@@ -196,6 +197,8 @@ impl FsEnvironment {
 
     /// parses a path, removing any . or .. elements, and detects whether the new path is relative or absolute
     fn simplify_path(container_path: &[String], path: &str) -> (Vec<String>, bool) {
+        trace!("simplifying path {path:?} at {container_path:?}");
+
         let mut path_stack = Vec::new();
         let mut is_absolute = false;
 
@@ -211,6 +214,8 @@ impl FsEnvironment {
                 _ => path_stack.push(component.to_string()),
             }
         }
+
+        trace!("simplified to {path_stack:?}, absolute {is_absolute}");
 
         (path_stack, is_absolute)
     }
@@ -286,7 +291,12 @@ impl FsEnvironment {
                         match stat.mode.kind {
                             FileKind::Directory => (),
                             FileKind::SymLink => {
-                                return symlink_step(arc_self, last, at, path, path_vec, no_follow, blocked || stat_blocked, callback, stat.size);
+                                if !no_follow {
+                                    return symlink_step(arc_self, last, at, path, path_vec, no_follow, blocked || stat_blocked, callback, stat.size);
+                                } else if path.lock().back().is_some() {
+                                    // there are still more components in the path and this isn't a directory or a symlink to one, so give up
+                                    return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
+                                }
                             }
                             _ => {
                                 if path.lock().back().is_some() {
@@ -367,7 +377,7 @@ impl FsEnvironment {
             });
         }
 
-        open_step(arc_self, None, at, Mutex::new(path).into(), path_vec, FileKind::Regular, no_follow, false, callback);
+        open_step(arc_self, None, at, Mutex::new(path).into(), path_vec, FileKind::Directory, no_follow, false, callback);
     }
 
     fn concat_slices(a: &[String], b: &str, c: &[String]) -> Vec<String> {
@@ -389,7 +399,7 @@ impl FsEnvironment {
     /// resolves an absolute path in the filesystem (i.e. one that starts with /) after simplification
     fn resolve_absolute_path(arc_self: Arc<Self>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         let mut path_queue = Self::slice_to_deque(&path);
-        let name = Arc::new(Mutex::new(path.pop().map(|n| n.to_string()).unwrap_or_else(|| "..".to_string())));
+        let name = Arc::new(Mutex::new(path.pop().unwrap_or_else(|| "..".to_string())));
         let path = Arc::new(Mutex::new(path));
 
         if let Some(fs) = path_queue.pop_back() {
@@ -461,9 +471,9 @@ impl FsEnvironment {
     }
 
     /// resolves a relative path in the filesystem (i.e. one that doesn't start with /) after simplification
-    fn resolve_relative_path(arc_self: Arc<Self>, at: Arc<FileHandle>, absolute_path: Vec<String>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
+    fn resolve_relative_path(arc_self: Arc<Self>, at: Arc<FileHandle>, mut absolute_path: Vec<String>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         let path_queue = Self::slice_to_deque(&path);
-        let name = Arc::new(Mutex::new(path.pop().map(|n| n.to_string()).unwrap_or_else(|| "..".to_string())));
+        let name = Arc::new(Mutex::new(path.pop().or_else(|| absolute_path.pop()).unwrap_or_else(|| "..".to_string())));
         let absolute_path = Arc::new(Mutex::new(absolute_path));
 
         Self::resolve_internal(
@@ -566,15 +576,24 @@ impl FsEnvironment {
         let namespace = arc_self.namespace.clone();
 
         Self::resolve_container(
-            arc_self,
+            arc_self.clone(),
             at,
             path,
-            flags & OpenFlags::AtCWD != OpenFlags::None,
+            flags & OpenFlags::NoFollow != OpenFlags::None,
             Box::new(move |res, blocked| match res {
                 Ok(resolved) => {
+                    if flags & OpenFlags::Directory != OpenFlags::None && resolved.kind() != FileKind::Directory {
+                        return callback(Err(Errno::NotDirectory), blocked);
+                    } else if flags & OpenFlags::SymLink != OpenFlags::None && resolved.kind() != FileKind::SymLink {
+                        return callback(Err(Errno::NoSuchFileOrDir), blocked);
+                    }
+
                     if resolved.path.lock().path.is_empty() {
-                        // this path points to the root of a filesystem
-                        if let Some(fs) = namespace.read().get(&*resolved.path.lock().name) {
+                        // this path points to the root of a filesystem or the filesystem list
+                        let name = &*resolved.path.lock().name;
+                        if name == ".." {
+                            callback(file_descriptors.lock().add(arc_self.fs_list_dir.duplicate()).map_err(|_| Errno::OutOfMemory), blocked);
+                        } else if let Some(fs) = namespace.read().get(name) {
                             let handle = FileHandle {
                                 filesystem: fs.clone(),
                                 handle: fs.get_root_dir().into(),
@@ -686,7 +705,7 @@ impl FsEnvironment {
         };
 
         Self::resolve_container(
-            arc_self,
+            arc_self.clone(),
             at,
             path,
             false,
@@ -694,8 +713,15 @@ impl FsEnvironment {
                 Ok(resolved) => {
                     let name = resolved.path.lock().name.to_string();
 
-                    // unlink the file
-                    resolved.container.make_request(Request::Unlink { name, flags, callback });
+                    if resolved.path.lock().path.is_empty() {
+                        if name != ".." && let Some(fs) = arc_self.namespace.read().get(&name) {
+                            fs.make_request(fs.get_root_dir(), Request::Unlink { name, flags, callback });
+                        } else {
+                            callback(Err(Errno::NoSuchFileOrDir), blocked);
+                        }
+                    } else {
+                        resolved.container.make_request(Request::Unlink { name, flags, callback });
+                    }
                 }
                 Err(err) => callback(Err(err), blocked),
             }),
@@ -728,7 +754,7 @@ impl FsEnvironment {
         let root = self.root.read();
         let root_path = root.path.lock();
         let open_file_path = open_file.path.lock();
-        //debug!("root path is {:?}, root name is {:?}, open_file path is {:?}", root.path, root.name, open_file.path);
+        //trace!("root path is {:?}, root name is {:?}, open_file path is {:?}", root.path, root.name, open_file.path);
 
         // try to format the path relative to the root path if possible
         for (index, name) in root_path.path.iter().chain(Some(&root_path.name)).enumerate() {
@@ -742,8 +768,7 @@ impl FsEnvironment {
             }
         }
 
-        let joined = open_file_path.path[root_path.path.len() + 1..].join("/");
-        format!("/{joined}{}{}", if joined.is_empty() { "" } else { "/" }, open_file_path.name)
+        format!("/{}", open_file_path.path[root_path.path.len() + 1..].join("/"))
     }
 
     /// gets the path to the current working directory of the current process
@@ -784,6 +809,12 @@ struct ResolvedHandle {
     container: Arc<FileHandle>,
     path: Arc<Mutex<AbsolutePath>>,
     kind: AtomicU8,
+}
+
+impl ResolvedHandle {
+    fn kind(&self) -> FileKind {
+        unsafe { core::mem::transmute::<u8, FileKind>(self.kind.load(Ordering::SeqCst)) }
+    }
 }
 
 enum PartiallyResolved {

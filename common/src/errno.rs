@@ -8,7 +8,7 @@ use num_enum::FromPrimitive;
 #[derive(Copy, Clone, PartialEq, Eq, FromPrimitive, Default)]
 pub enum Errno {
     #[default]
-    /// ENo error (:
+    /// No error (:
     None = 0,
     /// E2BIG (argument list too long)
     TooBig,

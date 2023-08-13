@@ -75,6 +75,9 @@ pub enum OpenFlags {
     /// AT_FDCWD
     AtCWD = 1 << 17,
 
+    /// no POSIX equivalent, forces the open file to be a symlink (returning an error if it isn't) or creates a new symlink with `OpenFlags::Create`
+    SymLink = 1 << 18,
+
     IgnoredMask = !(Self::NoCharTTY.bits | Self::TTYInit.bits),
 
     #[default]

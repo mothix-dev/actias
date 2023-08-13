@@ -7,7 +7,7 @@ use crate::{
 };
 use alloc::{string::ToString, sync::Arc, vec::Vec};
 use core::{alloc::Layout, ptr::NonNull};
-use log::debug;
+use log::{debug, info};
 use spin::{Mutex, RwLock};
 
 /// describes the memory map set up by the bootloader and/or platform-specific bringup code
@@ -362,13 +362,21 @@ pub fn init_memory_manager<I: Iterator<Item = super::MemoryRegion>>(
         });
     }
 
-    match crate::get_global_state().cmdline.read().parsed.get("log_level").map(|s| s.as_str()) {
+    let cmdline = crate::get_global_state().cmdline.read();
+    let log_level = cmdline.parsed.get("log_level").map(|s| s.as_str());
+
+    let max_level = log::max_level();
+    match log_level {
         Some("error") => log::set_max_level(log::LevelFilter::Error),
         Some("warn") => log::set_max_level(log::LevelFilter::Warn),
         Some("info") => log::set_max_level(log::LevelFilter::Info),
         Some("debug") => log::set_max_level(log::LevelFilter::Debug),
         Some("trace") => log::set_max_level(log::LevelFilter::Trace),
         _ => (),
+    }
+
+    if log::max_level() > max_level {
+        info!("max log level has changed, messages from earlier in the boot process are likely absent");
     }
 
     debug!("cmdline parsed as {:?}", crate::get_global_state().cmdline.read().parsed);
