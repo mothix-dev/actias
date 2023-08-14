@@ -110,6 +110,10 @@ unsafe fn syscall_4_args(num: Syscalls, arg0: u32, arg1: u32, arg2: u32, arg3: u
     }
 }
 
+fn close(fd: usize) -> Result<()> {
+    unsafe { syscall_1_args(common::Syscalls::Close, fd.try_into().unwrap()).map(|_| ()) }
+}
+
 fn read(fd: usize, slice: &mut [u8]) -> Result<usize> {
     unsafe { syscall_3_args(common::Syscalls::Read, fd.try_into().unwrap(), slice.as_mut_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
 }
@@ -184,16 +188,51 @@ pub extern "C" fn _start() {
     let fd = open(0, "/../sysfs/mem", common::OpenFlags::ReadWrite | common::OpenFlags::AtCWD).unwrap();
     seek(fd, 0xb8000, common::SeekKind::Set).unwrap();
     write(fd, &[0x55, 0x0f, 0x77, 0x0f, 0x55, 0x0f]).unwrap();
+    close(fd).unwrap();
 
-    let fd = open(0, "/../procfs/1/files", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::Directory).unwrap();
+    let fd = open(0, "/../procfs/self/memory", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::Directory).unwrap();
     let mut buf = [0; 256];
     loop {
         let bytes_read = read(fd, &mut buf).unwrap();
         if bytes_read == 0 {
             break;
         }
-        write(1, &buf[..bytes_read]).unwrap();
+        //write(1, &buf[..bytes_read]).unwrap();
+        let str = core::str::from_utf8(&buf[4..bytes_read - 1]).unwrap();
+
+        write_message(str);
+
+        /*let fd = open(fd, str, common::OpenFlags::Read | common::OpenFlags::SymLink | common::OpenFlags::NoFollow).unwrap();
+
+        let bytes_read = read(fd, &mut buf).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        let str = core::str::from_utf8(&buf[..bytes_read]).unwrap();
+
+        write_message(str);
+
+        close(fd).unwrap();*/
     }
+    close(fd).unwrap();
+
+    let fd = open(0, "/../procfs/1/cwd", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::SymLink | common::OpenFlags::NoFollow).unwrap();
+    let mut buf = [0; 256];
+    let bytes_read = read(fd, &mut buf).unwrap();
+    if bytes_read != 0 {
+        let str = core::str::from_utf8(&buf[..bytes_read]).unwrap();
+        write_message(str);
+    }
+    close(fd).unwrap();
+
+    let fd = open(0, "/../procfs/1/root", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::SymLink | common::OpenFlags::NoFollow).unwrap();
+    let mut buf = [0; 256];
+    let bytes_read = read(fd, &mut buf).unwrap();
+    if bytes_read != 0 {
+        let str = core::str::from_utf8(&buf[..bytes_read]).unwrap();
+        write_message(str);
+    }
+    close(fd).unwrap();
 
     unsafe {
         syscall_0_args(Syscalls::Exit).unwrap();
@@ -207,10 +246,10 @@ pub extern "C" fn _start() {
 
 #[panic_handler]
 pub fn panic_implementation(_info: &core::panic::PanicInfo) -> ! {
-    write_message("panic!");
+    let _ = write(2, "panic!".as_bytes());
 
     unsafe {
-        syscall_0_args(Syscalls::Exit).unwrap();
+        let _ = syscall_0_args(Syscalls::Exit);
     }
 
     #[allow(clippy::empty_loop)]

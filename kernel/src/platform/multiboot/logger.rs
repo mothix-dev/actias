@@ -54,7 +54,7 @@ struct Logger {
 }
 
 impl Log for Logger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
+    fn enabled(&self, _metadata: &Metadata) -> bool {
         //metadata.level() <= self.max_level
         true
     }

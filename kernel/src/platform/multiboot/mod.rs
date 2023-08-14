@@ -346,6 +346,13 @@ pub fn kmain() {
             common::OpenFlags::Write | common::OpenFlags::AtCWD,
             Box::new(move |res, _| assert!(res == Ok(1))),
         );
+        crate::fs::FsEnvironment::open(
+            environment.clone(),
+            0,
+            "/../sysfs/log/error".to_string(),
+            common::OpenFlags::Write | common::OpenFlags::AtCWD,
+            Box::new(move |res, _| assert!(res == Ok(2))),
+        );
 
         crate::exec::exec(
             environment.get_open_file(0).unwrap(),

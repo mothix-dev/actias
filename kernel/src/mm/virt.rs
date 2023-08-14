@@ -1,11 +1,11 @@
-use super::PageDirectory;
+use super::{PageDirectory, ContiguousRegion};
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     mm::FrameReference,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use bitmask_enum::bitmask;
-use common::Errno;
+use common::{Errno, Result};
 use log::{debug, error, trace};
 use spin::Mutex;
 
@@ -18,37 +18,19 @@ pub struct ProcessMap {
 
 impl ProcessMap {
     /// creates a new empty memory map
-    pub fn new() -> common::Result<Self> {
+    pub fn new() -> Result<Self> {
         let page_directory = super::PageDirSync::sync_from(crate::get_global_state().page_directory.clone(), PROPERTIES.kernel_region)?;
 
         Ok(Self { page_directory, map: Vec::new() })
     }
 
-    /// adds the given mapping to this memory map, modifying its page directory as needed and modifying other mappings so there's no overlap
+    /// iterates over all mapped regions, resizing and/or combining as needed so that none overlap with the given mapping
     ///
     /// # Arguments
     /// * `arc_self` - a reference counted pointer to this memory map, to allow references to any overlapping memory maps to be freed
-    /// * `mapping` - the mapping to add
-    /// * `is_current` - whether this memory map's page directory is the CPU's current page directory
-    /// * `map_exact` - whether the mapping's exact base address should be used, instead of page-aligning it down.
-    /// if this is `true` and the mapping's base address isn't page aligned, an error will be returned
-    ///
-    /// # Returns
-    /// on success, the actual base address of the mapping is returned (since it's aligned down to the nearest page boundary)
-    pub fn add_mapping(&mut self, arc_self: &Arc<Mutex<Self>>, mut mapping: Mapping, is_current: bool, map_exact: bool) -> common::Result<usize> {
-        if map_exact {
-            if mapping.region.base % PROPERTIES.page_size != 0 {
-                return Err(Errno::InvalidArgument);
-            }
-        } else {
-            mapping.region.base = ((mapping.region.base) / PROPERTIES.page_size) * PROPERTIES.page_size;
-        }
-
-        mapping.region.length = ((mapping.region.length + PROPERTIES.page_size - 1) / PROPERTIES.page_size) * PROPERTIES.page_size;
-
-        assert!(!mapping.region.overlaps(PROPERTIES.kernel_region), "mapping is inside kernel memory");
-
-        let mut should_add = true;
+    /// * `mapping` - the mapping that every region is adjusted to not overlap
+    /// * `is_current` - whether this memory map is the CPU's current memory map
+    fn clean_up_overlaps(&mut self, arc_self: &Arc<Mutex<Self>>, mapping: &mut Mapping, is_current: bool) -> Result<()> {
         let mut to_remove = Vec::new();
 
         // iterate through all mappings looking for overlaps
@@ -80,12 +62,12 @@ impl ProcessMap {
                 && (mapping.protection == other_mapping.protection && matches!(mapping.kind, MappingKind::Anonymous) && matches!(other_mapping.kind, MappingKind::Anonymous))
             {
                 if mapping.region.base > other_mapping.region.base {
-                    other_mapping.region.length += mapping.region.length;
-                    should_add = false;
+                    mapping.region.length += other_mapping.region.length;
+                    mapping.region.base = other_mapping.region.base;
                 } else {
                     mapping.region.length += other_mapping.region.length;
-                    to_remove.push(index);
                 }
+                to_remove.push(index);
             }
         }
 
@@ -94,10 +76,37 @@ impl ProcessMap {
             self.map.remove(index);
         }
 
-        let base = mapping.region.base;
-        if should_add {
-            self.map.push(mapping);
+        Ok(())
+    }
+
+    /// adds the given mapping to this memory map, modifying its page directory as needed and modifying other mappings so there's no overlap
+    ///
+    /// # Arguments
+    /// * `arc_self` - a reference counted pointer to this memory map, to allow references to any overlapping memory maps to be freed
+    /// * `mapping` - the mapping to add
+    /// * `is_current` - whether this memory map's page directory is the CPU's current page directory
+    /// * `map_exact` - whether the mapping's exact base address should be used, instead of page-aligning it down.
+    /// if this is `true` and the mapping's base address isn't page aligned, an error will be returned
+    ///
+    /// # Returns
+    /// on success, the actual base address of the mapping is returned (since it's aligned down to the nearest page boundary)
+    pub fn add_mapping(&mut self, arc_self: &Arc<Mutex<Self>>, mut mapping: Mapping, is_current: bool, map_exact: bool) -> Result<usize> {
+        if map_exact {
+            if mapping.region.base % PROPERTIES.page_size != 0 {
+                return Err(Errno::InvalidArgument);
+            }
+        } else {
+            mapping.region.base = ((mapping.region.base) / PROPERTIES.page_size) * PROPERTIES.page_size;
         }
+
+        mapping.region.length = ((mapping.region.length + PROPERTIES.page_size - 1) / PROPERTIES.page_size) * PROPERTIES.page_size;
+
+        assert!(!mapping.region.overlaps(PROPERTIES.kernel_region), "mapping is inside kernel memory");
+
+        self.clean_up_overlaps(arc_self, &mut mapping, is_current)?;
+
+        let base = mapping.region.base;
+        self.map.push(mapping);
 
         Ok(base)
     }
@@ -108,7 +117,7 @@ impl ProcessMap {
     /// * `arc_self` - a reference counted pointer to this memory map, to allow references to it to be found and removed
     /// * `base` - the base address of the mapping to remove
     /// * `is_current` - whether this memory map's page directory is the CPU's current page directory
-    pub fn remove_mapping(&mut self, arc_self: &Arc<Mutex<Self>>, base: usize, is_current: bool) -> common::Result<()> {
+    pub fn remove_mapping(&mut self, arc_self: &Arc<Mutex<Self>>, base: usize, is_current: bool) -> Result<()> {
         let (index, _) = self.map.iter().enumerate().find(|(_, m)| m.region.base == base).ok_or(Errno::InvalidArgument)?;
         let mapping = self.map.remove(index);
 
@@ -126,7 +135,7 @@ impl ProcessMap {
     /// # Arguments
     /// * `arc_self` - a reference counted pointer to this memory map, to allow references to it to be found and removed
     /// * `is_current` - whether this memory map's page directory is the CPU's current page directory
-    pub fn remove_all(&mut self, arc_self: &Arc<Mutex<Self>>, is_current: bool) -> common::Result<()> {
+    pub fn remove_all(&mut self, arc_self: &Arc<Mutex<Self>>, is_current: bool) -> Result<()> {
         for mapping in self.map.iter() {
             for i in (0..mapping.region.length).step_by(PROPERTIES.page_size) {
                 let addr = mapping.region.base + i;
@@ -142,7 +151,7 @@ impl ProcessMap {
     /// handles mapping pages in/out on a page fault
     ///
     /// # Arguments
-    /// * `arg_self` - a reference counted pointer to this memory map, to allow for proper page referencing
+    /// * `arc_self` - a reference counted pointer to this memory map, to allow for proper page referencing
     /// * `addr` - the virtual address that the page fault occurred at
     /// * `access_type` - how the CPU tried to access this region of memory
     ///
@@ -165,7 +174,7 @@ impl ProcessMap {
     ///
     /// # Returns
     /// this function returns the new memory map on success
-    pub fn fork(&mut self, is_current: bool) -> common::Result<Arc<Mutex<Self>>> {
+    pub fn fork(&mut self, is_current: bool) -> Result<Arc<Mutex<Self>>> {
         let new_map = Arc::new(Mutex::new(Self::new()?));
 
         {
@@ -187,7 +196,7 @@ impl ProcessMap {
     /// * `base` - the base address of the region of memory to map in
     /// * `length` - the length of the region of memory to map in
     /// * `access_type` - how the region of memory to be mapped in will be accessed
-    pub fn map_in_area(&mut self, arc_self: &Arc<Mutex<Self>>, registers: &mut Registers, base: usize, length: usize, access_type: MemoryProtection) -> common::Result<Vec<PhysicalAddress>> {
+    pub fn map_in_area(&mut self, arc_self: &Arc<Mutex<Self>>, registers: &mut Registers, base: usize, length: usize, access_type: MemoryProtection) -> Result<Vec<PhysicalAddress>> {
         let region = super::ContiguousRegion::new(base, length).align_covering(crate::arch::PROPERTIES.page_size);
         let mut addrs = Vec::new();
 
@@ -210,18 +219,51 @@ impl ProcessMap {
 
         Ok(addrs)
     }
+
+    /// moves and/or resizes the mapping at the given base address to at least the given length
+    ///
+    /// # Arguments
+    /// * `arc_self` - a reference counted pointer to this memory map, to allow for any pages that require freeing to be properly freed
+    /// * `base` - the base address of the mapping to resize
+    /// * `length` - the new length of the mapping
+    /// * `is_current` - whether this memory map is the CPU's current memory map
+    ///
+    /// # Returns
+    /// on success, the actual new region that this map covers is returned since it may have been resized to fit a page boundary
+    pub fn resize(&mut self, arc_self: &Arc<Mutex<Self>>, base: usize, length: usize, is_current: bool) -> Result<usize> {
+        if base % PROPERTIES.page_size != 0 {
+            return Err(Errno::InvalidArgument);
+        }
+
+        // since the mapping can't be modified in place due to the borrow checker, just clone it instead
+        // the lock held over this memory map will prevent the slightly wacky state from causing problems
+        let mut mapping = self.map.iter_mut().find(|mapping| mapping.region.base == base).ok_or(Errno::InvalidArgument)?.clone();
+
+        // align the length up to the nearest page boundary
+        let length = ((length + PROPERTIES.page_size - 1) / PROPERTIES.page_size) * PROPERTIES.page_size;
+        mapping.region.length = length;
+
+        self.clean_up_overlaps(arc_self, &mut mapping, is_current)?;
+
+        // update the mapping with the new values
+        if let Some(old) = self.map.iter_mut().find(|mapping| mapping.region.base == base) {
+            *old = mapping;
+        }
+
+        Ok(length)
+    }
 }
 
 #[derive(Clone)]
 pub struct Mapping {
     kind: MappingKind,
-    region: super::ContiguousRegion<usize>,
+    region: ContiguousRegion<usize>,
     protection: MemoryProtection,
 }
 
 impl Mapping {
     /// creates a new mapping of the specified kind with the specified region and protection
-    pub fn new(kind: MappingKind, region: super::ContiguousRegion<usize>, protection: MemoryProtection) -> Self {
+    pub fn new(kind: MappingKind, region: ContiguousRegion<usize>, protection: MemoryProtection) -> Self {
         Self { kind, region, protection }
     }
 
@@ -232,7 +274,7 @@ impl Mapping {
     /// * `map` - a reference to the map that this mapping is mapped into
     /// * `addr` - the virtual address that the page fault occurred at
     /// * `access_type` - how the CPU tried to access the faulted page
-    fn fault_in(&self, registers: &mut Registers, page_directory: &mut impl PageDirectory, map: &Arc<Mutex<ProcessMap>>, addr: usize, access_type: MemoryProtection) -> common::Result<()> {
+    fn fault_in(&self, registers: &mut Registers, page_directory: &mut impl PageDirectory, map: &Arc<Mutex<ProcessMap>>, addr: usize, access_type: MemoryProtection) -> Result<()> {
         // align address to page size
         let aligned_addr = (addr / PROPERTIES.page_size) * PROPERTIES.page_size;
 
@@ -374,7 +416,7 @@ impl Mapping {
     /// * `map` - a reference to the map that this mapping is contained in
     /// * `addr` - the virtual address of the page to be freed
     /// * `is_current` - whether the previously specified page directory is the CPU's current page directory
-    fn free(&self, page_directory: &mut impl PageDirectory, map: &Mutex<ProcessMap>, addr: usize, is_current: bool) -> common::Result<()> {
+    fn free(&self, page_directory: &mut impl PageDirectory, map: &Mutex<ProcessMap>, addr: usize, is_current: bool) -> Result<()> {
         if let Some(page) = page_directory.get_page(addr) {
             crate::get_global_state().page_manager.lock().free_frame(page.addr, Some(map));
 
@@ -397,7 +439,7 @@ impl Mapping {
     ///
     /// # Returns
     /// this function returns the new mapping on success
-    fn fork(&self, page_directory: &mut impl PageDirectory, arc_map: &Arc<Mutex<ProcessMap>>, map: &mut ProcessMap, is_current: bool) -> common::Result<Self> {
+    fn fork(&self, page_directory: &mut impl PageDirectory, arc_map: &Arc<Mutex<ProcessMap>>, map: &mut ProcessMap, is_current: bool) -> Result<Self> {
         match &self.kind {
             MappingKind::Anonymous => {
                 for i in (0..self.region.length).step_by(PROPERTIES.page_size) {
@@ -442,7 +484,7 @@ impl Mapping {
     }
 
     /// gets the region of memory that this mapping takes up
-    pub fn region(&self) -> &super::ContiguousRegion<usize> {
+    pub fn region(&self) -> &ContiguousRegion<usize> {
         &self.region
     }
 

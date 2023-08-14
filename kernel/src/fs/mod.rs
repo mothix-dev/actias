@@ -356,6 +356,7 @@ impl FsEnvironment {
                     match res {
                         Ok(slice) => match core::str::from_utf8(slice) {
                             // got a valid string, recurse to find the target of the symlink and use that
+                            // TODO: actually finish resolving the rest of the path if the symlink isn't the final element
                             Ok(str) => FsEnvironment::resolve_container(
                                 arc_self,
                                 Some(OpenFile {
@@ -773,7 +774,16 @@ impl FsEnvironment {
 
     /// gets the path to the current working directory of the current process
     pub fn get_cwd_path(&self) -> String {
+        // TODO: fix deadlock here
         self.get_path_to(&self.cwd.read())
+    }
+
+    /// gets the absolute path to the root directory of the current process
+    pub fn get_root_path(&self) -> String {
+        let root = self.root.read();
+        let root_path = root.path.lock();
+        let joined = root_path.path.join("/");
+        return format!("/../{joined}{}{}", if joined.is_empty() { "" } else { "/" }, root_path.name);
     }
 
     /// gets the path of the file pointed to by the given file descriptor

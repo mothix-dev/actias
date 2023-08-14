@@ -17,11 +17,15 @@ impl super::FileDescriptor for ProcRoot {
             return Err(Errno::ReadOnlyFilesystem);
         }
 
-        let pid = name.parse::<usize>().map_err(|_| Errno::InvalidArgument)?;
-        if crate::get_global_state().process_table.read().contains(pid) {
-            Ok(Arc::new(ProcessDir { pid }))
+        if name == "self" {
+            Ok(Arc::new(ProcSelfLink))
         } else {
-            Err(Errno::NoSuchFileOrDir)
+            let pid = name.parse::<usize>().map_err(|_| Errno::InvalidArgument)?;
+            if crate::get_global_state().process_table.read().contains(pid) {
+                Ok(Arc::new(ProcessDir { pid }))
+            } else {
+                Err(Errno::NoSuchFileOrDir)
+            }
         }
     }
 
@@ -31,7 +35,14 @@ impl super::FileDescriptor for ProcRoot {
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
 
-        if let Some((pid, _process)) = crate::get_global_state().process_table.read().iter().nth(position) {
+        if position == 0 {
+            let mut data = Vec::new();
+            data.extend_from_slice(&(0_u32.to_ne_bytes()));
+            data.extend_from_slice("self".as_bytes());
+            data.push(0);
+
+            callback(Ok(&data), false);
+        } else if let Some((pid, _process)) = crate::get_global_state().process_table.read().iter().nth(position - 1) {
             let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(pid.to_string().as_bytes());
@@ -51,6 +62,29 @@ impl super::FileDescriptor for ProcRoot {
             },
             ..Default::default()
         })
+    }
+}
+
+pub struct ProcSelfLink;
+
+impl super::FileDescriptor for ProcSelfLink {
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
+                kind: FileKind::SymLink,
+            },
+            ..Default::default()
+        })
+    }
+
+    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        let pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
+
+        match pid {
+            Some(pid) => callback(Ok(pid.to_string().as_bytes()), false),
+            None => callback(Err(Errno::NoSuchProcess), false),
+        }
     }
 }
 
@@ -121,7 +155,7 @@ make_procfs![
     "cwd" => CwdLink,
     "files" => FilesDir,
     "memory" => MemoryDir,
-    "pid" => PidFile,
+    "root" => RootLink,
 ];
 
 pub struct CwdLink {
@@ -138,6 +172,38 @@ impl super::FileDescriptor for CwdLink {
     fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let path = match crate::get_global_state().process_table.read().get(self.pid) {
             Some(process) => process.environment.get_cwd_path(),
+            None => return callback(Err(Errno::NoSuchProcess), false),
+        };
+        let data = path.as_bytes();
+
+        callback(Ok(data), false);
+    }
+
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
+                kind: FileKind::SymLink,
+            },
+            ..Default::default()
+        })
+    }
+}
+
+pub struct RootLink {
+    pid: usize,
+}
+
+impl RootLink {
+    fn new(pid: usize) -> Result<Self> {
+        Ok(Self { pid })
+    }
+}
+
+impl super::FileDescriptor for RootLink {
+    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        let path = match crate::get_global_state().process_table.read().get(self.pid) {
+            Some(process) => process.environment.get_root_path(),
             None => return callback(Err(Errno::NoSuchProcess), false),
         };
         let data = path.as_bytes();
@@ -255,38 +321,6 @@ impl super::FileDescriptor for ProcessFd {
     }
 }
 
-/// allots a process to read its own pid by
-pub struct PidFile {
-    data: String,
-}
-
-impl PidFile {
-    fn new(pid: usize) -> Result<Self> {
-        Ok(Self { data: pid.to_string() })
-    }
-}
-
-impl super::FileDescriptor for PidFile {
-    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
-        let position: usize = match position.try_into() {
-            Ok(position) => position,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
-
-        callback(Ok(&self.data.as_bytes()[position..position + length]), false);
-    }
-
-    fn stat(&self) -> Result<FileStat> {
-        Ok(FileStat {
-            mode: FileMode {
-                permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
-                kind: FileKind::Regular,
-            },
-            ..Default::default()
-        })
-    }
-}
-
 /// allows for processes to manipulate their memory map by manipulating files
 pub struct MemoryDir {
     pid: usize,
@@ -393,9 +427,12 @@ impl super::FileDescriptor for AnonMem {
         })
     }
 
-    fn truncate(&self, _len: i64) -> Result<()> {
+    fn truncate(&self, length: i64) -> Result<()> {
+        let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
+
         // change the size of the mapping to the given size
-        todo!();
+        self.map.lock().resize(&self.map, self.base, length.try_into().map_err(|_| Errno::ValueOverflow)?, current_pid == Some(self.pid))?;
+        Ok(())
     }
 
     fn read(&self, _position: i64, _length: usize, _callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
