@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use common::{Errno, Result, Syscalls};
+use common::{Errno, OpenFlags, Result, Syscalls};
 use core::arch::asm;
 
 #[inline]
@@ -130,7 +130,7 @@ fn write_message(message: &str) {
     write(1, message.as_bytes()).unwrap();
 }
 
-fn open(at: usize, path: &str, flags: common::OpenFlags) -> Result<usize> {
+fn open(at: usize, path: &str, flags: OpenFlags) -> Result<usize> {
     unsafe {
         syscall_4_args(
             common::Syscalls::Open,
@@ -185,12 +185,14 @@ pub extern "C" fn _start() {
 
     write_message(":3c");
 
-    let fd = open(0, "/../sysfs/mem", common::OpenFlags::ReadWrite | common::OpenFlags::AtCWD).unwrap();
+    let fd = open(0, "/../sysfs/mem", OpenFlags::ReadWrite | OpenFlags::AtCWD).unwrap();
     seek(fd, 0xb8000, common::SeekKind::Set).unwrap();
     write(fd, &[0x55, 0x0f, 0x77, 0x0f, 0x55, 0x0f]).unwrap();
     close(fd).unwrap();
 
-    let fd = open(0, "/../procfs/self/memory", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::Directory).unwrap();
+    let proc_dir = open(0, "/../procfs/self", OpenFlags::Read | OpenFlags::AtCWD | OpenFlags::Directory).unwrap();
+
+    let fd = open(proc_dir, "files", OpenFlags::Read | OpenFlags::Directory).unwrap();
     let mut buf = [0; 256];
     loop {
         let bytes_read = read(fd, &mut buf).unwrap();
@@ -202,7 +204,7 @@ pub extern "C" fn _start() {
 
         write_message(str);
 
-        /*let fd = open(fd, str, common::OpenFlags::Read | common::OpenFlags::SymLink | common::OpenFlags::NoFollow).unwrap();
+        let fd = open(fd, str, OpenFlags::Read | OpenFlags::SymLink | OpenFlags::NoFollow).unwrap();
 
         let bytes_read = read(fd, &mut buf).unwrap();
         if bytes_read == 0 {
@@ -212,11 +214,12 @@ pub extern "C" fn _start() {
 
         write_message(str);
 
-        close(fd).unwrap();*/
+        close(fd).unwrap();
     }
     close(fd).unwrap();
 
-    let fd = open(0, "/../procfs/1/cwd", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::SymLink | common::OpenFlags::NoFollow).unwrap();
+    write_message("cwd:");
+    let fd = open(proc_dir, "cwd", OpenFlags::Read | OpenFlags::SymLink | OpenFlags::NoFollow).unwrap();
     let mut buf = [0; 256];
     let bytes_read = read(fd, &mut buf).unwrap();
     if bytes_read != 0 {
@@ -225,7 +228,8 @@ pub extern "C" fn _start() {
     }
     close(fd).unwrap();
 
-    let fd = open(0, "/../procfs/1/root", common::OpenFlags::Read | common::OpenFlags::AtCWD | common::OpenFlags::SymLink | common::OpenFlags::NoFollow).unwrap();
+    write_message("root:");
+    let fd = open(proc_dir, "root", OpenFlags::Read | OpenFlags::SymLink | OpenFlags::NoFollow).unwrap();
     let mut buf = [0; 256];
     let bytes_read = read(fd, &mut buf).unwrap();
     if bytes_read != 0 {

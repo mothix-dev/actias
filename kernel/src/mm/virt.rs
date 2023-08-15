@@ -1,4 +1,4 @@
-use super::{PageDirectory, ContiguousRegion};
+use super::{ContiguousRegion, PageDirectory};
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     mm::FrameReference,

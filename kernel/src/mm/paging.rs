@@ -381,8 +381,7 @@ where O: FnOnce(&mut [u8]) -> R {
 
         trace!("{virt:x} now @ phys addr: {phys_addr:x}");
 
-        // todo: maybe change this to debug_assert at some point? its prolly hella slow
-        assert!(!existing_phys.contains(phys_addr), "trampling on other page directory's memory");
+        debug_assert!(!existing_phys.contains(phys_addr), "trampling on other page directory's memory");
 
         // remap memory
         map_into

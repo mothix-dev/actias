@@ -19,7 +19,7 @@ use alloc::{
 };
 use common::{Errno, FileKind, FileMode, FileStat, GroupId, OpenFlags, Permissions, Result, SeekKind, UnlinkFlags, UserId};
 use core::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
-use log::trace;
+use log::{debug, trace};
 use spin::{Mutex, RwLock};
 
 /// a callback ran when a filesystem request has been completed. it's passed the result of the operation, and whether the operation blocked before completing
@@ -132,7 +132,10 @@ impl FsEnvironment {
                 handle: fs_list.get_root_dir().into(),
             }),
             seek_pos: Arc::new(AtomicI64::new(0)),
-            path: Arc::new(Mutex::new(AbsolutePath { path: vec![], name: "..".to_string() })),
+            path: AbsolutePath {
+                path: vec![].into(),
+                name: "..".to_string().into(),
+            },
             flags: RwLock::new(OpenFlags::Read),
             kind: AtomicU8::new(FileKind::Directory as u8),
         };
@@ -222,22 +225,32 @@ impl FsEnvironment {
 
     /// iterates path elements, double checking permissions and resolving symlinks
     #[allow(clippy::too_many_arguments)] // it's probably fine since theyre local to this function
-    fn resolve_internal(arc_self: Arc<Self>, at: Arc<FileHandle>, path_vec: Arc<Mutex<Vec<String>>>, path: VecDeque<String>, no_follow: bool, callback: Box<dyn RequestCallback<PartiallyResolved>>) {
+    fn resolve_internal(arc_self: Arc<Self>, at: Arc<FileHandle>, absolute_path: AbsolutePath, path: VecDeque<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         fn open_step(
             arc_self: Arc<FsEnvironment>,
             last: Option<Arc<FileHandle>>,
             at: Arc<FileHandle>,
             path: Arc<Mutex<VecDeque<String>>>,
-            path_vec: Arc<Mutex<Vec<String>>>,
+            absolute_path: AbsolutePath,
             kind: FileKind,
             no_follow: bool,
             blocked: bool,
-            callback: Box<dyn RequestCallback<PartiallyResolved>>,
+            callback: Box<dyn RequestCallback<ResolvedHandle>>,
         ) {
+            // get the next component of the path, or return the container and actual path (without any symlinks) if there isn't one
             let back = path.lock().pop_back();
             let component = match back {
                 Some(component) => component,
-                None => return callback(Ok(PartiallyResolved::Handle(last.unwrap_or(at), AtomicU8::new(kind as u8))), blocked), // resolved!
+                None => {
+                    return callback(
+                        Ok(ResolvedHandle {
+                            container: last.unwrap_or(at),
+                            path: absolute_path,
+                            kind: AtomicU8::new(kind as u8),
+                        }),
+                        blocked,
+                    )
+                }
             };
 
             // makes an open request for the next component in the path
@@ -250,14 +263,13 @@ impl FsEnvironment {
                         let filesystem = at.filesystem.clone();
                         let prev = at.clone();
                         let path = path.clone();
-                        let path_vec = path_vec.clone();
 
                         stat_step(
                             arc_self,
                             Some(prev),
                             Arc::new(FileHandle { filesystem, handle: handle.into() }),
                             path,
-                            path_vec,
+                            absolute_path,
                             no_follow,
                             blocked || open_blocked,
                             callback,
@@ -273,10 +285,10 @@ impl FsEnvironment {
             last: Option<Arc<FileHandle>>,
             at: Arc<FileHandle>,
             path: Arc<Mutex<VecDeque<String>>>,
-            path_vec: Arc<Mutex<Vec<String>>>,
+            absolute_path: AbsolutePath,
             no_follow: bool,
             blocked: bool,
-            callback: Box<dyn RequestCallback<PartiallyResolved>>,
+            callback: Box<dyn RequestCallback<ResolvedHandle>>,
         ) {
             // makes a stat request for the current component in the path and handles it accordingly
             at.clone().make_request(Request::Stat {
@@ -286,15 +298,13 @@ impl FsEnvironment {
                         let last = last.clone();
                         let at = at.clone();
                         let path = path.clone();
-                        let path_vec = path_vec.clone();
 
                         match stat.mode.kind {
                             FileKind::Directory => (),
                             FileKind::SymLink => {
                                 if !no_follow {
-                                    return symlink_step(arc_self, last, at, path, path_vec, no_follow, blocked || stat_blocked, callback, stat.size);
+                                    return symlink_step(arc_self, last, at, path, absolute_path, no_follow, blocked || stat_blocked, callback, stat.size);
                                 } else if path.lock().back().is_some() {
-                                    // there are still more components in the path and this isn't a directory or a symlink to one, so give up
                                     return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
                                 }
                             }
@@ -308,7 +318,7 @@ impl FsEnvironment {
 
                         let last = last.clone();
 
-                        open_step(arc_self, last, at, path, path_vec, stat.mode.kind, no_follow, blocked || stat_blocked, callback);
+                        open_step(arc_self, last, at, path, absolute_path, stat.mode.kind, no_follow, blocked || stat_blocked, callback);
                     }
                     Err(err) => callback(Err(err), blocked || stat_blocked),
                 }),
@@ -320,10 +330,10 @@ impl FsEnvironment {
             last: Option<Arc<FileHandle>>,
             at: Arc<FileHandle>,
             path: Arc<Mutex<VecDeque<String>>>,
-            path_vec: Arc<Mutex<Vec<String>>>,
+            absolute_path: AbsolutePath,
             no_follow: bool,
             blocked: bool,
-            callback: Box<dyn RequestCallback<PartiallyResolved>>,
+            callback: Box<dyn RequestCallback<ResolvedHandle>>,
             length: i64,
         ) {
             let length: usize = match length.try_into() {
@@ -339,46 +349,67 @@ impl FsEnvironment {
                     let actual_blocked = blocked || read_blocked;
                     let arc_self = arc_self.clone();
 
-                    let path_len = path.lock().len();
-                    let absolute_path;
-                    let filename;
-                    {
-                        let path_vec = path_vec.lock();
-                        if path_len < path_vec.len() {
-                            absolute_path = path_vec[..path_len].to_vec();
-                            filename = path_vec[path_len].to_string();
-                        } else {
-                            absolute_path = vec![];
-                            filename = "..".to_string();
-                        }
+                    let mut split_pos = absolute_path.path.len() - path.lock().len() - 1;
+                    if split_pos >= absolute_path.path.len() {
+                        split_pos = absolute_path.path.len() - 1;
                     }
+                    let container_path = AbsolutePath {
+                        path: absolute_path.path[..split_pos].to_vec().into(),
+                        name: absolute_path.path[split_pos].to_string().into(),
+                    };
 
-                    match res {
-                        Ok(slice) => match core::str::from_utf8(slice) {
-                            // got a valid string, recurse to find the target of the symlink and use that
-                            // TODO: actually finish resolving the rest of the path if the symlink isn't the final element
-                            Ok(str) => FsEnvironment::resolve_container(
-                                arc_self,
-                                Some(OpenFile {
-                                    handle: last.clone().unwrap_or_else(|| at.clone()),
-                                    seek_pos: Arc::new(0.into()),
-                                    path: Mutex::new(AbsolutePath { path: absolute_path, name: filename }).into(),
-                                    flags: OpenFlags::Read.into(),
-                                    kind: AtomicU8::new(FileKind::Directory as u8),
-                                }),
-                                str.to_string(),
-                                no_follow,
-                                Box::new(move |res, blocked| callback(res.map(PartiallyResolved::Full), blocked || actual_blocked)),
-                            ),
-                            Err(_) => callback(Err(Errno::LinkSevered), actual_blocked),
-                        },
+                    match res.and_then(|slice| core::str::from_utf8(slice).map_err(|_| Errno::LinkSevered)) {
+                        // got a valid string, recurse to find the target of the symlink and use that
+                        Ok(str) => FsEnvironment::resolve_container(
+                            arc_self.clone(),
+                            Some(OpenFile {
+                                handle: last.clone().unwrap_or_else(|| at.clone()),
+                                seek_pos: Arc::new(0.into()),
+                                path: container_path,
+                                flags: OpenFlags::Read.into(),
+                                kind: AtomicU8::new(FileKind::Directory as u8),
+                            }),
+                            str.to_string(),
+                            no_follow,
+                            Box::new(move |res, blocked| {
+                                match res {
+                                    Ok(handle) => {
+                                        if path.lock().is_empty() {
+                                            // if the path ends here just return the result
+                                            callback(Ok(handle), blocked || actual_blocked);
+                                        } else {
+                                            // it doesn't, recurse and keep searching
+                                            path.lock().push_back(handle.path.name.to_string());
+
+                                            debug!("handle path is {:?}", handle.path);
+
+                                            let mut new_path_vec = Vec::new();
+                                            new_path_vec.extend_from_slice(&handle.path.path);
+                                            new_path_vec.push(handle.path.name.to_string());
+                                            if split_pos + 2 < absolute_path.path.len() {
+                                                new_path_vec.extend_from_slice(&absolute_path.path[split_pos + 2..]);
+                                            }
+
+                                            let absolute_path = AbsolutePath {
+                                                path: new_path_vec.into(),
+                                                name: absolute_path.name,
+                                            };
+
+                                            let kind = handle.kind();
+                                            open_step(arc_self, None, handle.container, path, absolute_path, kind, no_follow, actual_blocked, callback);
+                                        }
+                                    }
+                                    Err(err) => callback(Err(err), actual_blocked),
+                                }
+                            }),
+                        ),
                         Err(err) => callback(Err(err), actual_blocked),
                     }
                 }),
             });
         }
 
-        open_step(arc_self, None, at, Mutex::new(path).into(), path_vec, FileKind::Directory, no_follow, false, callback);
+        open_step(arc_self, None, at, Mutex::new(path).into(), absolute_path, FileKind::Directory, no_follow, false, callback);
     }
 
     fn concat_slices(a: &[String], b: &str, c: &[String]) -> Vec<String> {
@@ -400,8 +431,8 @@ impl FsEnvironment {
     /// resolves an absolute path in the filesystem (i.e. one that starts with /) after simplification
     fn resolve_absolute_path(arc_self: Arc<Self>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         let mut path_queue = Self::slice_to_deque(&path);
-        let name = Arc::new(Mutex::new(path.pop().unwrap_or_else(|| "..".to_string())));
-        let path = Arc::new(Mutex::new(path));
+        let name = Arc::new(path.pop().unwrap_or_else(|| "..".to_string()));
+        let path = AbsolutePath { path: path.into(), name };
 
         if let Some(fs) = path_queue.pop_back() {
             if let Some(fs) = arc_self.namespace.read().get(&fs) {
@@ -410,10 +441,7 @@ impl FsEnvironment {
                     callback(
                         Ok(ResolvedHandle {
                             container: arc_self.fs_list_dir.handle.clone(),
-                            path: Arc::new(Mutex::new(AbsolutePath {
-                                path: path.lock().to_vec(),
-                                name: name.lock().to_string(),
-                            })),
+                            path,
                             kind: AtomicU8::new(FileKind::Directory as u8),
                         }),
                         false,
@@ -430,26 +458,7 @@ impl FsEnvironment {
                         path.clone(),
                         path_queue,
                         no_follow,
-                        Box::new(move |res, blocked| {
-                            let path = path.clone();
-                            let name = name.clone();
-
-                            // call the callback with the proper resolved object
-                            callback(
-                                res.map(move |container| match container {
-                                    PartiallyResolved::Handle(container, kind) => ResolvedHandle {
-                                        container,
-                                        path: Arc::new(Mutex::new(AbsolutePath {
-                                            path: path.lock().to_vec(),
-                                            name: name.lock().to_string(),
-                                        })),
-                                        kind,
-                                    },
-                                    PartiallyResolved::Full(handle) => handle,
-                                }),
-                                blocked,
-                            );
-                        }),
+                        callback,
                     );
                 }
             } else {
@@ -460,10 +469,7 @@ impl FsEnvironment {
             callback(
                 Ok(ResolvedHandle {
                     container: arc_self.fs_list_dir.handle.clone(),
-                    path: Arc::new(Mutex::new(AbsolutePath {
-                        path: path.lock().to_vec(),
-                        name: name.lock().to_string(),
-                    })),
+                    path,
                     kind: AtomicU8::new(FileKind::Directory as u8),
                 }),
                 false,
@@ -474,36 +480,10 @@ impl FsEnvironment {
     /// resolves a relative path in the filesystem (i.e. one that doesn't start with /) after simplification
     fn resolve_relative_path(arc_self: Arc<Self>, at: Arc<FileHandle>, mut absolute_path: Vec<String>, mut path: Vec<String>, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
         let path_queue = Self::slice_to_deque(&path);
-        let name = Arc::new(Mutex::new(path.pop().or_else(|| absolute_path.pop()).unwrap_or_else(|| "..".to_string())));
-        let absolute_path = Arc::new(Mutex::new(absolute_path));
+        let name = Arc::new(path.pop().or(absolute_path.pop()).unwrap_or_else(|| "..".to_string()));
+        let path = AbsolutePath { path: absolute_path.into(), name };
 
-        Self::resolve_internal(
-            arc_self,
-            at,
-            absolute_path.clone(),
-            path_queue,
-            no_follow,
-            Box::new(move |res, blocked| {
-                let absolute_path = absolute_path.clone();
-                let name = name.clone();
-
-                // call the callback with the proper resolved object
-                callback(
-                    res.map(move |container| match container {
-                        PartiallyResolved::Handle(container, kind) => ResolvedHandle {
-                            container,
-                            path: Arc::new(Mutex::new(AbsolutePath {
-                                path: absolute_path.lock().to_vec(),
-                                name: name.lock().to_string(),
-                            })),
-                            kind,
-                        },
-                        PartiallyResolved::Full(handle) => handle,
-                    }),
-                    blocked,
-                );
-            }),
-        );
+        Self::resolve_internal(arc_self, at, path.clone(), path_queue, no_follow, callback);
     }
 
     fn resolve_container(arc_self: Arc<Self>, at: Option<OpenFile>, path: String, no_follow: bool, callback: Box<dyn RequestCallback<ResolvedHandle>>) {
@@ -511,49 +491,46 @@ impl FsEnvironment {
             Some('/') => {
                 // parse absolute path
                 let root = arc_self.root.read().clone();
-                let root_path = root.path.lock();
-                let (path, is_absolute) = Self::simplify_path(&root_path.path, &path);
+                let (path, is_absolute) = Self::simplify_path(&root.path.path, &path);
 
-                if is_absolute || (root_path.path.is_empty() && &*root_path.name == "..") {
+                if is_absolute || (root.path.path.is_empty() && &*root.path.name == "..") {
                     // simplified path resolves from /../
-                    drop(root_path);
+                    drop(root.path);
                     Self::resolve_absolute_path(arc_self, path, no_follow, callback);
                 } else {
                     // simplified path resolves from root
-                    let new_path = Self::concat_slices(&root_path.path, &root_path.name, &path);
-                    drop(root_path);
+                    let new_path = Self::concat_slices(&root.path.path, &root.path.name, &path);
+                    drop(root.path);
                     Self::resolve_relative_path(arc_self, root.handle, new_path, path, no_follow, callback);
                 }
             }
             Some(_) => {
                 // parse relative path
                 if let Some(fd) = at {
-                    let fd_path = fd.path.lock();
-                    let (path, is_absolute) = Self::simplify_path(&fd_path.path, &path);
+                    let (path, is_absolute) = Self::simplify_path(&fd.path.path, &path);
 
-                    if is_absolute || (fd_path.path.is_empty() && &*fd_path.name == "..") {
+                    if is_absolute || (fd.path.path.is_empty() && &*fd.path.name == "..") {
                         // simplified path resolves from /../
-                        drop(fd_path);
+                        drop(fd.path);
                         Self::resolve_absolute_path(arc_self, path, no_follow, callback);
                     } else {
                         // simplified path resolves from file descriptor
-                        let new_path = Self::concat_slices(&fd_path.path, &fd_path.name, &path);
-                        drop(fd_path);
+                        let new_path = Self::concat_slices(&fd.path.path, &fd.path.name, &path);
+                        drop(fd.path);
                         Self::resolve_relative_path(arc_self, fd.handle, new_path, path, no_follow, callback);
                     }
                 } else {
                     let cwd = arc_self.cwd.read().clone();
-                    let cwd_path = cwd.path.lock();
-                    let (path, is_absolute) = Self::simplify_path(&cwd_path.path, &path);
+                    let (path, is_absolute) = Self::simplify_path(&cwd.path.path, &path);
 
-                    if is_absolute || (cwd_path.path.is_empty() && &*cwd_path.name == "..") {
+                    if is_absolute || (cwd.path.path.is_empty() && &*cwd.path.name == "..") {
                         // simplified path resolves from /../
-                        drop(cwd_path);
+                        drop(cwd.path);
                         Self::resolve_absolute_path(arc_self, path, no_follow, callback);
                     } else {
                         // simplified path resolves from cwd
-                        let new_path = Self::concat_slices(&cwd_path.path, &cwd_path.name, &path);
-                        drop(cwd_path);
+                        let new_path = Self::concat_slices(&cwd.path.path, &cwd.path.name, &path);
+                        drop(cwd.path);
                         Self::resolve_relative_path(arc_self, cwd.handle, new_path, path, no_follow, callback);
                     }
                 }
@@ -589,9 +566,9 @@ impl FsEnvironment {
                         return callback(Err(Errno::NoSuchFileOrDir), blocked);
                     }
 
-                    if resolved.path.lock().path.is_empty() {
+                    if resolved.path.path.is_empty() {
                         // this path points to the root of a filesystem or the filesystem list
-                        let name = &*resolved.path.lock().name;
+                        let name = &*resolved.path.name;
                         if name == ".." {
                             callback(file_descriptors.lock().add(arc_self.fs_list_dir.duplicate()).map_err(|_| Errno::OutOfMemory), blocked);
                         } else if let Some(fs) = namespace.read().get(name) {
@@ -615,7 +592,7 @@ impl FsEnvironment {
                             callback(Err(Errno::NoSuchFileOrDir), blocked);
                         }
                     } else {
-                        let name = resolved.path.lock().name.clone();
+                        let name = resolved.path.name.clone();
                         let path = resolved.path.clone();
                         let kind = resolved.kind.load(Ordering::SeqCst);
                         let file_descriptors = file_descriptors.clone();
@@ -712,9 +689,9 @@ impl FsEnvironment {
             false,
             Box::new(move |res, blocked| match res {
                 Ok(resolved) => {
-                    let name = resolved.path.lock().name.to_string();
+                    let name = resolved.path.name.to_string();
 
-                    if resolved.path.lock().path.is_empty() {
+                    if resolved.path.path.is_empty() {
                         if name != ".." && let Some(fs) = arc_self.namespace.read().get(&name) {
                             fs.make_request(fs.get_root_dir(), Request::Unlink { name, flags, callback });
                         } else {
@@ -741,49 +718,46 @@ impl FsEnvironment {
 
     /// changes the root directory of this environment to the directory pointed to by the given file descriptor
     pub fn chroot(&self, file_descriptor: usize) -> Result<()> {
-        *self.root.write() = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
+        *self.root.write() = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.duplicate();
         Ok(())
     }
 
     /// changes the current working directory of this environment to the directory pointed to by the given file descriptor
     pub fn chdir(&self, file_descriptor: usize) -> Result<()> {
-        *self.cwd.write() = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.clone();
+        *self.cwd.write() = self.file_descriptors.lock().get(file_descriptor).ok_or(Errno::BadFile)?.duplicate();
         Ok(())
     }
 
     fn get_path_to(&self, open_file: &OpenFile) -> String {
         let root = self.root.read();
-        let root_path = root.path.lock();
-        let open_file_path = open_file.path.lock();
         //trace!("root path is {:?}, root name is {:?}, open_file path is {:?}", root.path, root.name, open_file.path);
 
         // try to format the path relative to the root path if possible
-        for (index, name) in root_path.path.iter().chain(Some(&root_path.name)).enumerate() {
-            if open_file_path.path.get(index) != Some(name) {
-                if open_file_path.path.is_empty() && open_file_path.name == ".." {
+        for (index, name) in root.path.path.iter().chain(Some(&root.path.name.to_string())).enumerate() {
+            if open_file.path.path.get(index) != Some(name) {
+                if open_file.path.path.is_empty() && open_file.path.name.as_str() == ".." {
                     return "/..".to_string();
                 } else {
-                    let joined = open_file_path.path.join("/");
-                    return format!("/../{joined}{}{}", if joined.is_empty() { "" } else { "/" }, open_file_path.name);
+                    let joined = open_file.path.path.join("/");
+                    return format!("/../{joined}{}{}", if joined.is_empty() { "" } else { "/" }, open_file.path.name);
                 }
             }
         }
 
-        format!("/{}", open_file_path.path[root_path.path.len() + 1..].join("/"))
+        let joined = open_file.path.path[root.path.path.len() + 1..].join("/");
+        format!("/{joined}{}{}", if joined.is_empty() { "" } else { "/" }, open_file.path.name)
     }
 
     /// gets the path to the current working directory of the current process
     pub fn get_cwd_path(&self) -> String {
-        // TODO: fix deadlock here
         self.get_path_to(&self.cwd.read())
     }
 
     /// gets the absolute path to the root directory of the current process
     pub fn get_root_path(&self) -> String {
         let root = self.root.read();
-        let root_path = root.path.lock();
-        let joined = root_path.path.join("/");
-        return format!("/../{joined}{}{}", if joined.is_empty() { "" } else { "/" }, root_path.name);
+        let joined = root.path.path.join("/");
+        format!("/../{joined}{}{}", if joined.is_empty() { "" } else { "/" }, root.path.name)
     }
 
     /// gets the path of the file pointed to by the given file descriptor
@@ -817,7 +791,7 @@ impl FsEnvironment {
 
 struct ResolvedHandle {
     container: Arc<FileHandle>,
-    path: Arc<Mutex<AbsolutePath>>,
+    path: AbsolutePath,
     kind: AtomicU8,
 }
 
@@ -825,11 +799,6 @@ impl ResolvedHandle {
     fn kind(&self) -> FileKind {
         unsafe { core::mem::transmute::<u8, FileKind>(self.kind.load(Ordering::SeqCst)) }
     }
-}
-
-enum PartiallyResolved {
-    Handle(Arc<FileHandle>, AtomicU8),
-    Full(ResolvedHandle),
 }
 
 impl Default for FsEnvironment {
@@ -911,7 +880,7 @@ impl Drop for FileHandle {
 pub struct OpenFile {
     handle: Arc<FileHandle>,
     seek_pos: Arc<AtomicI64>,
-    path: Arc<Mutex<AbsolutePath>>,
+    path: AbsolutePath,
     flags: RwLock<OpenFlags>,
     kind: AtomicU8,
 }
@@ -1058,8 +1027,8 @@ impl OpenFile {
 
 #[derive(Clone, Debug)]
 pub struct AbsolutePath {
-    pub path: Vec<String>,
-    pub name: String,
+    pub path: Arc<Vec<String>>,
+    pub name: Arc<String>,
 }
 
 pub struct KernelFs {

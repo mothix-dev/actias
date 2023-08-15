@@ -431,7 +431,9 @@ impl super::FileDescriptor for AnonMem {
         let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
 
         // change the size of the mapping to the given size
-        self.map.lock().resize(&self.map, self.base, length.try_into().map_err(|_| Errno::ValueOverflow)?, current_pid == Some(self.pid))?;
+        self.map
+            .lock()
+            .resize(&self.map, self.base, length.try_into().map_err(|_| Errno::ValueOverflow)?, current_pid == Some(self.pid))?;
         Ok(())
     }
 
