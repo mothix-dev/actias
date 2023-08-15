@@ -194,6 +194,10 @@ fn open(registers: &mut Registers, at: usize, path: usize, path_len: usize, flag
 
 /// syscall handler for `read`
 fn read(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: usize) {
+    if buf_len == 0 {
+        return;
+    }
+
     let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)) {
         Ok(addrs) => addrs,
         Err(err) => return registers.syscall_return(Err(err as usize)),
@@ -352,6 +356,10 @@ fn unlink(registers: &mut Registers, at: usize, path: usize, path_len: usize, fl
 
 /// syscall handler for `write`
 fn write(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: usize) {
+    if buf_len == 0 {
+        return;
+    }
+
     let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)) {
         Ok(addrs) => addrs,
         Err(err) => return registers.syscall_return(Err(err as usize)),
@@ -455,6 +463,7 @@ fn fork(registers: &Registers) -> common::Result<usize> {
             threads,
             memory_map,
             environment: Arc::new(environment),
+            filesystem: None,
         })
         .unwrap();
 

@@ -266,3 +266,45 @@ pub enum UnlinkFlags {
     #[default]
     None = 0,
 }
+
+#[repr(C)]
+pub struct FilesystemEvent {
+    /// the ID of this event
+    pub id: usize,
+
+    /// the file handle associated with this event
+    pub handle: usize,
+
+    /// what kind of event this is
+    pub kind: EventKind,
+}
+
+#[repr(C)]
+pub enum EventKind {
+    /// change the permissions of a file to those provided
+    Chmod { permissions: Permissions },
+
+    /// change the owner and group of a file to those provided
+    Chown { owner: UserId, group: GroupId },
+
+    /// close this file handle
+    Close,
+
+    /// open a new file in the directory pointed to by this file handle
+    Open { name_length: usize, flags: OpenFlags },
+
+    /// read from a file at the specified position
+    Read { position: i64, length: usize },
+
+    /// get information about a file
+    Stat,
+
+    /// truncate a file to the given length
+    Truncate { length: i64 },
+
+    /// remove a file from the directory pointed to by this file handle
+    Unlink { name_length: usize, flags: UnlinkFlags },
+
+    /// write to a file at the specified position
+    Write { length: usize, position: i64 },
+}

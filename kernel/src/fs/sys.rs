@@ -1,12 +1,14 @@
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
-use log::{error, log, Level};
-use spin::Mutex;
+//! procfs filesystem
 
+use super::kernel::FileDescriptor;
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     mm::ContiguousRegion,
 };
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
+use log::{error, log, Level};
+use spin::Mutex;
 
 pub struct SysFsRoot;
 
@@ -20,8 +22,8 @@ macro_rules! make_sysfs {
     ( $($name:tt => $type:ident),+ $(,)? ) => {
         const SYS_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
 
-        impl super::FileDescriptor for SysFsRoot {
-            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
+        impl FileDescriptor for SysFsRoot {
+            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
@@ -86,8 +88,8 @@ impl LogDir {
 
 const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
-impl super::FileDescriptor for LogDir {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
+impl FileDescriptor for LogDir {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & OpenFlags::Create != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -143,7 +145,7 @@ impl Logger {
     }
 }
 
-impl super::FileDescriptor for Logger {
+impl FileDescriptor for Logger {
     fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
@@ -182,7 +184,7 @@ impl MemFile {
     }
 }
 
-impl super::FileDescriptor for MemFile {
+impl FileDescriptor for MemFile {
     fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {

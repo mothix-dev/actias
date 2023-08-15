@@ -111,4 +111,5 @@ pub struct Process {
     pub threads: RwLock<Vec<Arc<Mutex<Task>>>>,
     pub memory_map: Arc<Mutex<crate::mm::ProcessMap>>,
     pub environment: Arc<crate::fs::FsEnvironment>,
+    pub filesystem: Option<Arc<crate::fs::user::UserspaceFs>>,
 }

@@ -310,15 +310,18 @@ pub fn kmain() {
         environment
             .namespace
             .write()
-            .insert("sysfs".to_string(), Arc::new(crate::fs::KernelFs::new(Arc::new(crate::fs::sys::SysFsRoot))));
+            .insert("sysfs".to_string(), Arc::new(crate::fs::kernel::KernelFs::new(Arc::new(crate::fs::sys::SysFsRoot))));
         environment
             .namespace
             .write()
-            .insert("procfs".to_string(), Arc::new(crate::fs::KernelFs::new(Arc::new(crate::fs::proc::ProcRoot))));
+            .insert("procfs".to_string(), Arc::new(crate::fs::kernel::KernelFs::new(Arc::new(crate::fs::proc::ProcRoot))));
 
         if let Some(region) = initrd_region {
             let filesystem = crate::fs::tar::parse_tar(region);
-            environment.namespace.write().insert("initrd".to_string(), Arc::new(crate::fs::KernelFs::new(Arc::new(filesystem))));
+            environment
+                .namespace
+                .write()
+                .insert("initrd".to_string(), Arc::new(crate::fs::kernel::KernelFs::new(Arc::new(filesystem))));
 
             crate::fs::FsEnvironment::open(
                 environment.clone(),
@@ -394,6 +397,7 @@ pub fn kmain() {
                         threads: spin::RwLock::new(vec![task_a.clone()]),
                         memory_map: arc_map,
                         environment,
+                        filesystem: None,
                     })
                     .unwrap();
                 task_a.lock().pid = Some(pid_a);

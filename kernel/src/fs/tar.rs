@@ -1,5 +1,6 @@
 //! simple ustar parser
 
+use super::kernel::FileDescriptor;
 use alloc::{
     boxed::Box,
     format,
@@ -440,7 +441,7 @@ impl Clone for TarFile {
     }
 }
 
-impl super::FileDescriptor for TarFile {
+impl FileDescriptor for TarFile {
     fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         match position.try_into() {
             Ok(position) => {
@@ -483,8 +484,8 @@ impl Clone for TarDirectory {
     }
 }
 
-impl super::FileDescriptor for TarDirectory {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<Arc<dyn super::FileDescriptor>> {
+impl FileDescriptor for TarDirectory {
+    fn open(&self, name: String, flags: OpenFlags) -> common::Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }

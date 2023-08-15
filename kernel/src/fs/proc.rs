@@ -1,3 +1,6 @@
+//! procfs filesystem
+
+use super::kernel::FileDescriptor;
 use alloc::{
     boxed::Box,
     format,
@@ -11,8 +14,8 @@ use spin::Mutex;
 /// procfs root directory
 pub struct ProcRoot;
 
-impl super::FileDescriptor for ProcRoot {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
+impl FileDescriptor for ProcRoot {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -67,7 +70,7 @@ impl super::FileDescriptor for ProcRoot {
 
 pub struct ProcSelfLink;
 
-impl super::FileDescriptor for ProcSelfLink {
+impl FileDescriptor for ProcSelfLink {
     fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
@@ -88,28 +91,34 @@ impl super::FileDescriptor for ProcSelfLink {
     }
 }
 
-pub struct ProcessDir {
-    pid: usize,
-}
-
-// https://danielkeep.github.io/tlborm/book/blk-counting.html
-macro_rules! count {
-    () => (0usize);
-    ( $x:tt $($xs:tt)* ) => (1usize + count!($($xs)*));
-}
-
 macro_rules! make_procfs {
-    ( $($name:tt => $type:ident),+ $(,)? ) => {
-        const PROC_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
+    ( as $class_name:ident , $($name:tt => $type:ident),+ $(,)? ) => {
+        pub struct $class_name {
+            pid: usize,
+        }
 
-        impl super::FileDescriptor for ProcessDir {
-            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
+        impl $class_name {
+            pub fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+                if flags & OpenFlags::Write != OpenFlags::None {
+                    Err(Errno::OperationNotPermitted)
+                } else {
+                    Ok(Self { pid })
+                }
+            }
+
+            fn files() -> &'static [&'static str] {
+                &[$($name ,)*]
+            }
+        }
+
+        impl FileDescriptor for $class_name {
+            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
 
                 match name.as_str() {
-                    $($name => Ok(Arc::new($type::new(self.pid)?)),)*
+                    $($name => Ok(Arc::new($type::new(self.pid, flags)?)),)*
                     _ => Err(Errno::NoSuchFileOrDir),
                 }
             }
@@ -120,10 +129,10 @@ macro_rules! make_procfs {
                     Err(_) => return callback(Err(Errno::ValueOverflow), false),
                 };
 
-                if position >= PROC_FS_FILES.len() {
+                if position >= Self::files().len() {
                     callback(Ok(&[]), false);
                 } else {
-                    let entry = PROC_FS_FILES[position];
+                    let entry = Self::files()[position];
                     let mut data = Vec::new();
                     data.extend_from_slice(&(0_u32.to_ne_bytes()));
                     data.extend_from_slice(entry.as_bytes());
@@ -152,8 +161,10 @@ macro_rules! make_procfs {
 }
 
 make_procfs![
+    as ProcessDir,
     "cwd" => CwdLink,
     "files" => FilesDir,
+    "filesystem" => FsEventsDir,
     "memory" => MemoryDir,
     "root" => RootLink,
 ];
@@ -163,12 +174,16 @@ pub struct CwdLink {
 }
 
 impl CwdLink {
-    fn new(pid: usize) -> Result<Self> {
-        Ok(Self { pid })
+    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+        if flags & OpenFlags::Write != OpenFlags::None {
+            Err(Errno::OperationNotPermitted)
+        } else {
+            Ok(Self { pid })
+        }
     }
 }
 
-impl super::FileDescriptor for CwdLink {
+impl FileDescriptor for CwdLink {
     fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let path = match crate::get_global_state().process_table.read().get(self.pid) {
             Some(process) => process.environment.get_cwd_path(),
@@ -195,12 +210,16 @@ pub struct RootLink {
 }
 
 impl RootLink {
-    fn new(pid: usize) -> Result<Self> {
-        Ok(Self { pid })
+    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+        if flags & OpenFlags::Write != OpenFlags::None {
+            Err(Errno::OperationNotPermitted)
+        } else {
+            Ok(Self { pid })
+        }
     }
 }
 
-impl super::FileDescriptor for RootLink {
+impl FileDescriptor for RootLink {
     fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let path = match crate::get_global_state().process_table.read().get(self.pid) {
             Some(process) => process.environment.get_root_path(),
@@ -228,8 +247,12 @@ pub struct FilesDir {
 }
 
 impl FilesDir {
-    fn new(pid: usize) -> Result<Self> {
-        Ok(Self { pid })
+    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+        if flags & OpenFlags::Write != OpenFlags::None {
+            Err(Errno::OperationNotPermitted)
+        } else {
+            Ok(Self { pid })
+        }
     }
 
     fn get_file_descriptors(&self) -> Result<Arc<Mutex<crate::array::ConsistentIndexArray<super::OpenFile>>>> {
@@ -239,8 +262,8 @@ impl FilesDir {
     }
 }
 
-impl super::FileDescriptor for FilesDir {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
+impl FileDescriptor for FilesDir {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -294,7 +317,7 @@ pub struct ProcessFd {
     fd: usize,
 }
 
-impl super::FileDescriptor for ProcessFd {
+impl FileDescriptor for ProcessFd {
     fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
         let process_table = crate::get_global_state().process_table.read();
         let process = match process_table.get(self.pid) {
@@ -328,16 +351,20 @@ pub struct MemoryDir {
 }
 
 impl MemoryDir {
-    fn new(pid: usize) -> Result<Self> {
-        Ok(Self {
-            pid,
-            map: crate::get_global_state().process_table.read().get(pid).ok_or(Errno::NoSuchProcess)?.memory_map.clone(),
-        })
+    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+        if flags & OpenFlags::Write != OpenFlags::None {
+            Err(Errno::OperationNotPermitted)
+        } else {
+            Ok(Self {
+                pid,
+                map: crate::get_global_state().process_table.read().get(pid).ok_or(Errno::NoSuchProcess)?.memory_map.clone(),
+            })
+        }
     }
 }
 
-impl super::FileDescriptor for MemoryDir {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn super::FileDescriptor>> {
+impl FileDescriptor for MemoryDir {
+    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & OpenFlags::Write != OpenFlags::None {
             return Err(Errno::OperationNotSupported);
         }
@@ -416,7 +443,7 @@ pub struct AnonMem {
     base: usize,
 }
 
-impl super::FileDescriptor for AnonMem {
+impl FileDescriptor for AnonMem {
     fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
@@ -450,5 +477,105 @@ impl super::FileDescriptor for AnonMem {
     fn get_page(&self, _position: i64, _callback: Box<dyn FnOnce(Option<crate::arch::PhysicalAddress>, bool)>) {
         // get page much like sysfs/mem, gotta figure out how to do this without deadlocks
         todo!();
+    }
+}
+
+make_procfs![
+    as FsEventsDir,
+    "name" => FsName,
+    "from_kernel" => FsFromKernel,
+    "to_kernel" => FsToKernel,
+];
+
+/// file used for getting a process's filesystem name or for registering a filesystem for the current process
+struct FsName {
+    pid: usize,
+}
+
+impl FsName {
+    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+        if flags & OpenFlags::Write != OpenFlags::None {
+            let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
+
+            if current_pid != Some(pid) {
+                return Err(Errno::OperationNotPermitted);
+            }
+        }
+
+        Ok(Self { pid })
+    }
+}
+
+impl FileDescriptor for FsName {
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::OtherRead,
+                kind: FileKind::Regular,
+            },
+            ..Default::default()
+        })
+    }
+
+    fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+        todo!();
+    }
+}
+
+/// file used for receiving filesystem events from the kernel
+struct FsFromKernel {
+    pid: usize,
+}
+
+impl FsFromKernel {
+    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
+        let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
+
+        if flags & OpenFlags::Write != OpenFlags::None || current_pid != Some(pid) {
+            Err(Errno::OperationNotPermitted)
+        } else {
+            Ok(Self { pid })
+        }
+    }
+}
+
+impl FileDescriptor for FsFromKernel {
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead,
+                kind: FileKind::Regular,
+            },
+            ..Default::default()
+        })
+    }
+}
+
+/// file for notifying kernel of completed filesystem events and for reading/writing data for those events
+struct FsToKernel {
+    pid: usize,
+}
+
+impl FsToKernel {
+    fn new(pid: usize, _flags: OpenFlags) -> Result<Self> {
+        let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
+
+        if current_pid != Some(pid) {
+            Err(Errno::OperationNotPermitted)
+        } else {
+            Ok(Self { pid })
+        }
+    }
+}
+
+impl FileDescriptor for FsToKernel {
+    fn stat(&self) -> Result<FileStat> {
+        Ok(FileStat {
+            mode: FileMode {
+                permissions: Permissions::OwnerRead | Permissions::OwnerWrite,
+                kind: FileKind::Regular,
+            },
+            ..Default::default()
+        })
     }
 }

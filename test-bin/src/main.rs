@@ -190,7 +190,7 @@ pub extern "C" fn _start() {
     write(fd, &[0x55, 0x0f, 0x77, 0x0f, 0x55, 0x0f]).unwrap();
     close(fd).unwrap();
 
-    let proc_dir = open(0, "/../procfs/self", OpenFlags::Read | OpenFlags::AtCWD | OpenFlags::Directory).unwrap();
+    /*let proc_dir = open(0, "/../procfs/self", OpenFlags::Read | OpenFlags::AtCWD | OpenFlags::Directory).unwrap();
 
     let fd = open(proc_dir, "files", OpenFlags::Read | OpenFlags::Directory).unwrap();
     let mut buf = [0; 256];
@@ -236,6 +236,10 @@ pub extern "C" fn _start() {
         let str = core::str::from_utf8(&buf[..bytes_read]).unwrap();
         write_message(str);
     }
+    close(fd).unwrap();*/
+
+    let fd = open(0, "/../procfs/self/filesystem/name", OpenFlags::Write | OpenFlags::AtCWD).unwrap();
+    write(fd, "test".as_bytes()).unwrap();
     close(fd).unwrap();
 
     unsafe {
