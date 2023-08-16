@@ -397,7 +397,7 @@ pub fn kmain() {
                         threads: spin::RwLock::new(vec![task_a.clone()]),
                         memory_map: arc_map,
                         environment,
-                        filesystem: None,
+                        filesystem: None.into(),
                     })
                     .unwrap();
                 task_a.lock().pid = Some(pid_a);

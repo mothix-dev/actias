@@ -97,7 +97,7 @@ pub enum SeekKind {
     End,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 #[repr(C)]
 pub struct FileStat {
     /// ID of the device containing this file
@@ -140,7 +140,7 @@ pub struct FileStat {
 pub type UserId = u32;
 pub type GroupId = u32;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 #[repr(C)]
 pub struct FileMode {
     /// permissions of this file
@@ -219,7 +219,7 @@ impl core::fmt::Display for Permissions {
 }
 
 #[repr(u8)]
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
 pub enum FileKind {
     /// block special file
     BlockSpecial,
@@ -268,6 +268,7 @@ pub enum UnlinkFlags {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct FilesystemEvent {
     /// the ID of this event
     pub id: usize,
@@ -280,6 +281,7 @@ pub struct FilesystemEvent {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub enum EventKind {
     /// change the permissions of a file to those provided
     Chmod { permissions: Permissions },
@@ -307,4 +309,30 @@ pub enum EventKind {
 
     /// write to a file at the specified position
     Write { length: usize, position: i64 },
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct EventResponse {
+    /// the ID of this event
+    pub id: usize,
+
+    /// data related to this event
+    pub data: ResponseData,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub enum ResponseData {
+    /// request failed (can be any)
+    Error { error: Errno },
+
+    /// request returns a buffer (must be from `read`, `write, `stat`)
+    Buffer { addr: usize, len: usize },
+
+    /// request returns a file handle (must be from `open`)
+    Handle { handle: usize },
+
+    /// request doesn't return any data, just an acknowledgement that it completed
+    None,
 }

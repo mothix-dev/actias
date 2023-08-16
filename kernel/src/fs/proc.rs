@@ -1,6 +1,6 @@
 //! procfs filesystem
 
-use super::kernel::FileDescriptor;
+use super::{kernel::FileDescriptor, user::UserspaceFs};
 use alloc::{
     boxed::Box,
     format,
@@ -8,7 +8,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
+use common::{Errno, EventResponse, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
 use spin::Mutex;
 
 /// procfs root directory
@@ -517,14 +517,22 @@ impl FileDescriptor for FsName {
         })
     }
 
-    fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
-        todo!();
+    fn write(&self, _position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+        const BUF_LEN: usize = 256;
+        let mut buf = [0; BUF_LEN];
+        callback(Ok(&mut buf), false);
+
+        if let Ok(str) = core::str::from_utf8(&buf[..length.min(BUF_LEN)]) && let Some(process) = crate::get_global_state().process_table.read().get(self.pid) {
+            let filesystem = Arc::new(UserspaceFs::new());
+            *process.filesystem.lock() = Some(filesystem.clone());
+            process.environment.namespace.write().insert(str.to_string(), filesystem);
+        }
     }
 }
 
 /// file used for receiving filesystem events from the kernel
 struct FsFromKernel {
-    pid: usize,
+    filesystem: Arc<UserspaceFs>,
 }
 
 impl FsFromKernel {
@@ -532,9 +540,13 @@ impl FsFromKernel {
         let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
 
         if flags & OpenFlags::Write != OpenFlags::None || current_pid != Some(pid) {
-            Err(Errno::OperationNotPermitted)
+            return Err(Errno::OperationNotPermitted);
+        }
+
+        if let Some(process) = crate::get_global_state().process_table.read().get(pid) && let Some(filesystem) = process.filesystem.lock().clone() {
+            Ok(Self { filesystem })
         } else {
-            Ok(Self { pid })
+            Err(Errno::OperationNotPermitted)
         }
     }
 }
@@ -544,26 +556,38 @@ impl FileDescriptor for FsFromKernel {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead,
-                kind: FileKind::Regular,
+                kind: FileKind::CharSpecial,
             },
             ..Default::default()
         })
+    }
+
+    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+        self.filesystem.wait_for_event(callback);
     }
 }
 
 /// file for notifying kernel of completed filesystem events and for reading/writing data for those events
 struct FsToKernel {
-    pid: usize,
+    filesystem: Arc<UserspaceFs>,
 }
+
+// once again: it's in a fucking mutex
+unsafe impl Send for FsToKernel {}
+unsafe impl Sync for FsToKernel {}
 
 impl FsToKernel {
     fn new(pid: usize, _flags: OpenFlags) -> Result<Self> {
         let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
 
         if current_pid != Some(pid) {
-            Err(Errno::OperationNotPermitted)
+            return Err(Errno::OperationNotPermitted);
+        }
+
+        if let Some(process) = crate::get_global_state().process_table.read().get(pid) && let Some(filesystem) = process.filesystem.lock().clone() {
+            Ok(Self { filesystem })
         } else {
-            Ok(Self { pid })
+            Err(Errno::OperationNotPermitted)
         }
     }
 }
@@ -573,9 +597,17 @@ impl FileDescriptor for FsToKernel {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerWrite,
-                kind: FileKind::Regular,
+                kind: FileKind::CharSpecial,
             },
             ..Default::default()
         })
+    }
+
+    fn write(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+        let mut buf = [0; core::mem::size_of::<EventResponse>()];
+        callback(Ok(&mut buf), false);
+        // TODO: check fields to ensure validity of data
+        let response = unsafe { &*(buf.as_ptr() as *const _ as *const EventResponse) };
+        self.filesystem.respond(response);
     }
 }

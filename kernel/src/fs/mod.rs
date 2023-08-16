@@ -89,6 +89,17 @@ impl Request {
             Self::Write { callback, .. } => callback(Err(error), blocked),
         }
     }
+
+    /// calls the callback for this request if it takes no value. if it takes a value, nothing happens
+    pub fn callback_ok(self, blocked: bool) {
+        match self {
+            Self::Chmod { callback, .. } => callback(Ok(()), blocked),
+            Self::Chown { callback, .. } => callback(Ok(()), blocked),
+            Self::Truncate { callback, .. } => callback(Ok(()), blocked),
+            Self::Unlink { callback, .. } => callback(Ok(()), blocked),
+            _ => (),
+        }
+    }
 }
 
 pub trait Filesystem: Send + Sync {

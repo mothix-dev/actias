@@ -1,8 +1,9 @@
 #![no_std]
 #![no_main]
+#![feature(let_chains)]
 
-use common::{Errno, OpenFlags, Result, Syscalls};
-use core::arch::asm;
+use common::{Errno, EventKind, EventResponse, FileKind, FileMode, FileStat, FilesystemEvent, OpenFlags, Permissions, ResponseData, Result, Syscalls};
+use core::{arch::asm, mem::size_of};
 
 #[inline]
 #[cfg(target_arch = "x86")]
@@ -143,6 +144,10 @@ fn open(at: usize, path: &str, flags: OpenFlags) -> Result<usize> {
     }
 }
 
+fn fork() -> Result<usize> {
+    unsafe { syscall_0_args(Syscalls::Fork).map(|pid| pid.try_into().unwrap()) }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() {
     /*unsafe {
@@ -241,6 +246,108 @@ pub extern "C" fn _start() {
     let fd = open(0, "/../procfs/self/filesystem/name", OpenFlags::Write | OpenFlags::AtCWD).unwrap();
     write(fd, "test".as_bytes()).unwrap();
     close(fd).unwrap();
+
+    let fd = open(0, "/..", OpenFlags::Read | OpenFlags::Directory | OpenFlags::AtCWD).unwrap();
+    let mut buf = [0; 256];
+    loop {
+        let bytes_read = read(fd, &mut buf).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        let str = core::str::from_utf8(&buf[4..bytes_read - 1]).unwrap();
+
+        write_message(str);
+    }
+    close(fd).unwrap();
+
+    if fork().unwrap() == 0 {
+        // child process
+        let fd = open(0, "/../test/uwu", OpenFlags::Read | OpenFlags::AtCWD).unwrap();
+        write_message("opened successfully!");
+
+        write(fd, "UwU OwO".as_bytes()).unwrap();
+        close(fd).unwrap();
+    } else {
+        // parent process
+        let fd = open(0, "/../procfs/self/filesystem/from_kernel", OpenFlags::Read | OpenFlags::AtCWD).unwrap();
+        let fd2 = open(0, "/../procfs/self/filesystem/to_kernel", OpenFlags::Write | OpenFlags::AtCWD).unwrap();
+
+        let mut buf = [0; 1024];
+        loop {
+            read(fd, &mut buf).unwrap();
+            write_message("got event!");
+
+            let event = unsafe { &*(buf.as_ptr() as *const _ as *const FilesystemEvent) };
+            let event_size = size_of::<FilesystemEvent>();
+
+            let data = match event.kind {
+                EventKind::Open { name_length, .. } => {
+                    let name = core::str::from_utf8(&buf[event_size..event_size + name_length]);
+
+                    if let Ok(name) = name && name == "uwu" && event.handle == 0 {
+                        ResponseData::Handle { handle: 1 }
+                    } else {
+                        ResponseData::Error { error: Errno::NoSuchFileOrDir }
+                    }
+                }
+                EventKind::Stat => {
+                    if event.handle == 0 {
+                        let stat = FileStat {
+                            mode: FileMode {
+                                permissions: Permissions::OwnerRead
+                                    | Permissions::OwnerExecute
+                                    | Permissions::GroupRead
+                                    | Permissions::GroupExecute
+                                    | Permissions::OtherRead
+                                    | Permissions::OtherExecute,
+                                kind: FileKind::Directory,
+                            },
+                            ..Default::default()
+                        };
+
+                        ResponseData::Buffer {
+                            addr: &stat as *const _ as usize,
+                            len: size_of::<FileStat>(),
+                        }
+                    } else if event.handle == 1 {
+                        let stat = FileStat {
+                            mode: FileMode {
+                                permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
+                                kind: FileKind::Regular,
+                            },
+                            ..Default::default()
+                        };
+
+                        ResponseData::Buffer {
+                            addr: &stat as *const _ as usize,
+                            len: size_of::<FileStat>(),
+                        }
+                    } else {
+                        ResponseData::Error { error: Errno::TryAgain }
+                    }
+                }
+                EventKind::Write { .. } => {
+                    if event.handle == 1 {
+                        ResponseData::Buffer {
+                            addr: buf.as_ptr() as usize,
+                            len: buf.len(),
+                        }
+                    } else {
+                        ResponseData::Error { error: Errno::TryAgain }
+                    }
+                }
+                _ => ResponseData::Error { error: Errno::NotSupported },
+            };
+
+            let response = EventResponse { id: event.id, data };
+
+            write(fd2, unsafe { core::slice::from_raw_parts(&response as *const _ as *const u8, core::mem::size_of::<EventResponse>()) }).unwrap();
+
+            if let EventKind::Write { length, .. } = event.kind {
+                write(1, &buf[..length.min(buf.len())]).unwrap();
+            }
+        }
+    }
 
     unsafe {
         syscall_0_args(Syscalls::Exit).unwrap();

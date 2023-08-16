@@ -1,7 +1,5 @@
 //! userspace filesystem support
 
-use core::mem::size_of;
-
 use super::{Request, RequestCallback};
 use crate::{arch::PhysicalAddress, array::ConsistentIndexArray};
 use alloc::{
@@ -9,7 +7,8 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use common::{Errno, EventKind, FilesystemEvent};
+use common::{Errno, EventKind, EventResponse, FileStat, FilesystemEvent, ResponseData};
+use core::mem::size_of;
 use crossbeam::queue::SegQueue;
 use spin::Mutex;
 
@@ -29,6 +28,14 @@ unsafe impl Send for UserspaceFs {}
 unsafe impl Sync for UserspaceFs {}
 
 impl UserspaceFs {
+    pub fn new() -> Self {
+        Self {
+            in_progress: Mutex::new(ConsistentIndexArray::new()),
+            send_queue: SegQueue::new(),
+            waiting_queue: SegQueue::new(),
+        }
+    }
+
     /// converts an event and its optional string into a vector of raw data that processes can read from
     ///
     /// since the string lengths are encoded in the event object (for the only ones that actually have strings included)
@@ -54,14 +61,63 @@ impl UserspaceFs {
             self.waiting_queue.push(callback);
         }
     }
+
+    /// responds to an event
+    pub fn respond(&self, response: &EventResponse) {
+        let request = self.in_progress.lock().remove(response.id);
+
+        if let Some(request) = request {
+            match response.data {
+                ResponseData::Error { error } => request.callback_error(error, true),
+                ResponseData::Buffer { addr, len } => {
+                    // TODO: ensure the buffer is actually mapped in
+                    match request {
+                        Request::Read { callback, .. } => callback(Ok(unsafe { core::slice::from_raw_parts(addr as *const u8, len) }), true),
+                        Request::Stat { callback } => {
+                            if len < size_of::<FileStat>() {
+                                callback(Err(Errno::TryAgain), true);
+                            } else {
+                                callback(Ok(unsafe { *(addr as *const FileStat) }.clone()), true);
+                            }
+                        }
+                        Request::Write { callback, .. } => callback(Ok(unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) }), true),
+                        _ => request.callback_error(Errno::TryAgain, true),
+                    }
+                }
+                ResponseData::Handle { handle } => match request {
+                    Request::Open { callback, .. } => callback(Ok(handle), true),
+                    _ => request.callback_error(Errno::TryAgain, true),
+                },
+                ResponseData::None => match request {
+                    Request::Chmod { callback, .. } => callback(Ok(()), true),
+                    Request::Chown { callback, .. } => callback(Ok(()), true),
+                    Request::Truncate { callback, .. } => callback(Ok(()), true),
+                    Request::Unlink { callback, .. } => callback(Ok(()), true),
+                    _ => request.callback_error(Errno::TryAgain, true),
+                },
+            }
+        }
+    }
+}
+
+impl Default for UserspaceFs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl super::Filesystem for UserspaceFs {
     fn get_root_dir(&self) -> super::HandleNum {
-        todo!();
+        0
     }
 
     fn make_request(&self, handle: super::HandleNum, request: Request) {
+        // ignore any attempts to close the root dir
+        if matches!(request, Request::Close) && handle == 0 {
+            return;
+        }
+
+        // convert the request into a portable format
         let mut string_option = None;
         let kind = match &request {
             Request::Chmod { permissions, .. } => EventKind::Chmod { permissions: *permissions },
@@ -90,7 +146,10 @@ impl super::Filesystem for UserspaceFs {
         // TODO: handle this sanely
         let id = self.in_progress.lock().add(request).expect("ran out of memory while trying to queue new filesystem event");
 
+        // get the portable request as raw bytes that a process can read from
         let event = FilesystemEvent { id, handle, kind };
+        //trace!("sending event {event:#?}");
+
         let data = match Self::make_data(event, string_option) {
             Ok(data) => data,
             Err(_) => return self.in_progress.lock().remove(id).unwrap().callback_error(Errno::OutOfMemory, false),

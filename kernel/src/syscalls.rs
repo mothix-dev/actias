@@ -80,7 +80,7 @@ fn exit_process(registers: &mut Registers, code: usize) {
     scheduler.context_switch(registers);
 }
 
-struct ProcessGuard<'a> {
+pub struct ProcessGuard<'a> {
     guard: spin::RwLockReadGuard<'a, crate::process::ProcessTable>,
     pid: usize,
 }
@@ -93,7 +93,7 @@ impl<'a> core::ops::Deref for ProcessGuard<'a> {
     }
 }
 
-fn get_current_process() -> common::Result<ProcessGuard<'static>> {
+pub fn get_current_process() -> common::Result<ProcessGuard<'static>> {
     let global_state = crate::get_global_state();
 
     // TODO: detect current CPU
@@ -463,7 +463,7 @@ fn fork(registers: &Registers) -> common::Result<usize> {
             threads,
             memory_map,
             environment: Arc::new(environment),
-            filesystem: None,
+            filesystem: None.into(),
         })
         .unwrap();
 
