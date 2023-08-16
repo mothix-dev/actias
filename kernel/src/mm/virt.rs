@@ -196,7 +196,7 @@ impl ProcessMap {
     /// * `base` - the base address of the region of memory to map in
     /// * `length` - the length of the region of memory to map in
     /// * `access_type` - how the region of memory to be mapped in will be accessed
-    pub fn map_in_area(&mut self, arc_self: &Arc<Mutex<Self>>, registers: &mut Registers, base: usize, length: usize, access_type: MemoryProtection) -> Result<Vec<PhysicalAddress>> {
+    pub fn map_in_area(&mut self, _arc_self: &Arc<Mutex<Self>>, base: usize, length: usize, access_type: MemoryProtection) -> Result<Vec<PhysicalAddress>> {
         let region = super::ContiguousRegion::new(base, length).align_covering(crate::arch::PROPERTIES.page_size);
         let mut addrs = Vec::new();
 
@@ -211,7 +211,9 @@ impl ProcessMap {
                 }
 
                 addrs.push(page.addr);
-            } else if !self.page_fault(arc_self, registers, addr, access_type) {
+            } else
+            /*if !self.page_fault(arc_self, registers, addr, access_type)*/
+            {
                 // page couldn't be mapped in
                 return Err(Errno::BadAddress);
             }

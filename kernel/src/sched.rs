@@ -8,6 +8,7 @@ use crate::{
     timer::{Timeout, Timer},
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use common::{Errno, Result};
 use core::{
     fmt::Display,
     pin::Pin,
@@ -417,5 +418,48 @@ pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl F
         }
     } else if is_syscall {
         registers.syscall_return(Err(common::Errno::NoSuchProcess as usize));
+    }
+}
+
+pub struct ProcessGuard<'a> {
+    guard: spin::RwLockReadGuard<'a, crate::process::ProcessTable>,
+    pid: usize,
+}
+
+impl<'a> core::ops::Deref for ProcessGuard<'a> {
+    type Target = crate::process::Process;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard.get(self.pid).unwrap()
+    }
+}
+
+pub fn get_current_pid() -> Result<usize> {
+    let global_state = crate::get_global_state();
+
+    // TODO: detect current CPU
+    let scheduler = &global_state.cpus.read()[0].scheduler;
+
+    let current_task = match scheduler.get_current_task() {
+        Some(task) => task,
+        None => unreachable!(),
+    };
+
+    let pid = current_task.lock().pid.ok_or(Errno::NoSuchProcess)?;
+
+    Ok(pid)
+}
+
+pub fn get_current_process() -> Result<ProcessGuard<'static>> {
+    let global_state = crate::get_global_state();
+    let pid = get_current_pid()?;
+
+    if global_state.process_table.read().contains(pid) {
+        Ok(ProcessGuard {
+            guard: global_state.process_table.read(),
+            pid,
+        })
+    } else {
+        Err(Errno::NoSuchProcess)
     }
 }

@@ -1,10 +1,10 @@
 use core::mem::size_of;
 
 use crate::{
-    arch::{bsp::RegisterContext, PROPERTIES},
+    arch::bsp::RegisterContext,
     fs::FsEnvironment,
     mm::PageDirectory,
-    sched::block_until,
+    sched::{block_until, get_current_process},
 };
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use common::{Errno, FileStat, Result, Syscalls};
@@ -80,42 +80,6 @@ fn exit_process(registers: &mut Registers, code: usize) {
     scheduler.context_switch(registers);
 }
 
-pub struct ProcessGuard<'a> {
-    guard: spin::RwLockReadGuard<'a, crate::process::ProcessTable>,
-    pid: usize,
-}
-
-impl<'a> core::ops::Deref for ProcessGuard<'a> {
-    type Target = crate::process::Process;
-
-    fn deref(&self) -> &Self::Target {
-        self.guard.get(self.pid).unwrap()
-    }
-}
-
-pub fn get_current_process() -> common::Result<ProcessGuard<'static>> {
-    let global_state = crate::get_global_state();
-
-    // TODO: detect current CPU
-    let scheduler = &global_state.cpus.read()[0].scheduler;
-
-    let current_task = match scheduler.get_current_task() {
-        Some(task) => task,
-        None => unreachable!(),
-    };
-
-    let pid = current_task.lock().pid.ok_or(common::Errno::NoSuchProcess)?;
-
-    if global_state.process_table.read().get(pid).is_some() {
-        Ok(ProcessGuard {
-            guard: global_state.process_table.read(),
-            pid,
-        })
-    } else {
-        Err(common::Errno::NoSuchProcess)
-    }
-}
-
 /// syscall handler for `chdir`
 fn chdir(file_descriptor: usize) -> Result<()> {
     get_current_process()?.environment.chdir(file_descriptor)
@@ -166,29 +130,29 @@ fn dup2(file_descriptor: usize, other_fd: usize) -> Result<()> {
 
 /// syscall handler for `open`
 fn open(registers: &mut Registers, at: usize, path: usize, path_len: usize, flags: usize) {
-    if let Err(err) = get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, path, path_len, crate::mm::MemoryProtection::Read)) {
-        registers.syscall_return(Err(err as usize));
-    }
+    let buffer = match crate::process::ProcessBuffer::from_current_process(path, path_len) {
+        Ok(buffer) => buffer,
+        Err(err) => return registers.syscall_return(Err(err as usize)),
+    };
 
     block_until(registers, true, |process, state| {
-        if state.was_blocked() {
-            panic!("TODO: delay syscall completion until blocked area is mapped in");
-        }
-
         let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
 
-        let buf = unsafe { core::slice::from_raw_parts(path as *const u8, path_len) };
-        let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
+        buffer
+            .map_in(|buf| {
+                let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
 
-        FsEnvironment::open(
-            process.environment.clone(),
-            at,
-            path.to_string(),
-            flags.try_into().map_err(|_| common::Errno::InvalidArgument)?,
-            Box::new(move |res, blocked| state.syscall_return(res, blocked)),
-        );
+                FsEnvironment::open(
+                    process.environment.clone(),
+                    at,
+                    path.to_string(),
+                    flags.try_into().map_err(|_| common::Errno::InvalidArgument)?,
+                    Box::new(move |res, blocked| state.syscall_return(res, blocked)),
+                );
 
-        Ok(())
+                Ok(())
+            })
+            .and_then(|res| res)
     });
 }
 
@@ -198,48 +162,18 @@ fn read(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: 
         return;
     }
 
-    let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)) {
-        Ok(addrs) => addrs,
+    let buffer = match crate::process::ProcessBuffer::from_current_process(buf, buf_len) {
+        Ok(buffer) => buffer,
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
     block_until(registers, true, |process, state| {
-        if state.was_blocked() {
-            panic!("TODO: delay syscall completion until blocked area is mapped in");
-        }
-
         process.environment.read(
             file_descriptor,
             buf_len,
-            Box::new(move |res, blocked| {
-                match res {
-                    Ok(to_read) => {
-                        if blocked {
-                            // blocked, the pages for the buffer have to be mapped in first
-                            let memory_map = state.task().lock().memory_map.clone();
-                            let res = unsafe {
-                                crate::mm::map_memory(&mut memory_map.lock().page_directory, &addrs, |slice| {
-                                    let aligned_addr = (buf / PROPERTIES.page_size) * PROPERTIES.page_size;
-                                    let offset = buf - aligned_addr;
-                                    let buf = &mut slice[offset..offset + buf_len];
-
-                                    let bytes_read = to_read.len().min(buf.len());
-                                    buf[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
-
-                                    bytes_read
-                                })
-                            };
-                            state.syscall_return(res.map_err(Errno::from), blocked);
-                        } else {
-                            // didn't block, so assume the page directory hasn't changed and just read directly from memory
-                            let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, buf_len) };
-                            let bytes_read = to_read.len().min(buf.len());
-                            buf[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
-                            state.syscall_return(Ok(bytes_read), blocked);
-                        }
-                    }
-                    Err(err) => state.syscall_return(Err(err), blocked),
-                }
+            Box::new(move |res, blocked| match res {
+                Ok(to_read) => state.syscall_return(buffer.copy_from(to_read).map_err(Errno::from), blocked),
+                Err(err) => state.syscall_return(Err(err), blocked),
             }),
         );
 
@@ -264,49 +198,20 @@ fn seek(registers: &mut Registers, file_descriptor: usize, offset: usize, kind: 
 /// syscall handler for `stat`
 fn stat(registers: &mut Registers, file_descriptor: usize, buf: usize) {
     let buf_len = size_of::<FileStat>();
-    let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Write)) {
-        Ok(addrs) => addrs,
+    let buffer = match crate::process::ProcessBuffer::from_current_process(buf, buf_len) {
+        Ok(buffer) => buffer,
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
     block_until(registers, true, |process, state| {
-        if state.was_blocked() {
-            panic!("TODO: delay syscall completion until blocked area is mapped in");
-        }
-
         process.environment.stat(
             file_descriptor,
-            Box::new(move |res, blocked| {
-                match res {
-                    Ok(stat) => {
-                        let to_read = unsafe { core::slice::from_raw_parts(&stat as *const _ as *const u8, buf_len) };
-
-                        if blocked {
-                            // blocked, the pages for the buffer have to be mapped in first
-                            let memory_map = state.task().lock().memory_map.clone();
-                            let res = unsafe {
-                                crate::mm::map_memory(&mut memory_map.lock().page_directory, &addrs, |slice| {
-                                    let aligned_addr = (buf / PROPERTIES.page_size) * PROPERTIES.page_size;
-                                    let offset = buf - aligned_addr;
-                                    let buf = &mut slice[offset..offset + buf_len];
-
-                                    let bytes_read = to_read.len().min(buf.len());
-                                    buf[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
-
-                                    0
-                                })
-                            };
-                            state.syscall_return(res.map_err(Errno::from), blocked);
-                        } else {
-                            // didn't block, so assume the page directory hasn't changed and just read directly from memory
-                            let buf = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, buf_len) };
-                            let bytes_read = to_read.len().min(buf.len());
-                            buf[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
-                            state.syscall_return(Ok(bytes_read), blocked);
-                        }
-                    }
-                    Err(err) => state.syscall_return(Err(err), blocked),
+            Box::new(move |res, blocked| match res {
+                Ok(stat) => {
+                    let to_read = unsafe { core::slice::from_raw_parts(&stat as *const _ as *const u8, buf_len) };
+                    state.syscall_return(buffer.copy_from(to_read).map_err(Errno::from), blocked);
                 }
+                Err(err) => state.syscall_return(Err(err), blocked),
             }),
         );
 
@@ -328,29 +233,29 @@ fn truncate(registers: &mut Registers, file_descriptor: usize, len: usize) {
 
 /// syscall handler for `unlink`
 fn unlink(registers: &mut Registers, at: usize, path: usize, path_len: usize, flags: usize) {
-    if let Err(err) = get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, path, path_len, crate::mm::MemoryProtection::Read)) {
-        return registers.syscall_return(Err(err as usize));
-    }
+    let buffer = match crate::process::ProcessBuffer::from_current_process(path, path_len) {
+        Ok(buffer) => buffer,
+        Err(err) => return registers.syscall_return(Err(err as usize)),
+    };
 
     block_until(registers, true, |process, state| {
-        if state.was_blocked() {
-            panic!("TODO: delay syscall completion until blocked area is mapped in");
-        }
-
         let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
 
-        let buf = unsafe { core::slice::from_raw_parts(path as *const u8, path_len) };
-        let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
+        buffer
+            .map_in(|buf| {
+                let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
 
-        FsEnvironment::unlink(
-            process.environment.clone(),
-            at,
-            path.to_string(),
-            flags.try_into().map_err(|_| common::Errno::InvalidArgument)?,
-            Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)),
-        );
+                FsEnvironment::unlink(
+                    process.environment.clone(),
+                    at,
+                    path.to_string(),
+                    flags.try_into().map_err(|_| common::Errno::InvalidArgument)?,
+                    Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)),
+                );
 
-        Ok(())
+                Ok(())
+            })
+            .and_then(|res| res)
     });
 }
 
@@ -360,48 +265,18 @@ fn write(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len:
         return;
     }
 
-    let addrs = match get_current_process().and_then(|process| process.memory_map.lock().map_in_area(&process.memory_map, registers, buf, buf_len, crate::mm::MemoryProtection::Read)) {
-        Ok(addrs) => addrs,
+    let buffer = match crate::process::ProcessBuffer::from_current_process(buf, buf_len) {
+        Ok(buffer) => buffer,
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
     block_until(registers, true, |process, state| {
-        if state.was_blocked() {
-            panic!("TODO: delay syscall completion until blocked area is mapped in");
-        }
-
         process.environment.write(
             file_descriptor,
             buf_len,
-            Box::new(move |res, blocked| {
-                match res {
-                    Ok(to_write) => {
-                        if blocked {
-                            // blocked, the pages for the buffer have to be mapped in first
-                            let memory_map = state.task().lock().memory_map.clone();
-                            let res = unsafe {
-                                crate::mm::map_memory(&mut memory_map.lock().page_directory, &addrs, |slice| {
-                                    let aligned_addr = (buf / PROPERTIES.page_size) * PROPERTIES.page_size;
-                                    let offset = buf - aligned_addr;
-                                    let buf = &slice[offset..offset + buf_len];
-
-                                    let bytes_written = to_write.len().min(buf.len());
-                                    to_write[..bytes_written].copy_from_slice(&buf[..bytes_written]);
-
-                                    bytes_written
-                                })
-                            };
-                            state.syscall_return(res.map_err(Errno::from), blocked);
-                        } else {
-                            // didn't block, so assume the page directory hasn't changed and just read directly from memory
-                            let buf = unsafe { core::slice::from_raw_parts(buf as *mut u8, buf_len) };
-                            let bytes_written = to_write.len().min(buf.len());
-                            to_write[..bytes_written].copy_from_slice(&buf[..bytes_written]);
-                            state.syscall_return(Ok(bytes_written), blocked);
-                        }
-                    }
-                    Err(err) => state.syscall_return(Err(err), blocked),
-                }
+            Box::new(move |res, blocked| match res {
+                Ok(to_write) => state.syscall_return(buffer.copy_into(to_write).map_err(Errno::from), blocked),
+                Err(err) => state.syscall_return(Err(err), blocked),
             }),
         );
 

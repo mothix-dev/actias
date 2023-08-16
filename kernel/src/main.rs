@@ -20,6 +20,7 @@ pub mod array;
 pub mod cpu;
 pub mod exec;
 pub mod fs;
+pub mod futures;
 pub mod mm;
 pub mod platform;
 pub mod process;

@@ -28,88 +28,36 @@ pub trait RequestCallback<T> = FnOnce(Result<T>, bool);
 /// a handle denoting a unique open file in a filesystem
 pub type HandleNum = usize;
 
-/// an async request that can be made to a filesystem. all requests are associated with a file handle, which isn't provided in the request object itself out of convenience
-pub enum Request {
-    /// change the permissions of a file to those provided
-    Chmod { permissions: Permissions, callback: Box<dyn RequestCallback<()>> },
-
-    /// change the owner and group of a file to those provided
-    Chown { owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>> },
-
-    /// close this file handle
-    Close,
-
-    /// open a new file in the directory pointed to by this file handle
-    Open {
-        name: String,
-        flags: OpenFlags,
-        callback: Box<dyn RequestCallback<HandleNum>>,
-    },
-
-    /// read from a file at the specified position
-    Read {
-        position: i64,
-        length: usize,
-        callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>,
-    },
-
-    /// get information about a file
-    Stat { callback: Box<dyn RequestCallback<FileStat>> },
-
-    /// truncate a file to the given length
-    Truncate { length: i64, callback: Box<dyn RequestCallback<()>> },
-
-    /// remove a file from the directory pointed to by this file handle
-    Unlink {
-        name: String,
-        flags: UnlinkFlags,
-        callback: Box<dyn RequestCallback<()>>,
-    },
-
-    /// write to a file at the specified position
-    Write {
-        length: usize,
-        position: i64,
-        callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>,
-    },
-}
-
-impl Request {
-    /// calls the callback for this request with the given error and blocked state
-    pub fn callback_error(self, error: Errno, blocked: bool) {
-        match self {
-            Self::Chmod { callback, .. } => callback(Err(error), blocked),
-            Self::Chown { callback, .. } => callback(Err(error), blocked),
-            Self::Close => (),
-            Self::Open { callback, .. } => callback(Err(error), blocked),
-            Self::Read { callback, .. } => callback(Err(error), blocked),
-            Self::Stat { callback, .. } => callback(Err(error), blocked),
-            Self::Truncate { callback, .. } => callback(Err(error), blocked),
-            Self::Unlink { callback, .. } => callback(Err(error), blocked),
-            Self::Write { callback, .. } => callback(Err(error), blocked),
-        }
-    }
-
-    /// calls the callback for this request if it takes no value. if it takes a value, nothing happens
-    pub fn callback_ok(self, blocked: bool) {
-        match self {
-            Self::Chmod { callback, .. } => callback(Ok(()), blocked),
-            Self::Chown { callback, .. } => callback(Ok(()), blocked),
-            Self::Truncate { callback, .. } => callback(Ok(()), blocked),
-            Self::Unlink { callback, .. } => callback(Ok(()), blocked),
-            _ => (),
-        }
-    }
-}
-
 pub trait Filesystem: Send + Sync {
     /// gets a handle to the root directory of this filesystem
     fn get_root_dir(&self) -> HandleNum;
 
-    /// makes an async request to the filesystem
-    ///
-    /// if state must be locked to complete this request, it must be unlocked before calling its callback
-    fn make_request(&self, handle: HandleNum, request: Request);
+    /// change the permissions of a file to those provided
+    fn chmod(&self, handle: HandleNum, permissions: Permissions, callback: Box<dyn RequestCallback<()>>);
+
+    /// change the owner and group of a file to those provided
+    fn chown(&self, handle: HandleNum, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>);
+
+    /// close this file handle
+    fn close(&self, handle: HandleNum);
+
+    /// open a new file in the directory pointed to by this file handle
+    fn open(&self, handle: HandleNum, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<HandleNum>>);
+
+    /// read from a file at the specified position
+    fn read(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>);
+
+    /// get information about a file
+    fn stat(&self, handle: HandleNum, callback: Box<dyn RequestCallback<FileStat>>);
+
+    /// truncate a file to the given length
+    fn truncate(&self, handle: HandleNum, length: i64, callback: Box<dyn RequestCallback<()>>);
+
+    /// remove a file from the directory pointed to by this file handle
+    fn unlink(&self, handle: HandleNum, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>);
+
+    /// write to a file at the specified position
+    fn write(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>);
 
     /// gets the physical address for a page frame containing data for the given file handle at the given position to be mapped into a process' memory map on a page fault or similar
     ///
@@ -264,10 +212,10 @@ impl FsEnvironment {
             };
 
             // makes an open request for the next component in the path
-            at.clone().make_request(Request::Open {
-                name: component.to_string(),
-                flags: OpenFlags::Read,
-                callback: Box::new(move |res, open_blocked| match res {
+            at.clone().open(
+                component.to_string(),
+                OpenFlags::Read,
+                Box::new(move |res, open_blocked| match res {
                     Ok(handle) => {
                         let arc_self = arc_self.clone();
                         let filesystem = at.filesystem.clone();
@@ -287,7 +235,7 @@ impl FsEnvironment {
                     }
                     Err(err) => callback(Err(err), blocked || open_blocked),
                 }),
-            });
+            );
         }
 
         fn stat_step(
@@ -301,38 +249,36 @@ impl FsEnvironment {
             callback: Box<dyn RequestCallback<ResolvedHandle>>,
         ) {
             // makes a stat request for the current component in the path and handles it accordingly
-            at.clone().make_request(Request::Stat {
-                callback: Box::new(move |res, stat_blocked| match res {
-                    Ok(stat) => {
-                        let arc_self = arc_self.clone();
-                        let last = last.clone();
-                        let at = at.clone();
-                        let path = path.clone();
+            at.clone().stat(Box::new(move |res, stat_blocked| match res {
+                Ok(stat) => {
+                    let arc_self = arc_self.clone();
+                    let last = last.clone();
+                    let at = at.clone();
+                    let path = path.clone();
 
-                        match stat.mode.kind {
-                            FileKind::Directory => (),
-                            FileKind::SymLink => {
-                                if !no_follow {
-                                    return symlink_step(arc_self, last, at, path, absolute_path, no_follow, blocked || stat_blocked, callback, stat.size);
-                                } else if path.lock().back().is_some() {
-                                    return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
-                                }
-                            }
-                            _ => {
-                                if path.lock().back().is_some() {
-                                    // there are still more components in the path and this isn't a directory or a symlink to one, so give up
-                                    return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
-                                }
+                    match stat.mode.kind {
+                        FileKind::Directory => (),
+                        FileKind::SymLink => {
+                            if !no_follow {
+                                return symlink_step(arc_self, last, at, path, absolute_path, no_follow, blocked || stat_blocked, callback, stat.size);
+                            } else if path.lock().back().is_some() {
+                                return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
                             }
                         }
-
-                        let last = last.clone();
-
-                        open_step(arc_self, last, at, path, absolute_path, stat.mode.kind, no_follow, blocked || stat_blocked, callback);
+                        _ => {
+                            if path.lock().back().is_some() {
+                                // there are still more components in the path and this isn't a directory or a symlink to one, so give up
+                                return callback(Err(Errno::NotDirectory), blocked || stat_blocked);
+                            }
+                        }
                     }
-                    Err(err) => callback(Err(err), blocked || stat_blocked),
-                }),
-            });
+
+                    let last = last.clone();
+
+                    open_step(arc_self, last, at, path, absolute_path, stat.mode.kind, no_follow, blocked || stat_blocked, callback);
+                }
+                Err(err) => callback(Err(err), blocked || stat_blocked),
+            }));
         }
 
         fn symlink_step(
@@ -352,10 +298,10 @@ impl FsEnvironment {
             };
 
             // makes a read request to read the target of the symlink
-            at.clone().make_request(Request::Read {
-                position: 0,
+            at.clone().read(
+                0,
                 length,
-                callback: Box::new(move |res, read_blocked| {
+                Box::new(move |res, read_blocked| {
                     let actual_blocked = blocked || read_blocked;
                     let arc_self = arc_self.clone();
 
@@ -416,7 +362,7 @@ impl FsEnvironment {
                         Err(err) => callback(Err(err), actual_blocked),
                     }
                 }),
-            });
+            );
         }
 
         open_step(arc_self, None, at, Mutex::new(path).into(), absolute_path, FileKind::Directory, no_follow, false, callback);
@@ -609,10 +555,10 @@ impl FsEnvironment {
                         let filesystem = resolved.container.filesystem.clone();
 
                         // open the file with the proper flags
-                        resolved.container.make_request(Request::Open {
-                            name: name.to_string(),
-                            flags: flags & !(OpenFlags::CloseOnExec | OpenFlags::AtCWD),
-                            callback: Box::new(move |res, open_blocked| match res {
+                        resolved.container.open(
+                            name.to_string(),
+                            flags & !(OpenFlags::CloseOnExec | OpenFlags::AtCWD),
+                            Box::new(move |res, open_blocked| match res {
                                 Ok(handle) => {
                                     let handle = FileHandle {
                                         filesystem: filesystem.clone(),
@@ -633,7 +579,7 @@ impl FsEnvironment {
                                 }
                                 Err(err) => callback(Err(err), blocked || open_blocked),
                             }),
-                        });
+                        );
                     }
                 }
                 Err(err) => callback(Err(err), blocked),
@@ -703,12 +649,12 @@ impl FsEnvironment {
 
                     if resolved.path.path.is_empty() {
                         if name != ".." && let Some(fs) = arc_self.namespace.read().get(&name) {
-                            fs.make_request(fs.get_root_dir(), Request::Unlink { name, flags, callback });
+                            fs.unlink(fs.get_root_dir(), name, flags, callback);
                         } else {
                             callback(Err(Errno::NoSuchFileOrDir), blocked);
                         }
                     } else {
-                        resolved.container.make_request(Request::Unlink { name, flags, callback });
+                        resolved.container.unlink(name, flags, callback);
                     }
                 }
                 Err(err) => callback(Err(err), blocked),
@@ -870,9 +816,44 @@ pub struct FileHandle {
 }
 
 impl FileHandle {
-    /// makes a request to the filesystem associated with this handle
-    pub fn make_request(&self, request: Request) {
-        self.filesystem.make_request(self.handle.load(Ordering::SeqCst), request);
+    /// see `Filesystem::chmod`
+    pub fn chmod(&self, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
+        self.filesystem.chmod(self.handle.load(Ordering::SeqCst), permissions, callback);
+    }
+
+    /// see `Filesystem::chown`
+    pub fn chown(&self, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
+        self.filesystem.chown(self.handle.load(Ordering::SeqCst), owner, group, callback);
+    }
+
+    /// see `Filesystem::open`
+    pub fn open(&self, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<HandleNum>>) {
+        self.filesystem.open(self.handle.load(Ordering::SeqCst), name, flags, callback);
+    }
+
+    /// see `Filesystem::read`
+    pub fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+        self.filesystem.read(self.handle.load(Ordering::SeqCst), position, length, callback);
+    }
+
+    /// see `Filesystem::stat`
+    pub fn stat(&self, callback: Box<dyn RequestCallback<FileStat>>) {
+        self.filesystem.stat(self.handle.load(Ordering::SeqCst), callback);
+    }
+
+    /// see `Filesystem::truncate`
+    pub fn truncate(&self, length: i64, callback: Box<dyn RequestCallback<()>>) {
+        self.filesystem.truncate(self.handle.load(Ordering::SeqCst), length, callback);
+    }
+
+    /// see `Filesystem::unlink`
+    pub fn unlink(&self, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
+        self.filesystem.unlink(self.handle.load(Ordering::SeqCst), name, flags, callback);
+    }
+
+    /// see `Filesystem::write`
+    pub fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+        self.filesystem.write(self.handle.load(Ordering::SeqCst), position, length, callback);
     }
 
     /// see `Filesystem::get_page`
@@ -883,7 +864,7 @@ impl FileHandle {
 
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        self.make_request(Request::Close);
+        self.filesystem.close(self.handle.load(Ordering::SeqCst))
     }
 }
 
@@ -927,19 +908,19 @@ impl OpenFile {
     }
 
     pub fn chmod(&self, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
-        self.handle.make_request(Request::Chmod { permissions, callback });
+        self.handle.chmod(permissions, callback);
     }
 
     pub fn chown(&self, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
-        self.handle.make_request(Request::Chown { owner, group, callback });
+        self.handle.chown(owner, group, callback);
     }
 
     pub fn open(&self, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<FileHandle>>) {
         let filesystem = self.handle.filesystem.clone();
-        self.handle.make_request(Request::Open {
+        self.handle.open(
             name,
             flags,
-            callback: Box::new(move |res, blocked| {
+            Box::new(move |res, blocked| {
                 let filesystem = filesystem.clone();
                 callback(
                     res.map(|num| FileHandle {
@@ -949,17 +930,17 @@ impl OpenFile {
                     blocked,
                 )
             }),
-        });
+        );
     }
 
     pub fn read(&self, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
         let seek_pos = self.seek_pos.clone();
         let position = self.seek_pos.load(Ordering::SeqCst);
         let kind = self.kind();
-        self.handle.make_request(Request::Read {
+        self.handle.read(
             position,
             length,
-            callback: Box::new(move |res, blocked| {
+            Box::new(move |res, blocked| {
                 callback(
                     res.and_then(|slice| {
                         // try to increment the seek position by the slice length if it hasn't been changed beforehand
@@ -978,7 +959,7 @@ impl OpenFile {
                     blocked,
                 )
             }),
-        });
+        );
     }
 
     pub fn seek(&self, offset: i64, kind: SeekKind, callback: Box<dyn RequestCallback<i64>>) {
@@ -993,34 +974,32 @@ impl OpenFile {
             SeekKind::End => {
                 // fire off a stat request to get the file size, then complete the seek based on that
                 let seek_pos = self.seek_pos.clone();
-                self.handle.make_request(Request::Stat {
-                    callback: Box::new(move |res, blocked| {
-                        callback(res.map(|res| seek_pos.fetch_add(res.size.saturating_add(offset), Ordering::SeqCst)), blocked);
-                    }),
-                });
+                self.handle.stat(Box::new(move |res, blocked| {
+                    callback(res.map(|res| seek_pos.fetch_add(res.size.saturating_add(offset), Ordering::SeqCst)), blocked);
+                }));
             }
         }
     }
 
     pub fn stat(&self, callback: Box<dyn RequestCallback<FileStat>>) {
-        self.handle.make_request(Request::Stat { callback });
+        self.handle.stat(callback);
     }
 
     pub fn truncate(&self, length: i64, callback: Box<dyn RequestCallback<()>>) {
-        self.handle.make_request(Request::Truncate { length, callback });
+        self.handle.truncate(length, callback);
     }
 
     pub fn unlink(&self, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
-        self.handle.make_request(Request::Unlink { name, flags, callback });
+        self.handle.unlink(name, flags, callback);
     }
 
     pub fn write(&self, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
         let seek_pos = self.seek_pos.clone();
         let position = self.seek_pos.load(Ordering::SeqCst);
-        self.handle.make_request(Request::Write {
+        self.handle.write(
             position,
             length,
-            callback: Box::new(move |res, blocked| {
+            Box::new(move |res, blocked| {
                 callback(
                     res.and_then(|slice| {
                         // try to increment the seek position by the slice length if it hasn't been changed beforehand
@@ -1031,7 +1010,7 @@ impl OpenFile {
                     blocked,
                 )
             }),
-        });
+        );
     }
 }
 

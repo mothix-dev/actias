@@ -1,6 +1,6 @@
 //! kernel-space filesystems
 
-use super::{HandleNum, Request, RequestCallback};
+use super::{HandleNum, RequestCallback};
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     array::ConsistentIndexArray,
@@ -33,45 +33,88 @@ impl super::Filesystem for KernelFs {
         0
     }
 
-    fn make_request(&self, handle: HandleNum, request: Request) {
+    fn chmod(&self, handle: HandleNum, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
         let descriptor = match self.file_handles.lock().get(handle) {
             Some(descriptor) => descriptor.clone(),
-            None => return request.callback_error(Errno::BadFile, false),
+            None => return callback(Err(Errno::TryAgain), false),
         };
 
-        match request {
-            Request::Chmod { permissions, callback } => {
-                let res = descriptor.chmod(permissions);
-                callback(res, false);
-            }
-            Request::Chown { owner, group, callback } => {
-                let res = descriptor.chown(owner, group);
-                callback(res, false);
-            }
-            Request::Close => {
-                if handle != 0 {
-                    self.file_handles.lock().remove(handle);
-                }
-            }
-            Request::Open { name, flags, callback } => {
-                let res = descriptor.open(name, flags).and_then(|desc| self.file_handles.lock().add(desc).map_err(|_| Errno::OutOfMemory));
-                callback(res, false);
-            }
-            Request::Read { position, length, callback } => descriptor.read(position, length, callback),
-            Request::Stat { callback } => {
-                let res = descriptor.stat();
-                callback(res, false);
-            }
-            Request::Truncate { length, callback } => {
-                let res = descriptor.truncate(length);
-                callback(res, false);
-            }
-            Request::Unlink { name, flags, callback } => {
-                let res = descriptor.unlink(name, flags);
-                callback(res, false);
-            }
-            Request::Write { length, position, callback } => descriptor.write(position, length, callback),
+        let res = descriptor.chmod(permissions);
+        callback(res, false);
+    }
+
+    fn chown(&self, handle: HandleNum, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        let res = descriptor.chown(owner, group);
+        callback(res, false);
+    }
+
+    fn close(&self, handle: HandleNum) {
+        if handle != 0 {
+            self.file_handles.lock().remove(handle);
         }
+    }
+
+    fn open(&self, handle: HandleNum, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<HandleNum>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        let res = descriptor.open(name, flags).and_then(|desc| self.file_handles.lock().add(desc).map_err(|_| Errno::OutOfMemory));
+        callback(res, false);
+    }
+
+    fn read(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        descriptor.read(position, length, callback);
+    }
+
+    fn stat(&self, handle: HandleNum, callback: Box<dyn RequestCallback<FileStat>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        let res = descriptor.stat();
+        callback(res, false);
+    }
+
+    fn truncate(&self, handle: HandleNum, length: i64, callback: Box<dyn RequestCallback<()>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        let res = descriptor.truncate(length);
+        callback(res, false);
+    }
+
+    fn unlink(&self, handle: HandleNum, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        let res = descriptor.unlink(name, flags);
+        callback(res, false);
+    }
+
+    fn write(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+        let descriptor = match self.file_handles.lock().get(handle) {
+            Some(descriptor) => descriptor.clone(),
+            None => return callback(Err(Errno::TryAgain), false),
+        };
+
+        descriptor.write(position, length, callback);
     }
 
     fn get_page(&self, handle: HandleNum, position: i64, callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {

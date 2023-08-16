@@ -6,10 +6,10 @@ use spin::Mutex;
 pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallback<(Arc<Mutex<crate::mm::ProcessMap>>, usize)>>) {
     let handle = file.handle().clone();
 
-    handle.clone().make_request(crate::fs::Request::Read {
-        position: 0,
-        length: 52,
-        callback: Box::new(move |res, first_blocked| {
+    handle.clone().read(
+        0,
+        52,
+        Box::new(move |res, first_blocked| {
             let buf = match res {
                 Ok(buf) => buf,
                 Err(err) => return callback(Err(err), first_blocked),
@@ -27,10 +27,10 @@ pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallb
 
             let header = Arc::new(*header);
 
-            handle.clone().make_request(crate::fs::Request::Read {
-                position: header.e_phoff.try_into().unwrap(),
-                length: header.e_phentsize as usize * header.e_phnum as usize,
-                callback: Box::new(move |res, second_blocked| {
+            handle.clone().read(
+                header.e_phoff.try_into().unwrap(),
+                header.e_phentsize as usize * header.e_phnum as usize,
+                Box::new(move |res, second_blocked| {
                     let blocked = first_blocked || second_blocked;
 
                     let buf = match res {
@@ -104,7 +104,7 @@ pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallb
 
                     callback(Ok((arc_map, header.e_entry as usize)), blocked);
                 }),
-            });
+            );
         }),
-    });
+    );
 }

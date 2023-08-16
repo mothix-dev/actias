@@ -16,7 +16,8 @@ num-traits = { version = "0.2", default-features = false }
 crossbeam = { version = "0.8", default-features = false, features = ["alloc"] }
 num_enum = { version = "0.6", default-features = false }
 generic-array = "0.14"
-goblin = { version = "0.7", default-features = false, features = ["elf32", "elf64", "alloc"]}
+goblin = { version = "0.7", default-features = false, features = ["elf32", "elf64", "alloc"] }
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [build-dependencies]
 cc = "1"
