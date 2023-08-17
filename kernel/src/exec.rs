@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec};
 use common::Errno;
 use log::debug;
 use spin::Mutex;
@@ -6,16 +6,20 @@ use spin::Mutex;
 pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallback<(Arc<Mutex<crate::mm::ProcessMap>>, usize)>>) {
     let handle = file.handle().clone();
 
+    let buffer = Arc::new(Mutex::new(vec![0; 52].into_boxed_slice()));
+
     handle.clone().read(
         0,
-        52,
+        buffer.clone().into(),
         Box::new(move |res, first_blocked| {
-            let buf = match res {
-                Ok(buf) => buf,
+            match res {
+                Ok(52) => (),
+                Ok(_) => return callback(Err(Errno::TryAgain), first_blocked),
                 Err(err) => return callback(Err(err), first_blocked),
             };
 
-            let header = goblin::elf32::header::Header::from_bytes(match buf.try_into() {
+            let buffer = buffer.lock();
+            let header = goblin::elf32::header::Header::from_bytes(match buffer[..].try_into() {
                 Ok(buf) => buf,
                 Err(_) => return callback(Err(Errno::ExecutableFormatErr), first_blocked),
             });
@@ -26,18 +30,18 @@ pub fn exec(file: crate::fs::OpenFile, callback: Box<dyn crate::fs::RequestCallb
             }
 
             let header = Arc::new(*header);
+            let buffer = Arc::new(Mutex::new(vec![0; header.e_phentsize as usize * header.e_phnum as usize].into_boxed_slice()));
 
             handle.clone().read(
                 header.e_phoff.try_into().unwrap(),
-                header.e_phentsize as usize * header.e_phnum as usize,
+                buffer.clone().into(),
                 Box::new(move |res, second_blocked| {
                     let blocked = first_blocked || second_blocked;
 
-                    let buf = match res {
-                        Ok(buf) => buf,
-                        Err(err) => return callback(Err(err), blocked),
+                    if let Err(err) = res {
+                        return callback(Err(err), blocked);
                     };
-                    let headers = goblin::elf32::program_header::ProgramHeader::from_bytes(buf, header.e_phnum as usize);
+                    let headers = goblin::elf32::program_header::ProgramHeader::from_bytes(&buffer.lock()[..], header.e_phnum as usize);
 
                     let arc_map = Arc::new(Mutex::new(crate::mm::ProcessMap::new().unwrap()));
 

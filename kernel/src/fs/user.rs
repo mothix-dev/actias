@@ -1,18 +1,19 @@
 //! userspace filesystem support
 
 use super::{HandleNum, RequestCallback};
-use crate::{arch::PhysicalAddress, array::ConsistentIndexArray};
-use alloc::{boxed::Box, string::String, vec::Vec};
+use crate::{arch::PhysicalAddress, array::ConsistentIndexArray, process::Buffer};
+use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use common::{Errno, EventKind, EventResponse, FileStat, FilesystemEvent, GroupId, OpenFlags, Permissions, ResponseData, UnlinkFlags, UserId};
 use core::mem::size_of;
 use crossbeam::queue::SegQueue;
+use log::debug;
 use spin::Mutex;
 
 enum CallbackKind {
     NoValue(Box<dyn RequestCallback<()>>),
     Handle(Box<dyn RequestCallback<HandleNum>>),
-    Slice(Box<dyn for<'a> RequestCallback<&'a [u8]>>),
-    MutableSlice(Box<dyn for<'a> RequestCallback<&'a mut [u8]>>),
+    CopyFrom(Buffer, Box<dyn RequestCallback<usize>>),
+    CopyTo(Buffer, Box<dyn RequestCallback<usize>>),
 }
 
 impl CallbackKind {
@@ -20,8 +21,8 @@ impl CallbackKind {
         match self {
             Self::NoValue(callback) => callback(Err(error), blocked),
             Self::Handle(callback) => callback(Err(error), blocked),
-            Self::Slice(callback) => callback(Err(error), blocked),
-            Self::MutableSlice(callback) => callback(Err(error), blocked),
+            Self::CopyFrom(_, callback) => callback(Err(error), blocked),
+            Self::CopyTo(_, callback) => callback(Err(error), blocked),
         }
     }
 }
@@ -35,7 +36,7 @@ pub struct UserspaceFs {
     send_queue: SegQueue<Vec<u8>>,
 
     /// queue of tasks that are blocked waiting for events
-    waiting_queue: SegQueue<Box<dyn for<'a> RequestCallback<&'a [u8]>>>,
+    waiting_queue: SegQueue<(Buffer, Box<dyn RequestCallback<usize>>)>,
 }
 
 unsafe impl Send for UserspaceFs {}
@@ -68,43 +69,43 @@ impl UserspaceFs {
     }
 
     /// queues a callback reading filesystem events, or calls it immediately if there are queued events
-    pub fn wait_for_event(&self, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    pub fn wait_for_event(&self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         if let Some(data) = self.send_queue.pop() {
-            callback(Ok(&data), false);
+            let res = buffer.copy_from(&data);
+            callback(res, false);
         } else {
-            self.waiting_queue.push(callback);
+            self.waiting_queue.push((buffer, callback));
         }
     }
 
     /// responds to an event
-    pub fn respond(&self, response: &EventResponse) {
+    pub fn respond(&self, response: &EventResponse) -> common::Result<Option<ResponseInProgress>> {
+        debug!("responding to event id {}", response.id);
+
         let callback = self.in_progress.lock().remove(response.id);
 
         if let Some(callback) = callback {
             match response.data {
                 ResponseData::Error { error } => callback.callback_error(error, true),
-                ResponseData::Buffer { addr, len } => {
-                    let buffer = match crate::process::ProcessBuffer::from_current_process(addr, len) {
-                        Ok(buffer) => buffer,
-                        Err(err) => return callback.callback_error(err, true),
-                    };
-
-                    // TODO: handle errors while mapping sanely
-                    match callback {
-                        CallbackKind::Slice(callback) => { buffer.map_in(|slice| callback(Ok(slice), true)).unwrap() },
-                        CallbackKind::MutableSlice(callback) => { buffer.map_in_mut(|slice| callback(Ok(slice), true)).unwrap() },
-                        _ => callback.callback_error(Errno::TryAgain, true),
-                    }
-                }
                 ResponseData::Handle { handle } => match callback {
                     CallbackKind::Handle(callback) => callback(Ok(handle), true),
                     _ => callback.callback_error(Errno::TryAgain, true),
                 },
-                ResponseData::None => match callback {
-                    CallbackKind::NoValue(callback) => callback(Ok(()), true),
-                    _ => callback.callback_error(Errno::TryAgain, true),
-                },
+                ResponseData::None => {
+                    if matches!(callback, CallbackKind::CopyFrom(_, _) | CallbackKind::CopyTo(_, _)) {
+                        return Ok(Some(ResponseInProgress { callback }));
+                    } else {
+                        match callback {
+                            CallbackKind::NoValue(callback) => callback(Ok(()), true),
+                            _ => callback.callback_error(Errno::TryAgain, true),
+                        }
+                    }
+                }
             }
+
+            Ok(None)
+        } else {
+            Err(Errno::InvalidArgument)
         }
     }
 
@@ -117,6 +118,7 @@ impl UserspaceFs {
         // get the portable request as raw bytes that a process can read from
         let event = FilesystemEvent { id, handle, kind };
         //trace!("sending event {event:#?}");
+        debug!("sending event {event:?}, {string_option:?}");
 
         let data = match Self::make_data(event, string_option) {
             Ok(data) => data,
@@ -124,8 +126,9 @@ impl UserspaceFs {
         };
 
         // send the event to a waiting task, or just push it onto the queue if there are none
-        if let Some(callback) = self.waiting_queue.pop() {
-            callback(Ok(&data), true);
+        if let Some((buffer, callback)) = self.waiting_queue.pop() {
+            let res = buffer.copy_from(&data);
+            callback(res, true);
         } else {
             self.send_queue.push(data);
         }
@@ -161,25 +164,31 @@ impl super::Filesystem for UserspaceFs {
         self.make_request(handle, EventKind::Open { name_length: name.len(), flags }, Some(name), Some(CallbackKind::Handle(callback)));
     }
 
-    fn read(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
-        self.make_request(handle, EventKind::Read { position, length }, None, Some(CallbackKind::Slice(callback)));
+    fn read(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+        self.make_request(handle, EventKind::Read { position, length: buffer.len() }, None, Some(CallbackKind::CopyTo(buffer, callback)));
     }
 
     fn stat(&self, handle: HandleNum, callback: Box<dyn RequestCallback<FileStat>>) {
+        let buffer = Arc::new(Mutex::new(vec![0; size_of::<FileStat>()].into_boxed_slice()));
+
         self.make_request(
             handle,
             EventKind::Stat,
             None,
-            Some(CallbackKind::Slice(Box::new(|res, blocked| match res {
-                Ok(slice) => {
-                    if slice.len() < size_of::<FileStat>() {
-                        callback(Err(Errno::TryAgain), blocked);
-                    } else {
-                        callback(Ok(unsafe { *(slice.as_ptr() as *const FileStat) }), blocked);
+            Some(CallbackKind::CopyTo(
+                buffer.clone().into(),
+                Box::new(move |res, blocked| match res {
+                    Ok(bytes_read) => {
+                        if bytes_read < size_of::<FileStat>() {
+                            callback(Err(Errno::TryAgain), blocked);
+                        } else {
+                            let stat = unsafe { *(buffer.lock().as_ptr() as *const FileStat) };
+                            callback(Ok(stat), blocked);
+                        }
                     }
-                }
-                Err(err) => callback(Err(err), blocked),
-            }))),
+                    Err(err) => callback(Err(err), blocked),
+                }),
+            )),
         );
     }
 
@@ -191,11 +200,39 @@ impl super::Filesystem for UserspaceFs {
         self.make_request(handle, EventKind::Unlink { name_length: name.len(), flags }, Some(name), Some(CallbackKind::NoValue(callback)));
     }
 
-    fn write(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
-        self.make_request(handle, EventKind::Write { position, length }, None, Some(CallbackKind::MutableSlice(callback)));
+    fn write(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+        self.make_request(handle, EventKind::Write { position, length: buffer.len() }, None, Some(CallbackKind::CopyFrom(buffer, callback)));
     }
 
     fn get_page(&self, _handle: super::HandleNum, _offset: i64, _callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {
         todo!();
+    }
+}
+
+pub struct ResponseInProgress {
+    callback: CallbackKind,
+}
+
+impl ResponseInProgress {
+    pub fn write(self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+        match self.callback {
+            CallbackKind::CopyTo(target_buffer, target_callback) => {
+                let res = target_buffer.map_in_mut(|slice| buffer.copy_into(slice)).and_then(|res| res);
+                callback(res, false);
+                target_callback(res, true);
+            }
+            _ => callback(Err(Errno::TryAgain), true),
+        }
+    }
+
+    pub fn read(self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+        match self.callback {
+            CallbackKind::CopyFrom(target_buffer, target_callback) => {
+                let res = buffer.map_in_mut(|slice| target_buffer.copy_into(slice)).and_then(|res| res);
+                callback(res, false);
+                target_callback(res, true);
+            }
+            _ => callback(Err(Errno::TryAgain), true),
+        }
     }
 }

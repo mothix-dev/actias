@@ -6,7 +6,7 @@ pub mod sys;
 pub mod tar;
 pub mod user;
 
-use crate::{arch::PhysicalAddress, array::ConsistentIndexArray};
+use crate::{arch::PhysicalAddress, array::ConsistentIndexArray, process::Buffer};
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
@@ -45,7 +45,7 @@ pub trait Filesystem: Send + Sync {
     fn open(&self, handle: HandleNum, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<HandleNum>>);
 
     /// read from a file at the specified position
-    fn read(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>);
+    fn read(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>);
 
     /// get information about a file
     fn stat(&self, handle: HandleNum, callback: Box<dyn RequestCallback<FileStat>>);
@@ -57,7 +57,7 @@ pub trait Filesystem: Send + Sync {
     fn unlink(&self, handle: HandleNum, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>);
 
     /// write to a file at the specified position
-    fn write(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>);
+    fn write(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>);
 
     /// gets the physical address for a page frame containing data for the given file handle at the given position to be mapped into a process' memory map on a page fault or similar
     ///
@@ -297,10 +297,12 @@ impl FsEnvironment {
                 Err(_) => return callback(Err(Errno::FileTooBig), blocked),
             };
 
+            let buffer = Arc::new(Mutex::new(vec![0; length].into_boxed_slice()));
+
             // makes a read request to read the target of the symlink
             at.clone().read(
                 0,
-                length,
+                buffer.clone().into(),
                 Box::new(move |res, read_blocked| {
                     let actual_blocked = blocked || read_blocked;
                     let arc_self = arc_self.clone();
@@ -314,7 +316,8 @@ impl FsEnvironment {
                         name: absolute_path.path[split_pos].to_string().into(),
                     };
 
-                    match res.and_then(|slice| core::str::from_utf8(slice).map_err(|_| Errno::LinkSevered)) {
+                    let slice = buffer.lock();
+                    match res.and_then(|bytes_read| core::str::from_utf8(&slice[..bytes_read]).map_err(|_| Errno::LinkSevered)) {
                         // got a valid string, recurse to find the target of the symlink and use that
                         Ok(str) => FsEnvironment::resolve_container(
                             arc_self.clone(),
@@ -588,10 +591,10 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `read`, blocking
-    pub fn read(&self, file_descriptor: usize, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    pub fn read(&self, file_descriptor: usize, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
         if let Some(file) = file {
-            file.read(length, callback);
+            file.read(buffer, callback);
         } else {
             callback(Err(Errno::BadFile), false);
         }
@@ -663,10 +666,10 @@ impl FsEnvironment {
     }
 
     /// implements POSIX `write`, blocking
-    pub fn write(&self, file_descriptor: usize, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    pub fn write(&self, file_descriptor: usize, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let file = { self.file_descriptors.lock().get(file_descriptor).cloned() };
         if let Some(file) = file {
-            file.write(length, callback);
+            file.write(buffer, callback);
         } else {
             callback(Err(Errno::BadFile), false);
         }
@@ -781,22 +784,22 @@ impl kernel::FileDescriptor for FsList {
         }
     }
 
-    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
 
+        let mut data = Vec::new();
+
         if let Some(entry) = self.namespace.read().keys().nth(position) {
-            let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(entry.as_bytes());
             data.push(0);
-
-            callback(Ok(&data), false);
-        } else {
-            callback(Ok(&[]), false);
         }
+
+        let res = buffer.copy_from(&data);
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -832,8 +835,8 @@ impl FileHandle {
     }
 
     /// see `Filesystem::read`
-    pub fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
-        self.filesystem.read(self.handle.load(Ordering::SeqCst), position, length, callback);
+    pub fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+        self.filesystem.read(self.handle.load(Ordering::SeqCst), position, buffer, callback);
     }
 
     /// see `Filesystem::stat`
@@ -852,8 +855,8 @@ impl FileHandle {
     }
 
     /// see `Filesystem::write`
-    pub fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
-        self.filesystem.write(self.handle.load(Ordering::SeqCst), position, length, callback);
+    pub fn write(&self, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+        self.filesystem.write(self.handle.load(Ordering::SeqCst), position, buffer, callback);
     }
 
     /// see `Filesystem::get_page`
@@ -933,31 +936,31 @@ impl OpenFile {
         );
     }
 
-    pub fn read(&self, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    pub fn read(&self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let seek_pos = self.seek_pos.clone();
         let position = self.seek_pos.load(Ordering::SeqCst);
         let kind = self.kind();
         self.handle.read(
             position,
-            length,
+            buffer,
             Box::new(move |res, blocked| {
-                callback(
-                    res.and_then(|slice| {
-                        // try to increment the seek position by the slice length if it hasn't been changed beforehand
-                        let length: i64 = slice.len().try_into().map_err(|_| Errno::ValueOverflow)?;
-                        match kind {
-                            FileKind::Directory => {
-                                seek_pos.fetch_add(1, Ordering::SeqCst);
-                            }
-                            FileKind::SymLink => (),
-                            _ => {
-                                let _ = seek_pos.compare_exchange(position, position + length, Ordering::SeqCst, Ordering::Relaxed);
-                            }
+                if let Ok(length) = res {
+                    let length: i64 = match length.try_into() {
+                        Ok(length) => length,
+                        Err(_) => return callback(Err(Errno::ValueOverflow), blocked),
+                    };
+                    match kind {
+                        FileKind::Directory => {
+                            seek_pos.fetch_add(1, Ordering::SeqCst);
                         }
-                        Ok(slice)
-                    }),
-                    blocked,
-                )
+                        FileKind::SymLink => (),
+                        _ => {
+                            let _ = seek_pos.compare_exchange(position, position + length, Ordering::SeqCst, Ordering::Relaxed);
+                        }
+                    }
+                }
+
+                callback(res, blocked);
             }),
         );
     }
@@ -993,22 +996,22 @@ impl OpenFile {
         self.handle.unlink(name, flags, callback);
     }
 
-    pub fn write(&self, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    pub fn write(&self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let seek_pos = self.seek_pos.clone();
         let position = self.seek_pos.load(Ordering::SeqCst);
         self.handle.write(
             position,
-            length,
+            buffer,
             Box::new(move |res, blocked| {
-                callback(
-                    res.and_then(|slice| {
-                        // try to increment the seek position by the slice length if it hasn't been changed beforehand
-                        let length: i64 = slice.len().try_into().map_err(|_| Errno::ValueOverflow)?;
-                        let _ = seek_pos.compare_exchange(position, position + length, Ordering::SeqCst, Ordering::Relaxed);
-                        Ok(slice)
-                    }),
-                    blocked,
-                )
+                if let Ok(length) = res {
+                    let length: i64 = match length.try_into() {
+                        Ok(length) => length,
+                        Err(_) => return callback(Err(Errno::ValueOverflow), blocked),
+                    };
+                    let _ = seek_pos.compare_exchange(position, position + length, Ordering::SeqCst, Ordering::Relaxed);
+                }
+
+                callback(res, blocked);
             }),
         );
     }

@@ -1,6 +1,13 @@
 //! procfs filesystem
 
-use super::{kernel::FileDescriptor, user::UserspaceFs};
+use core::mem::size_of;
+
+use crate::process::Buffer;
+
+use super::{
+    kernel::FileDescriptor,
+    user::{ResponseInProgress, UserspaceFs},
+};
 use alloc::{
     boxed::Box,
     format,
@@ -32,29 +39,26 @@ impl FileDescriptor for ProcRoot {
         }
     }
 
-    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
 
+        let mut data = Vec::new();
+
         if position == 0 {
-            let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice("self".as_bytes());
             data.push(0);
-
-            callback(Ok(&data), false);
         } else if let Some((pid, _process)) = crate::get_global_state().process_table.read().iter().nth(position - 1) {
-            let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(pid.to_string().as_bytes());
             data.push(0);
-
-            callback(Ok(&data), false);
-        } else {
-            callback(Ok(&[]), false);
         }
+
+        let res = buffer.copy_from(&data);
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -77,16 +81,19 @@ impl FileDescriptor for ProcSelfLink {
                 permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
                 kind: FileKind::SymLink,
             },
+            size: 24,
             ..Default::default()
         })
     }
 
-    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
 
-        match pid {
-            Some(pid) => callback(Ok(pid.to_string().as_bytes()), false),
-            None => callback(Err(Errno::NoSuchProcess), false),
+        if let Some(pid) = pid {
+            let res = buffer.copy_from(pid.to_string().as_bytes());
+            callback(res, false);
+        } else {
+            callback(Err(Errno::NoSuchProcess), false);
         }
     }
 }
@@ -123,23 +130,23 @@ macro_rules! make_procfs {
                 }
             }
 
-            fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+            fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
                 let position: usize = match position.try_into() {
                     Ok(position) => position,
                     Err(_) => return callback(Err(Errno::ValueOverflow), false),
                 };
 
-                if position >= Self::files().len() {
-                    callback(Ok(&[]), false);
-                } else {
+                let mut data = Vec::new();
+
+                if position < Self::files().len() {
                     let entry = Self::files()[position];
-                    let mut data = Vec::new();
                     data.extend_from_slice(&(0_u32.to_ne_bytes()));
                     data.extend_from_slice(entry.as_bytes());
                     data.push(0);
-
-                    callback(Ok(&data), false);
                 }
+
+                let res = buffer.copy_from(&data);
+                callback(res, false);
             }
 
             fn stat(&self) -> Result<FileStat> {
@@ -184,14 +191,14 @@ impl CwdLink {
 }
 
 impl FileDescriptor for CwdLink {
-    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let path = match crate::get_global_state().process_table.read().get(self.pid) {
             Some(process) => process.environment.get_cwd_path(),
             None => return callback(Err(Errno::NoSuchProcess), false),
         };
-        let data = path.as_bytes();
 
-        callback(Ok(data), false);
+        let res = buffer.copy_from(path.as_bytes());
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -220,14 +227,14 @@ impl RootLink {
 }
 
 impl FileDescriptor for RootLink {
-    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let path = match crate::get_global_state().process_table.read().get(self.pid) {
             Some(process) => process.environment.get_root_path(),
             None => return callback(Err(Errno::NoSuchProcess), false),
         };
-        let data = path.as_bytes();
 
-        callback(Ok(data), false);
+        let res = buffer.copy_from(path.as_bytes());
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -276,7 +283,7 @@ impl FileDescriptor for FilesDir {
         }
     }
 
-    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
@@ -288,16 +295,16 @@ impl FileDescriptor for FilesDir {
         };
         let file_descriptors = file_descriptors.lock();
 
+        let mut data = Vec::new();
+
         if let Some((fd, _file)) = file_descriptors.as_slice().iter().enumerate().filter(|(_, i)| i.is_some()).nth(position) {
-            let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(fd.to_string().as_bytes());
             data.push(0);
-
-            callback(Ok(&data), false);
-        } else {
-            callback(Ok(&[]), false);
         }
+
+        let res = buffer.copy_from(&data);
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -318,7 +325,7 @@ pub struct ProcessFd {
 }
 
 impl FileDescriptor for ProcessFd {
-    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let process_table = crate::get_global_state().process_table.read();
         let process = match process_table.get(self.pid) {
             Some(process) => process,
@@ -328,9 +335,9 @@ impl FileDescriptor for ProcessFd {
             Ok(path) => path,
             Err(err) => return callback(Err(err), false),
         };
-        let data = path.as_bytes();
 
-        callback(Ok(data), false);
+        let res = buffer.copy_from(path.as_bytes());
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -398,7 +405,7 @@ impl FileDescriptor for MemoryDir {
         }
     }
 
-    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let map = self.map.lock();
 
         let position: usize = match position.try_into() {
@@ -408,7 +415,7 @@ impl FileDescriptor for MemoryDir {
 
         let map = match map.map.get(position) {
             Some(map) => map,
-            None => return callback(Ok(&[]), false),
+            None => return callback(Ok(0), false),
         };
         let entry = format!("{:0width$x}", map.region().base, width = core::mem::size_of::<usize>() * 2);
 
@@ -417,7 +424,8 @@ impl FileDescriptor for MemoryDir {
         data.extend_from_slice(entry.as_bytes());
         data.push(0);
 
-        callback(Ok(&data), false);
+        let res = buffer.copy_from(&data);
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -464,12 +472,12 @@ impl FileDescriptor for AnonMem {
         Ok(())
     }
 
-    fn read(&self, _position: i64, _length: usize, _callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, _position: i64, _buffer: Buffer, _callback: Box<dyn super::RequestCallback<usize>>) {
         // read much like sysfs/mem
         todo!();
     }
 
-    fn write(&self, _position: i64, _length: usize, _callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, _position: i64, _buffer: Buffer, _callback: Box<dyn super::RequestCallback<usize>>) {
         // write much like sysfs/mem
         todo!();
     }
@@ -517,16 +525,21 @@ impl FileDescriptor for FsName {
         })
     }
 
-    fn write(&self, _position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         const BUF_LEN: usize = 256;
         let mut buf = [0; BUF_LEN];
-        callback(Ok(&mut buf), false);
+        let bytes_written = match buffer.copy_into(&mut buf) {
+            Ok(bytes) => bytes,
+            Err(err) => return callback(Err(err), false),
+        };
 
-        if let Ok(str) = core::str::from_utf8(&buf[..length.min(BUF_LEN)]) && let Some(process) = crate::get_global_state().process_table.read().get(self.pid) {
+        if let Ok(str) = core::str::from_utf8(&buf[..bytes_written]) && let Some(process) = crate::get_global_state().process_table.read().get(self.pid) {
             let filesystem = Arc::new(UserspaceFs::new());
             *process.filesystem.lock() = Some(filesystem.clone());
             process.environment.namespace.write().insert(str.to_string(), filesystem);
         }
+
+        callback(Ok(bytes_written), false);
     }
 }
 
@@ -562,14 +575,15 @@ impl FileDescriptor for FsFromKernel {
         })
     }
 
-    fn read(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
-        self.filesystem.wait_for_event(callback);
+    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+        self.filesystem.wait_for_event(buffer, callback);
     }
 }
 
 /// file for notifying kernel of completed filesystem events and for reading/writing data for those events
 struct FsToKernel {
     filesystem: Arc<UserspaceFs>,
+    response: Mutex<Option<ResponseInProgress>>,
 }
 
 // once again: it's in a fucking mutex
@@ -585,7 +599,7 @@ impl FsToKernel {
         }
 
         if let Some(process) = crate::get_global_state().process_table.read().get(pid) && let Some(filesystem) = process.filesystem.lock().clone() {
-            Ok(Self { filesystem })
+            Ok(Self { filesystem, response: None.into() })
         } else {
             Err(Errno::OperationNotPermitted)
         }
@@ -603,11 +617,39 @@ impl FileDescriptor for FsToKernel {
         })
     }
 
-    fn write(&self, _position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
-        let mut buf = [0; core::mem::size_of::<EventResponse>()];
-        callback(Ok(&mut buf), false);
-        // TODO: check fields to ensure validity of data
-        let response = unsafe { &*(buf.as_ptr() as *const _ as *const EventResponse) };
-        self.filesystem.respond(response);
+    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+        let response = self.response.lock().take();
+        if let Some(response) = response {
+            response.read(buffer, callback);
+        } else {
+            callback(Err(Errno::TryAgain), false);
+        }
+    }
+
+    fn write(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+        let response = self.response.lock().take();
+        if let Some(response) = response {
+            response.write(buffer, callback);
+        } else {
+            let mut buf = [0; core::mem::size_of::<EventResponse>()];
+            let bytes_written = match buffer.copy_into(&mut buf) {
+                Ok(bytes) => bytes,
+                Err(err) => return callback(Err(err), false),
+            };
+
+            if bytes_written < size_of::<EventResponse>() {
+                return callback(Err(Errno::TryAgain), false);
+            }
+
+            // TODO: check fields to ensure validity of data
+            let response = unsafe { &*(buf.as_ptr() as *const _ as *const EventResponse) };
+            match self.filesystem.respond(response) {
+                Ok(Some(response)) => *self.response.lock() = Some(response),
+                Ok(None) => (),
+                Err(err) => return callback(Err(err), false),
+            };
+
+            callback(Ok(bytes_written), false);
+        }
     }
 }

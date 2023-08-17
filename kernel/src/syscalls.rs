@@ -16,6 +16,13 @@ pub type Registers = <crate::arch::InterruptManager as crate::arch::bsp::Interru
 /// low-level syscall handler. handles the parsing, execution, and error handling of syscalls
 pub fn syscall_handler(registers: &mut Registers, num: u32, arg0: usize, arg1: usize, arg2: usize, arg3: usize) {
     let syscall = Syscalls::try_from(num);
+
+    if let Ok(syscall) = &syscall {
+        trace!("syscall {syscall:?} with args {arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x}");
+    } else {
+        trace!("invalid syscall {num} with args {arg0:#x}, {arg1:#x}, {arg2:#x}, {arg3:#x}");
+    }
+
     match syscall {
         Ok(Syscalls::IsComputerOn) => registers.syscall_return(Ok(1)),
         Ok(Syscalls::Exit) => exit_process(registers, arg0),
@@ -168,14 +175,9 @@ fn read(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: 
     };
 
     block_until(registers, true, |process, state| {
-        process.environment.read(
-            file_descriptor,
-            buf_len,
-            Box::new(move |res, blocked| match res {
-                Ok(to_read) => state.syscall_return(buffer.copy_from(to_read).map_err(Errno::from), blocked),
-                Err(err) => state.syscall_return(Err(err), blocked),
-            }),
-        );
+        process
+            .environment
+            .read(file_descriptor, buffer.into(), Box::new(move |res, blocked| state.syscall_return(res, blocked)));
 
         Ok(())
     });
@@ -271,14 +273,9 @@ fn write(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len:
     };
 
     block_until(registers, true, |process, state| {
-        process.environment.write(
-            file_descriptor,
-            buf_len,
-            Box::new(move |res, blocked| match res {
-                Ok(to_write) => state.syscall_return(buffer.copy_into(to_write).map_err(Errno::from), blocked),
-                Err(err) => state.syscall_return(Err(err), blocked),
-            }),
-        );
+        process
+            .environment
+            .write(file_descriptor, buffer.into(), Box::new(move |res, blocked| state.syscall_return(res, blocked)));
 
         Ok(())
     });

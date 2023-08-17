@@ -4,10 +4,11 @@ use super::kernel::FileDescriptor;
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     mm::ContiguousRegion,
+    process::Buffer,
 };
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
-use log::{error, log, Level};
+use log::{log, Level};
 use spin::Mutex;
 
 pub struct SysFsRoot;
@@ -35,23 +36,22 @@ macro_rules! make_sysfs {
             }
 
 
-            fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+            fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
                 let position: usize = match position.try_into() {
                     Ok(position) => position,
                     Err(_) => return callback(Err(Errno::ValueOverflow), false),
                 };
 
-                if position >= SYS_FS_FILES.len() {
-                    callback(Ok(&[]), false);
-                } else {
+                let mut data = Vec::new();
+                if position < SYS_FS_FILES.len() {
                     let entry = SYS_FS_FILES[position];
-                    let mut data = Vec::new();
                     data.extend_from_slice(&(0_u32.to_ne_bytes()));
                     data.extend_from_slice(entry.as_bytes());
                     data.push(0);
-
-                    callback(Ok(&data), false);
                 }
+
+                let res = buffer.copy_from(&data);
+                callback(res, false);
             }
 
             fn stat(&self) -> Result<FileStat> {
@@ -104,23 +104,22 @@ impl FileDescriptor for LogDir {
         }
     }
 
-    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
 
-        if position >= 5 {
-            callback(Ok(&[]), false);
-        } else {
+        let mut data = Vec::new();
+        if position < 5 {
             let entry = LOG_LEVELS[position];
-            let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(entry.as_bytes());
             data.push(0);
-
-            callback(Ok(&data), false);
         }
+
+        let res = buffer.copy_from(&data);
+        callback(res, false);
     }
 
     fn stat(&self) -> Result<FileStat> {
@@ -156,22 +155,15 @@ impl FileDescriptor for Logger {
         })
     }
 
-    fn write(&self, _position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
-        let mut buf = Vec::new();
-        if buf.try_reserve_exact(length).is_err() {
-            callback(Err(Errno::OutOfMemory), false);
-            return;
-        }
-        for _i in 0..length {
-            buf.push(0);
-        }
-
-        callback(Ok(&mut buf), false);
-
-        match core::str::from_utf8(&buf) {
-            Ok(str) => log!(target: "sysfs/log", self.level, "{str}"),
-            Err(err) => error!("couldn't parse string for log level {}: {err}", self.level),
-        }
+    fn write(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+        let res = buffer
+            .map_in(|slice| {
+                log!(target: "sysfs/log", self.level, "{}", core::str::from_utf8(slice).map_err(|_| Errno::InvalidArgument)?);
+                Ok(slice.len())
+            })
+            .map_err(Errno::from)
+            .and_then(|err| err);
+        callback(res, false);
     }
 }
 
@@ -195,13 +187,13 @@ impl FileDescriptor for MemFile {
         })
     }
 
-    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
         let addr: PhysicalAddress = match position.try_into() {
             Ok(addr) => addr,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
-        let length_phys: PhysicalAddress = match length.try_into() {
+        let length_phys: PhysicalAddress = match buffer.len().try_into() {
             Ok(length) => length,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
@@ -211,22 +203,21 @@ impl FileDescriptor for MemFile {
         let offset = (addr - aligned_region.base).try_into().unwrap();
         let callback = Arc::new(Mutex::new(Some(callback)));
 
-        if let Err(err) = unsafe {
-            crate::mm::map_memory(&mut page_directory, &addrs, |slice| {
-                (callback.lock().take().unwrap())(Ok(&slice[offset..offset + length]), false);
-            })
-        } {
-            (callback.lock().take().unwrap())(Err(Errno::from(err)), false);
-        }
+        let res = unsafe {
+            crate::mm::map_memory(&mut page_directory, &addrs, |slice| buffer.copy_from(&slice[offset..offset + slice.len()]))
+                .map_err(Errno::from)
+                .and_then(|res| res)
+        };
+        (callback.lock().take().unwrap())(res, false);
     }
 
-    fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
         let addr: PhysicalAddress = match position.try_into() {
             Ok(addr) => addr,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
-        let length_phys: PhysicalAddress = match length.try_into() {
+        let length_phys: PhysicalAddress = match buffer.len().try_into() {
             Ok(length) => length,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
@@ -236,13 +227,15 @@ impl FileDescriptor for MemFile {
         let offset = (addr - aligned_region.base).try_into().unwrap();
         let callback = Arc::new(Mutex::new(Some(callback)));
 
-        if let Err(err) = unsafe {
+        let res = unsafe {
             crate::mm::map_memory(&mut page_directory, &addrs, |slice| {
-                (callback.lock().take().unwrap())(Ok(&mut slice[offset..offset + length]), false);
+                let length = slice.len();
+                buffer.copy_into(&mut slice[offset..offset + length])
             })
-        } {
-            (callback.lock().take().unwrap())(Err(Errno::from(err)), false);
-        }
+            .map_err(Errno::from)
+            .and_then(|res| res)
+        };
+        (callback.lock().take().unwrap())(res, false);
     }
 
     fn get_page(&self, position: i64, callback: Box<dyn FnOnce(Option<crate::arch::PhysicalAddress>, bool)>) {

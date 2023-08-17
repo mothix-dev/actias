@@ -1,5 +1,7 @@
 //! simple ustar parser
 
+use crate::process::Buffer;
+
 use super::kernel::FileDescriptor;
 use alloc::{
     boxed::Box,
@@ -442,11 +444,12 @@ impl Clone for TarFile {
 }
 
 impl FileDescriptor for TarFile {
-    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         match position.try_into() {
             Ok(position) => {
-                let end: usize = position + length;
-                callback(Ok(&self.data[position..end.min(self.data.len())]), false);
+                let end: usize = position + buffer.len();
+                let res = buffer.copy_from(&self.data[position..end.min(self.data.len())]);
+                callback(res, false);
             }
             Err(_) => callback(Err(Errno::ValueOverflow), false),
         }
@@ -502,23 +505,23 @@ impl FileDescriptor for TarDirectory {
         Err(Errno::NoSuchFileOrDir)
     }
 
-    fn read(&self, position: i64, _length: usize, callback: Box<dyn for<'a> super::RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
         let position: usize = match position.try_into() {
             Ok(position) => position,
             Err(_) => return callback(Err(Errno::ValueOverflow), false),
         };
 
-        if position >= self.dir_entries.len() {
-            callback(Ok(&[]), false);
-        } else {
+        let mut data = Vec::new();
+
+        if position < self.dir_entries.len() {
             let entry = &self.dir_entries[position];
-            let mut data = Vec::new();
             data.extend_from_slice(&(0_u32.to_ne_bytes()));
             data.extend_from_slice(entry.name.as_bytes());
             data.push(0);
-
-            callback(Ok(&data), false);
         }
+
+        let res = buffer.copy_from(&data);
+        callback(res, false);
     }
 
     fn stat(&self) -> common::Result<common::FileStat> {

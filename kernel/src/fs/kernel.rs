@@ -1,10 +1,7 @@
 //! kernel-space filesystems
 
 use super::{HandleNum, RequestCallback};
-use crate::{
-    arch::{PhysicalAddress, PROPERTIES},
-    array::ConsistentIndexArray,
-};
+use crate::{arch::PhysicalAddress, array::ConsistentIndexArray, process::Buffer};
 use alloc::{boxed::Box, string::String, sync::Arc};
 use common::{Errno, FileStat, GroupId, OpenFlags, Permissions, Result, UnlinkFlags, UserId};
 use spin::Mutex;
@@ -69,13 +66,13 @@ impl super::Filesystem for KernelFs {
         callback(res, false);
     }
 
-    fn read(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    fn read(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let descriptor = match self.file_handles.lock().get(handle) {
             Some(descriptor) => descriptor.clone(),
             None => return callback(Err(Errno::TryAgain), false),
         };
 
-        descriptor.read(position, length, callback);
+        descriptor.read(position, buffer, callback);
     }
 
     fn stat(&self, handle: HandleNum, callback: Box<dyn RequestCallback<FileStat>>) {
@@ -108,13 +105,13 @@ impl super::Filesystem for KernelFs {
         callback(res, false);
     }
 
-    fn write(&self, handle: HandleNum, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         let descriptor = match self.file_handles.lock().get(handle) {
             Some(descriptor) => descriptor.clone(),
             None => return callback(Err(Errno::TryAgain), false),
         };
 
-        descriptor.write(position, length, callback);
+        descriptor.write(position, buffer, callback);
     }
 
     fn get_page(&self, handle: HandleNum, position: i64, callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {
@@ -150,7 +147,7 @@ pub trait FileDescriptor: Send + Sync {
     /// if this file descriptor points to a directory, its entries will be read in order, one per every read() call,
     /// where every directory entry is formatted as its serial number as a native-endian u32 (4 bytes), followed by the bytes of its name with no null terminator.
     /// if a directory entry exceeds the given buffer length, it should be truncated to the buffer length.
-    fn read(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a [u8]>>) {
+    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         callback(Err(Errno::FuncNotSupported), false);
     }
 
@@ -169,7 +166,7 @@ pub trait FileDescriptor: Send + Sync {
     }
 
     /// writes data from this buffer to this file descriptor
-    fn write(&self, position: i64, length: usize, callback: Box<dyn for<'a> RequestCallback<&'a mut [u8]>>) {
+    fn write(&self, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
         callback(Err(Errno::FuncNotSupported), false);
     }
 
@@ -182,24 +179,8 @@ pub trait FileDescriptor: Send + Sync {
 
         self.read(
             position,
-            PROPERTIES.page_size,
-            Box::new(move |res, blocked| {
-                let slice = match res {
-                    Ok(slice) => slice,
-                    Err(_) => return callback(None, blocked),
-                };
-
-                let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
-                unsafe {
-                    match crate::mm::map_memory(&mut page_directory, &[phys_addr], |page_slice| {
-                        page_slice[..slice.len()].copy_from_slice(slice);
-                        page_slice[slice.len()..].fill(0);
-                    }) {
-                        Ok(_) => callback(Some(phys_addr), blocked),
-                        Err(_) => callback(None, blocked),
-                    }
-                }
-            }),
+            Buffer::Page(phys_addr),
+            Box::new(move |res, blocked| callback(if res.is_ok() { Some(phys_addr) } else { None }, blocked)),
         );
     }
 }

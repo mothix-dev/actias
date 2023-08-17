@@ -327,10 +327,7 @@ pub enum ResponseData {
     /// request failed (can be any)
     Error { error: Errno },
 
-    /// request returns a buffer (must be from `read`, `write, `stat`)
-    Buffer { addr: usize, len: usize },
-
-    /// request returns a file handle (must be from `open`)
+    /// request returns a file handle
     Handle { handle: usize },
 
     /// request doesn't return any data, just an acknowledgement that it completed

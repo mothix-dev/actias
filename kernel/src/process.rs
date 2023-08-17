@@ -1,7 +1,12 @@
 //! process management
 
-use crate::{arch::PROPERTIES, array::VecBitSet, mm::MemoryProtection, sched::Task};
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use crate::{
+    arch::{PhysicalAddress, PROPERTIES},
+    array::VecBitSet,
+    mm::MemoryProtection,
+    sched::Task,
+};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
 use common::Errno;
 use spin::{Mutex, RwLock};
 
@@ -192,5 +197,108 @@ impl ProcessBuffer {
             buf[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
             bytes_read
         })
+    }
+}
+
+pub enum Buffer {
+    Process(ProcessBuffer),
+    Kernel(Arc<Mutex<Box<[u8]>>>),
+    Page(PhysicalAddress),
+}
+
+impl Buffer {
+    /// maps this buffer into memory if applicable and copies its contents into the given slice, returning the number of bytes copied
+    pub fn copy_into(&self, to_write: &mut [u8]) -> common::Result<usize> {
+        match self {
+            Self::Process(buffer) => buffer.copy_into(to_write),
+            Self::Kernel(buffer) => {
+                let buffer = buffer.lock();
+                let bytes_written = to_write.len().min(buffer.len());
+                to_write[..bytes_written].copy_from_slice(&buffer[..bytes_written]);
+                Ok(bytes_written)
+            }
+            Self::Page(phys_addr) => {
+                let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
+                unsafe {
+                    crate::mm::map_memory(&mut page_directory, &[*phys_addr], |buffer| {
+                        let bytes_written = to_write.len().min(buffer.len());
+                        to_write[..bytes_written].copy_from_slice(&buffer[..bytes_written]);
+                        to_write[bytes_written..].fill(0);
+                        PROPERTIES.page_size
+                    })
+                    .map_err(Errno::from)
+                }
+            }
+        }
+    }
+
+    /// maps this buffer into memory if applicable and copies the contents of the given slice into it, returning the number of bytes copied
+    pub fn copy_from(&self, to_read: &[u8]) -> common::Result<usize> {
+        match self {
+            Self::Process(buffer) => buffer.copy_from(to_read),
+            Self::Kernel(buffer) => {
+                let mut buffer = buffer.lock();
+                let bytes_read = to_read.len().min(buffer.len());
+                buffer[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
+                Ok(bytes_read)
+            }
+            Self::Page(phys_addr) => {
+                let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
+                unsafe {
+                    crate::mm::map_memory(&mut page_directory, &[*phys_addr], |buffer| {
+                        let bytes_read = to_read.len().min(buffer.len());
+                        buffer[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
+                        bytes_read
+                    })
+                    .map_err(Errno::from)
+                }
+            }
+        }
+    }
+
+    /// maps this buffer into memory if required and calls the given function with a slice over it
+    pub fn map_in<F: FnOnce(&[u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+        match self {
+            Self::Process(buffer) => buffer.map_in(op),
+            Self::Kernel(buffer) => Ok(op(&buffer.lock())),
+            Self::Page(phys_addr) => {
+                let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
+                unsafe { crate::mm::map_memory(&mut page_directory, &[*phys_addr], |slice| op(slice)).map_err(Errno::from) }
+            }
+        }
+    }
+
+    /// maps this buffer into memory if required and calls the given function with a mutable slice over it
+    pub fn map_in_mut<F: FnOnce(&mut [u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+        match self {
+            Self::Process(buffer) => buffer.map_in_mut(op),
+            Self::Kernel(buffer) => Ok(op(&mut buffer.lock())),
+            Self::Page(phys_addr) => {
+                let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
+                unsafe { crate::mm::map_memory(&mut page_directory, &[*phys_addr], op).map_err(Errno::from) }
+            }
+        }
+    }
+
+    /// gets the length of this buffer
+    #[allow(clippy::len_without_is_empty)] // is_empty isn't applicable here
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Process(buffer) => buffer.length,
+            Self::Kernel(buffer) => buffer.lock().len(),
+            Self::Page(_) => PROPERTIES.page_size,
+        }
+    }
+}
+
+impl From<ProcessBuffer> for Buffer {
+    fn from(value: ProcessBuffer) -> Self {
+        Self::Process(value)
+    }
+}
+
+impl From<Arc<Mutex<Box<[u8]>>>> for Buffer {
+    fn from(value: Arc<Mutex<Box<[u8]>>>) -> Self {
+        Self::Kernel(value)
     }
 }

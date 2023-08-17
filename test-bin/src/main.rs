@@ -116,10 +116,19 @@ fn close(fd: usize) -> Result<()> {
 }
 
 fn read(fd: usize, slice: &mut [u8]) -> Result<usize> {
+    // dirty hack to map the slice in before async page faults are functional
+    unsafe {
+        core::ptr::read_volatile(&slice[0]);
+        core::ptr::read_volatile(&slice[slice.len() - 1]);
+    }
     unsafe { syscall_3_args(common::Syscalls::Read, fd.try_into().unwrap(), slice.as_mut_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
 }
 
 fn write(fd: usize, slice: &[u8]) -> Result<usize> {
+    unsafe {
+        core::ptr::read_volatile(&slice[0]);
+        core::ptr::read_volatile(&slice[slice.len() - 1]);
+    }
     unsafe { syscall_3_args(common::Syscalls::Write, fd.try_into().unwrap(), slice.as_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
 }
 
@@ -132,6 +141,10 @@ fn write_message(message: &str) {
 }
 
 fn open(at: usize, path: &str, flags: OpenFlags) -> Result<usize> {
+    unsafe {
+        core::ptr::read_volatile(&path.as_bytes()[0]);
+        core::ptr::read_volatile(&path.as_bytes()[path.len() - 1]);
+    }
     unsafe {
         syscall_4_args(
             common::Syscalls::Open,
@@ -280,19 +293,32 @@ pub extern "C" fn _start() {
             let event = unsafe { &*(buf.as_ptr() as *const _ as *const FilesystemEvent) };
             let event_size = size_of::<FilesystemEvent>();
 
-            let data = match event.kind {
+            fn write_response(fd2: usize, response: EventResponse) {
+                write(fd2, unsafe { core::slice::from_raw_parts(&response as *const _ as *const u8, core::mem::size_of::<EventResponse>()) }).unwrap();
+            }
+            fn write_stat(fd2: usize, stat: FileStat) {
+                write(fd2, unsafe { core::slice::from_raw_parts(&stat as *const _ as *const u8, size_of::<FileStat>()) }).unwrap();
+            }
+
+            match event.kind {
+                EventKind::Close => (),
                 EventKind::Open { name_length, .. } => {
                     let name = core::str::from_utf8(&buf[event_size..event_size + name_length]);
 
-                    if let Ok(name) = name && name == "uwu" && event.handle == 0 {
+                    let data = if let Ok(name) = name && name == "uwu" && event.handle == 0 {
                         ResponseData::Handle { handle: 1 }
                     } else {
                         ResponseData::Error { error: Errno::NoSuchFileOrDir }
-                    }
+                    };
+                    write_response(fd2, EventResponse { id: event.id, data });
                 }
                 EventKind::Stat => {
                     if event.handle == 0 {
-                        let stat = FileStat {
+                        write_response(fd2, EventResponse {
+                            id: event.id,
+                            data: ResponseData::None,
+                        });
+                        write_stat(fd2, FileStat {
                             mode: FileMode {
                                 permissions: Permissions::OwnerRead
                                     | Permissions::OwnerExecute
@@ -303,48 +329,45 @@ pub extern "C" fn _start() {
                                 kind: FileKind::Directory,
                             },
                             ..Default::default()
-                        };
-
-                        ResponseData::Buffer {
-                            addr: &stat as *const _ as usize,
-                            len: size_of::<FileStat>(),
-                        }
+                        });
                     } else if event.handle == 1 {
-                        let stat = FileStat {
+                        write_response(fd2, EventResponse {
+                            id: event.id,
+                            data: ResponseData::None,
+                        });
+                        write_stat(fd2, FileStat {
                             mode: FileMode {
-                                permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
-                                kind: FileKind::Regular,
+                                permissions: Permissions::OwnerWrite | Permissions::GroupWrite | Permissions::OtherWrite,
+                                kind: FileKind::CharSpecial,
                             },
                             ..Default::default()
-                        };
-
-                        ResponseData::Buffer {
-                            addr: &stat as *const _ as usize,
-                            len: size_of::<FileStat>(),
-                        }
+                        });
                     } else {
-                        ResponseData::Error { error: Errno::TryAgain }
+                        write_response(fd2, EventResponse {
+                            id: event.id,
+                            data: ResponseData::Error { error: Errno::TryAgain },
+                        });
                     }
                 }
                 EventKind::Write { .. } => {
                     if event.handle == 1 {
-                        ResponseData::Buffer {
-                            addr: buf.as_ptr() as usize,
-                            len: buf.len(),
-                        }
+                        write_response(fd2, EventResponse {
+                            id: event.id,
+                            data: ResponseData::None,
+                        });
+                        let bytes_read = read(fd2, &mut buf).unwrap();
+                        write(1, &buf[..bytes_read]).unwrap();
                     } else {
-                        ResponseData::Error { error: Errno::TryAgain }
+                        write_response(fd2, EventResponse {
+                            id: event.id,
+                            data: ResponseData::Error { error: Errno::TryAgain },
+                        });
                     }
                 }
-                _ => ResponseData::Error { error: Errno::NotSupported },
-            };
-
-            let response = EventResponse { id: event.id, data };
-
-            write(fd2, unsafe { core::slice::from_raw_parts(&response as *const _ as *const u8, core::mem::size_of::<EventResponse>()) }).unwrap();
-
-            if let EventKind::Write { length, .. } = event.kind {
-                write(1, &buf[..length.min(buf.len())]).unwrap();
+                _ => write_response(fd2, EventResponse {
+                    id: event.id,
+                    data: ResponseData::Error { error: Errno::NotSupported },
+                }),
             }
         }
     }
