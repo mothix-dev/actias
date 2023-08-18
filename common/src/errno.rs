@@ -1,11 +1,11 @@
 //! POSIX errno
 
 use core::fmt;
-use num_enum::FromPrimitive;
+use num_enum::TryFromPrimitive;
 
 /// Eerror number and message
 #[repr(u32)]
-#[derive(Copy, Clone, PartialEq, Eq, FromPrimitive, Default)]
+#[derive(Copy, Clone, PartialEq, Eq, TryFromPrimitive, Default)]
 pub enum Errno {
     #[default]
     /// No error (:

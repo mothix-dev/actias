@@ -21,7 +21,7 @@ unsafe fn syscall_0_args(num: Syscalls) -> Result<u32> {
     if res_err == 0 {
         Ok(res_ok)
     } else {
-        Err(Errno::from(res_err))
+        Err(Errno::try_from(res_err).map_err(|_| Errno::TryAgain)?)
     }
 }
 
@@ -41,7 +41,7 @@ unsafe fn syscall_1_args(num: Syscalls, arg0: u32) -> Result<u32> {
     if res_err == 0 {
         Ok(res_ok)
     } else {
-        Err(Errno::from(res_err))
+        Err(Errno::try_from(res_err).map_err(|_| Errno::TryAgain)?)
     }
 }
 
@@ -62,7 +62,7 @@ unsafe fn syscall_2_args(num: Syscalls, arg0: u32, arg1: u32) -> Result<u32> {
     if res_err == 0 {
         Ok(res_ok)
     } else {
-        Err(Errno::from(res_err))
+        Err(Errno::try_from(res_err).map_err(|_| Errno::TryAgain)?)
     }
 }
 
@@ -84,7 +84,7 @@ unsafe fn syscall_3_args(num: Syscalls, arg0: u32, arg1: u32, arg2: u32) -> Resu
     if res_err == 0 {
         Ok(res_ok)
     } else {
-        Err(Errno::from(res_err))
+        Err(Errno::try_from(res_err).map_err(|_| Errno::TryAgain)?)
     }
 }
 
@@ -107,7 +107,7 @@ unsafe fn syscall_4_args(num: Syscalls, arg0: u32, arg1: u32, arg2: u32, arg3: u
     if res_err == 0 {
         Ok(res_ok)
     } else {
-        Err(Errno::from(res_err))
+        Err(Errno::try_from(res_err).map_err(|_| Errno::TryAgain)?)
     }
 }
 
@@ -275,7 +275,7 @@ pub extern "C" fn _start() {
         let mut buf = [0; 1024];
         loop {
             read(fd, &mut buf).unwrap();
-            write_message("got event!");
+            //write_message("got event!");
 
             let event = unsafe { &*(buf.as_ptr() as *const _ as *const FilesystemEvent) };
             let event_size = size_of::<FilesystemEvent>();

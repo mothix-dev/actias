@@ -121,11 +121,11 @@ pub struct Process {
 }
 
 /// a buffer in the memory map of a specific process
+#[derive(Clone)]
 pub struct ProcessBuffer {
     base: usize,
     length: usize,
     memory_map: Arc<Mutex<crate::mm::ProcessMap>>,
-    pid: usize,
 }
 
 impl ProcessBuffer {
@@ -133,7 +133,7 @@ impl ProcessBuffer {
         let pid = crate::sched::get_current_pid()?;
         let memory_map = crate::get_global_state().process_table.read().get(pid).ok_or(Errno::NoSuchProcess)?.memory_map.clone();
 
-        Ok(Self { base, length, memory_map, pid })
+        Ok(Self { base, length, memory_map })
     }
 
     /// maps this buffer into memory and calls the given function with a slice over it
@@ -155,9 +155,14 @@ impl ProcessBuffer {
     }
 
     unsafe fn map_in_addrs<F: FnOnce(&mut [u8]) -> R, R>(&self, addrs: Vec<PhysicalAddress>, op: F) -> common::Result<R> {
-        if crate::sched::get_current_pid() == Ok(self.pid) {
-            // TODO: check to make sure this is really the same process
+        let global_state = crate::get_global_state();
+
+        // TODO: detect current CPU
+        let scheduler = &global_state.cpus.read()[0].scheduler;
+
+        if let Some(task) = scheduler.get_current_task() && Arc::ptr_eq(&task.lock().memory_map, &self.memory_map) {
             let buf = core::slice::from_raw_parts_mut(self.base as *mut u8, self.length);
+
             Ok(op(buf))
         } else {
             crate::mm::map_memory(&mut self.memory_map.lock().page_directory, &addrs, |slice| {
@@ -171,6 +176,7 @@ impl ProcessBuffer {
     }
 
     /// maps this buffer into memory and copies its contents into the given slice, returning the number of bytes copied
+    #[allow(clippy::needless_pass_by_ref_mut)] // i dont even fucken know
     pub async fn copy_into(&self, to_write: &mut [u8]) -> common::Result<usize> {
         self.map_in(|buf| {
             let bytes_written = to_write.len().min(buf.len());
@@ -191,6 +197,7 @@ impl ProcessBuffer {
     }
 }
 
+#[derive(Clone)]
 pub enum Buffer {
     Process(ProcessBuffer),
     Kernel(Arc<Mutex<Box<[u8]>>>),

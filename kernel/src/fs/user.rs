@@ -10,6 +10,7 @@ use crossbeam::queue::SegQueue;
 use log::debug;
 use spin::Mutex;
 
+#[derive(Clone)]
 enum CallbackKind {
     NoValue(Arc<Callback<common::Result<()>>>),
     Handle(Arc<Callback<common::Result<HandleNum>>>),
@@ -112,10 +113,13 @@ impl UserspaceFs {
     }
 
     async fn make_request(&self, handle: HandleNum, kind: EventKind, string_option: Option<String>, callback: Option<CallbackKind>) {
-        // TODO: handle this sanely
-        let id = callback
-            .map(|callback| self.in_progress.lock().add(callback).expect("ran out of memory while trying to queue new filesystem event"))
-            .unwrap_or_default();
+        let id = match callback {
+            Some(callback) => match self.in_progress.lock().add(callback.clone()) {
+                Ok(id) => id,
+                Err(_) => return callback.callback_error(Errno::OutOfMemory),
+            },
+            None => 0,
+        };
 
         // get the portable request as raw bytes that a process can read from
         let event = FilesystemEvent { id, handle, kind };
@@ -193,8 +197,7 @@ impl super::Filesystem for UserspaceFs {
         if bytes_read < size_of::<FileStat>() {
             Err(Errno::TryAgain)
         } else {
-            // TODO: validate fields
-            Ok(unsafe { *(buffer.lock().as_ptr() as *const FileStat) })
+            buffer.lock()[..].try_into().map_err(|_| Errno::TryAgain)
         }
     }
 

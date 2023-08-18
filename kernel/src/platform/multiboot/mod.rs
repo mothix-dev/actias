@@ -191,7 +191,7 @@ pub fn kmain() {
         let stack_manager = crate::arch::gdt::init(0x1000 * 8);
         let timer = alloc::sync::Arc::new(crate::timer::Timer::new(10000));
         let interrupt_manager = Arc::new(Mutex::new(crate::arch::InterruptManager::new()));
-        let scheduler = crate::sched::Scheduler::new(crate::get_global_state().page_directory.clone(), &timer);
+        let scheduler = crate::sched::Scheduler::new(crate::get_global_state().page_directory.clone(), timer.clone());
         crate::get_global_state().cpus.write().push(crate::cpu::CPU {
             timer: timer.clone(),
             stack_manager,

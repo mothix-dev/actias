@@ -1,6 +1,9 @@
 #![no_std]
+#![feature(offset_of)]
 
 mod errno;
+use core::mem::{offset_of, size_of};
+
 pub use errno::Errno;
 
 use bitmask_enum::bitmask;
@@ -137,6 +140,29 @@ pub struct FileStat {
     pub num_blocks: i64,
 }
 
+impl TryFrom<[u8; size_of::<Self>()]> for FileStat {
+    type Error = FromBytesError;
+
+    fn try_from(value: [u8; size_of::<Self>()]) -> core::result::Result<Self, FromBytesError> {
+        let offset = offset_of!(FileStat, mode);
+        FileMode::try_from(&value[offset..offset + size_of::<FileMode>()])?;
+
+        Ok(unsafe { *(value.as_ptr() as *const _ as *const Self) })
+    }
+}
+
+impl TryFrom<&[u8]> for FileStat {
+    type Error = FromBytesError;
+
+    fn try_from(value: &[u8]) -> core::result::Result<Self, FromBytesError> {
+        if value.len() != size_of::<Self>() {
+            Err(FromBytesError)
+        } else {
+            Self::try_from(<&[u8] as TryInto<[u8; size_of::<Self>()]>>::try_into(value).unwrap())
+        }
+    }
+}
+
 pub type UserId = u32;
 pub type GroupId = u32;
 
@@ -148,6 +174,31 @@ pub struct FileMode {
 
     /// what kind of file this is
     pub kind: FileKind,
+}
+
+impl TryFrom<[u8; size_of::<Self>()]> for FileMode {
+    type Error = FromBytesError;
+
+    fn try_from(value: [u8; size_of::<Self>()]) -> core::result::Result<Self, FromBytesError> {
+        Ok(Self {
+            permissions: Permissions {
+                bits: u16::from_ne_bytes(value[..size_of::<Permissions>()].try_into().unwrap()),
+            },
+            kind: value[size_of::<Permissions>()].try_into().map_err(|_| FromBytesError)?,
+        })
+    }
+}
+
+impl TryFrom<&[u8]> for FileMode {
+    type Error = FromBytesError;
+
+    fn try_from(value: &[u8]) -> core::result::Result<Self, FromBytesError> {
+        if value.len() != size_of::<Self>() {
+            Err(FromBytesError)
+        } else {
+            Self::try_from(<&[u8] as TryInto<[u8; size_of::<Self>()]>>::try_into(value).unwrap())
+        }
+    }
 }
 
 /// standard unix permissions bit field
@@ -219,7 +270,7 @@ impl core::fmt::Display for Permissions {
 }
 
 #[repr(u8)]
-#[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone, TryFromPrimitive)]
 pub enum FileKind {
     /// block special file
     BlockSpecial,
@@ -321,6 +372,35 @@ pub struct EventResponse {
     pub data: ResponseData,
 }
 
+impl EventResponse {
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(&self as *const _ as *const u8, size_of::<Self>()) }
+    }
+}
+
+impl TryFrom<[u8; size_of::<Self>()]> for EventResponse {
+    type Error = FromBytesError;
+
+    fn try_from(value: [u8; size_of::<Self>()]) -> core::result::Result<Self, FromBytesError> {
+        Ok(Self {
+            id: usize::from_ne_bytes((&value[..size_of::<usize>()]).try_into().unwrap()),
+            data: value[size_of::<usize>()..].try_into()?,
+        })
+    }
+}
+
+impl TryFrom<&[u8]> for EventResponse {
+    type Error = FromBytesError;
+
+    fn try_from(value: &[u8]) -> core::result::Result<Self, FromBytesError> {
+        if value.len() != size_of::<Self>() {
+            Err(FromBytesError)
+        } else {
+            Self::try_from(<&[u8] as TryInto<[u8; size_of::<Self>()]>>::try_into(value).unwrap())
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug)]
 pub enum ResponseData {
@@ -333,3 +413,45 @@ pub enum ResponseData {
     /// request doesn't return any data, just an acknowledgement that it completed
     None,
 }
+
+impl ResponseData {
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(&self as *const _ as *const u8, size_of::<Self>()) }
+    }
+}
+
+impl TryFrom<[u8; size_of::<Self>()]> for ResponseData {
+    type Error = FromBytesError;
+
+    fn try_from(value: [u8; size_of::<Self>()]) -> core::result::Result<Self, FromBytesError> {
+        let discriminator = &value[..size_of::<usize>()];
+
+        if discriminator == unsafe { core::slice::from_raw_parts(&(Self::Error { error: Errno::None }) as *const _ as *const u8, size_of::<usize>()) } {
+            Ok(Self::Error {
+                error: Errno::try_from_primitive(u32::from_ne_bytes(value[size_of::<usize>()..size_of::<usize>() + size_of::<u32>()].try_into().unwrap())).map_err(|_| FromBytesError)?,
+            })
+        } else if discriminator == unsafe { core::slice::from_raw_parts(&(Self::Handle { handle: 0 }) as *const _ as *const u8, size_of::<usize>()) } {
+            Ok(Self::Handle {
+                handle: usize::from_ne_bytes(value[size_of::<usize>()..size_of::<usize>() * 2].try_into().unwrap()),
+            })
+        } else if discriminator == unsafe { core::slice::from_raw_parts(&(Self::None) as *const _ as *const u8, size_of::<usize>()) } {
+            Ok(Self::None)
+        } else {
+            Err(FromBytesError)
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for ResponseData {
+    type Error = FromBytesError;
+
+    fn try_from(value: &[u8]) -> core::result::Result<Self, FromBytesError> {
+        if value.len() != size_of::<Self>() {
+            Err(FromBytesError)
+        } else {
+            Self::try_from(<&[u8] as TryInto<[u8; size_of::<Self>()]>>::try_into(value).unwrap())
+        }
+    }
+}
+
+pub struct FromBytesError;

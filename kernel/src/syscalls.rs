@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 use crate::{
-    arch::bsp::RegisterContext,
+    arch::{bsp::RegisterContext, PROPERTIES},
     fs::FsEnvironment,
     mm::PageDirectory,
     sched::{block_until, get_current_process},
@@ -15,6 +15,8 @@ pub type Registers = <crate::arch::InterruptManager as crate::arch::bsp::Interru
 
 /// low-level syscall handler. handles the parsing, execution, and error handling of syscalls
 pub fn syscall_handler(registers: &mut Registers, num: u32, arg0: usize, arg1: usize, arg2: usize, arg3: usize) {
+    (PROPERTIES.enable_interrupts)();
+
     let syscall = Syscalls::try_from(num);
 
     if let Ok(syscall) = &syscall {

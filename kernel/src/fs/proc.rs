@@ -472,9 +472,8 @@ impl FileDescriptor for FsToKernel {
                 return Err(Errno::TryAgain);
             }
 
-            // TODO: check fields to ensure validity of data
-            let response = unsafe { &*(buf.as_ptr() as *const _ as *const EventResponse) };
-            if let Some(response) = self.filesystem.respond(response)? {
+            let response = EventResponse::try_from(buf).map_err(|_| Errno::InvalidArgument)?;
+            if let Some(response) = self.filesystem.respond(&response)? {
                 *self.response.lock() = Some(response);
             };
 

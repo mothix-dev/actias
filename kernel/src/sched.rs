@@ -12,7 +12,7 @@ use common::{Errno, Result};
 use core::{
     fmt::Display,
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering, AtomicU64}, num::TryFromIntError,
 };
 use crossbeam::queue::SegQueue;
 use futures::Future;
@@ -93,6 +93,12 @@ pub struct Scheduler {
     /// the timeout used for scheduling
     timeout: Arc<Timeout>,
 
+    /// the timer used for scheduling the preemption timeout
+    timer: Arc<Timer>,
+
+    /// when the timeout expires at (used since the timeout's expires_at value might be occasionally reset which isn't good here)
+    expires_at: AtomicU64,
+
     /// the stack used when waiting around for a task to be queued
     wait_around_stack: Mutex<Pin<Box<[u8]>>>,
 
@@ -113,7 +119,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>, timer: &Timer) -> Arc<Self> {
+    pub fn new(kernel_page_directory: Arc<Mutex<PageDirTracker<crate::arch::PageDirectory>>>, timer: Arc<Timer>) -> Arc<Self> {
         let new = Arc::new(Self {
             run_queues: {
                 let mut v = Vec::with_capacity(MAX_PRIORITY + 1);
@@ -124,6 +130,8 @@ impl Scheduler {
             },
             current_task: Mutex::new(None),
             timeout: timer.add_timeout(|_, _| None),
+            timer,
+            expires_at: 0.into(),
             wait_around_stack: Mutex::new(Box::into_pin(vec![0_u8; WAIT_STACK_SIZE].into_boxed_slice())),
             kernel_page_directory,
             ready_tasks: AtomicUsize::new(0),
@@ -200,7 +208,7 @@ impl Scheduler {
             jiffies = 0;
         }
 
-        let new = self.context_switch_timeout(registers, jiffies).unwrap_or(u64::MAX);
+        let new = self.context_switch_timeout(registers, self.timer.jiffies()).unwrap_or(u64::MAX);
         let _ = self.timeout.expires_at.compare_exchange(jiffies, new, Ordering::Release, Ordering::Relaxed);
     }
 
@@ -249,7 +257,14 @@ impl Scheduler {
                 let mut task = task.lock();
 
                 *registers = task.registers.clone();
-                task.cpu_time += TIME_SLICE as i64 * (1 << 14);
+
+                let time_used = || -> core::result::Result<i64, TryFromIntError> {
+                    let expires_at: i64 = self.expires_at.load(Ordering::SeqCst).try_into()?;
+                    let jiffies: i64 = jiffies.try_into()?;
+
+                    Ok((TIME_SLICE as i64 * (1 << 14)) + ((jiffies - expires_at) as i64 * (1 << 14)) / self.timer.millis() as i64)
+                };
+                task.cpu_time += time_used().unwrap_or(TIME_SLICE as i64 * (1 << 14));
 
                 unsafe {
                     let mut map = task.memory_map.lock();
@@ -260,7 +275,9 @@ impl Scheduler {
 
             *self.current_task.lock() = Some(task);
 
-            Some(jiffies + TIME_SLICE)
+            let expires_at = jiffies + TIME_SLICE;
+            self.expires_at.store(expires_at, Ordering::SeqCst);
+            Some(expires_at)
         } else {
             // technically not safe or correct because the lock isn't held while waiting, but also i don't care
             let stack = {
