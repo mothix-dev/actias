@@ -327,8 +327,7 @@ pub trait PageDirectory {
 /// # Safety
 /// this function is unsafe because it (at least in its default implementation) cannot guarantee that it's being called on the current
 /// page directory, and things can and will break if it's called on any other page directory
-pub unsafe fn map_memory<D: PageDirectory, O, R>(map_into: &mut D, addresses: &[PhysicalAddress], op: O) -> Result<R, PagingError>
-where O: FnOnce(&mut [u8]) -> R {
+pub unsafe fn map_memory<D: PageDirectory, O: FnOnce(&mut [u8]) -> R, R>(map_into: &mut D, addresses: &[PhysicalAddress], op: O) -> Result<R, PagingError> {
     let page_size = D::PAGE_SIZE;
 
     let buf_len = addresses.len() * page_size;

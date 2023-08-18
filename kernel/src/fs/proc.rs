@@ -10,19 +10,20 @@ use super::{
 };
 use alloc::{
     boxed::Box,
-    format,
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
 };
+use async_trait::async_trait;
 use common::{Errno, EventResponse, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
 use spin::Mutex;
 
 /// procfs root directory
 pub struct ProcRoot;
 
+#[async_trait]
 impl FileDescriptor for ProcRoot {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
+    async fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -39,11 +40,8 @@ impl FileDescriptor for ProcRoot {
         }
     }
 
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let position: usize = match position.try_into() {
-            Ok(position) => position,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
+    async fn read(&self, position: i64, buffer: Buffer) -> Result<usize> {
+        let position: usize = position.try_into().map_err(|_| Errno::ValueOverflow)?;
 
         let mut data = Vec::new();
 
@@ -57,11 +55,10 @@ impl FileDescriptor for ProcRoot {
             data.push(0);
         }
 
-        let res = buffer.copy_from(&data);
-        callback(res, false);
+        buffer.copy_from(&data).await
     }
 
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
@@ -74,8 +71,9 @@ impl FileDescriptor for ProcRoot {
 
 pub struct ProcSelfLink;
 
+#[async_trait]
 impl FileDescriptor for ProcSelfLink {
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::GroupRead | Permissions::OtherRead,
@@ -86,14 +84,13 @@ impl FileDescriptor for ProcSelfLink {
         })
     }
 
-    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn read(&self, _position: i64, buffer: Buffer) -> Result<usize> {
         let pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
 
         if let Some(pid) = pid {
-            let res = buffer.copy_from(pid.to_string().as_bytes());
-            callback(res, false);
+            buffer.copy_from(pid.to_string().as_bytes()).await
         } else {
-            callback(Err(Errno::NoSuchProcess), false);
+            Err(Errno::NoSuchProcess)
         }
     }
 }
@@ -118,8 +115,9 @@ macro_rules! make_procfs {
             }
         }
 
+        #[async_trait]
         impl FileDescriptor for $class_name {
-            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
+            async fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
@@ -130,11 +128,8 @@ macro_rules! make_procfs {
                 }
             }
 
-            fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-                let position: usize = match position.try_into() {
-                    Ok(position) => position,
-                    Err(_) => return callback(Err(Errno::ValueOverflow), false),
-                };
+            async fn read(&self, position: i64, buffer: Buffer) -> Result<usize> {
+                let position: usize = position.try_into().map_err(|_| Errno::ValueOverflow)?;
 
                 let mut data = Vec::new();
 
@@ -145,11 +140,10 @@ macro_rules! make_procfs {
                     data.push(0);
                 }
 
-                let res = buffer.copy_from(&data);
-                callback(res, false);
+                buffer.copy_from(&data).await
             }
 
-            fn stat(&self) -> Result<FileStat> {
+            async fn stat(&self) -> Result<FileStat> {
                 Ok(FileStat {
                     mode: FileMode {
                         permissions: Permissions::OwnerRead
@@ -172,7 +166,6 @@ make_procfs![
     "cwd" => CwdLink,
     "files" => FilesDir,
     "filesystem" => FsEventsDir,
-    "memory" => MemoryDir,
     "root" => RootLink,
 ];
 
@@ -190,18 +183,14 @@ impl CwdLink {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for CwdLink {
-    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let path = match crate::get_global_state().process_table.read().get(self.pid) {
-            Some(process) => process.environment.get_cwd_path(),
-            None => return callback(Err(Errno::NoSuchProcess), false),
-        };
-
-        let res = buffer.copy_from(path.as_bytes());
-        callback(res, false);
+    async fn read(&self, _position: i64, buffer: Buffer) -> Result<usize> {
+        let path = crate::get_global_state().process_table.read().get(self.pid).ok_or(Errno::NoSuchProcess)?.environment.get_cwd_path();
+        buffer.copy_from(path.as_bytes()).await
     }
 
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
@@ -226,18 +215,14 @@ impl RootLink {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for RootLink {
-    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let path = match crate::get_global_state().process_table.read().get(self.pid) {
-            Some(process) => process.environment.get_root_path(),
-            None => return callback(Err(Errno::NoSuchProcess), false),
-        };
-
-        let res = buffer.copy_from(path.as_bytes());
-        callback(res, false);
+    async fn read(&self, _position: i64, buffer: Buffer) -> Result<usize> {
+        let path = crate::get_global_state().process_table.read().get(self.pid).ok_or(Errno::NoSuchProcess)?.environment.get_root_path();
+        buffer.copy_from(path.as_bytes()).await
     }
 
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
@@ -269,8 +254,9 @@ impl FilesDir {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for FilesDir {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
+    async fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -283,18 +269,10 @@ impl FileDescriptor for FilesDir {
         }
     }
 
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let position: usize = match position.try_into() {
-            Ok(position) => position,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
-
-        let file_descriptors = match self.get_file_descriptors() {
-            Ok(fds) => fds,
-            Err(err) => return callback(Err(err), false),
-        };
+    async fn read(&self, position: i64, buffer: Buffer) -> Result<usize> {
+        let position: usize = position.try_into().map_err(|_| Errno::ValueOverflow)?;
+        let file_descriptors = self.get_file_descriptors()?;
         let file_descriptors = file_descriptors.lock();
-
         let mut data = Vec::new();
 
         if let Some((fd, _file)) = file_descriptors.as_slice().iter().enumerate().filter(|(_, i)| i.is_some()).nth(position) {
@@ -303,11 +281,10 @@ impl FileDescriptor for FilesDir {
             data.push(0);
         }
 
-        let res = buffer.copy_from(&data);
-        callback(res, false);
+        buffer.copy_from(&data).await
     }
 
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
@@ -324,23 +301,17 @@ pub struct ProcessFd {
     fd: usize,
 }
 
+#[async_trait]
 impl FileDescriptor for ProcessFd {
-    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn read(&self, _position: i64, buffer: Buffer) -> Result<usize> {
         let process_table = crate::get_global_state().process_table.read();
-        let process = match process_table.get(self.pid) {
-            Some(process) => process,
-            None => return callback(Err(Errno::NoSuchProcess), false),
-        };
-        let path = match process.environment.get_path(self.fd) {
-            Ok(path) => path,
-            Err(err) => return callback(Err(err), false),
-        };
+        let process = process_table.get(self.pid).ok_or(Errno::NoSuchProcess)?;
+        let path = process.environment.get_path(self.fd)?;
 
-        let res = buffer.copy_from(path.as_bytes());
-        callback(res, false);
+        buffer.copy_from(path.as_bytes()).await
     }
 
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
@@ -348,143 +319,6 @@ impl FileDescriptor for ProcessFd {
             },
             ..Default::default()
         })
-    }
-}
-
-/// allows for processes to manipulate their memory map by manipulating files
-pub struct MemoryDir {
-    pid: usize,
-    map: Arc<Mutex<crate::mm::ProcessMap>>,
-}
-
-impl MemoryDir {
-    fn new(pid: usize, flags: OpenFlags) -> Result<Self> {
-        if flags & OpenFlags::Write != OpenFlags::None {
-            Err(Errno::OperationNotPermitted)
-        } else {
-            Ok(Self {
-                pid,
-                map: crate::get_global_state().process_table.read().get(pid).ok_or(Errno::NoSuchProcess)?.memory_map.clone(),
-            })
-        }
-    }
-}
-
-impl FileDescriptor for MemoryDir {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
-        if flags & OpenFlags::Write != OpenFlags::None {
-            return Err(Errno::OperationNotSupported);
-        }
-
-        let base = usize::from_str_radix(&name, 16).map_err(|_| Errno::InvalidArgument)?;
-
-        if flags & OpenFlags::Create != OpenFlags::None {
-            // create file, directory, or symlink based on flags
-            // mapping for file will be inserted when it's given permissions with chmod and a size with truncate
-            // mapping for directory will be inserted when the `target` file/symlink is created in it as with normal files/symlinks
-            // mapping for symlink will be inserted when it's given a target and permissions with chmod
-            // TODO: how should symlinks be created? maybe a special flag
-            todo!();
-        } else {
-            for map in self.map.lock().map.iter() {
-                if map.region().base == base {
-                    match map.kind() {
-                        crate::mm::MappingKind::Anonymous => {
-                            return Ok(Arc::new(AnonMem {
-                                pid: self.pid,
-                                map: self.map.clone(),
-                                base,
-                            }))
-                        }
-                        crate::mm::MappingKind::File { .. } => todo!(), // need to get the path somehow and make a symlink
-                    }
-                }
-            }
-
-            Err(Errno::NoSuchFileOrDir)
-        }
-    }
-
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let map = self.map.lock();
-
-        let position: usize = match position.try_into() {
-            Ok(position) => position,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
-
-        let map = match map.map.get(position) {
-            Some(map) => map,
-            None => return callback(Ok(0), false),
-        };
-        let entry = format!("{:0width$x}", map.region().base, width = core::mem::size_of::<usize>() * 2);
-
-        let mut data = Vec::new();
-        data.extend_from_slice(&(0_u32.to_ne_bytes()));
-        data.extend_from_slice(entry.as_bytes());
-        data.push(0);
-
-        let res = buffer.copy_from(&data);
-        callback(res, false);
-    }
-
-    fn stat(&self) -> Result<FileStat> {
-        Ok(FileStat {
-            mode: FileMode {
-                permissions: Permissions::OwnerRead
-                    | Permissions::OwnerWrite
-                    | Permissions::OwnerExecute
-                    | Permissions::GroupRead
-                    | Permissions::GroupExecute
-                    | Permissions::OtherRead
-                    | Permissions::OtherExecute,
-                kind: FileKind::Directory,
-            },
-            ..Default::default()
-        })
-    }
-}
-
-pub struct AnonMem {
-    pid: usize,
-    map: Arc<Mutex<crate::mm::ProcessMap>>,
-    base: usize,
-}
-
-impl FileDescriptor for AnonMem {
-    fn stat(&self) -> Result<FileStat> {
-        Ok(FileStat {
-            mode: FileMode {
-                permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead,
-                kind: FileKind::Regular,
-            },
-            ..Default::default()
-        })
-    }
-
-    fn truncate(&self, length: i64) -> Result<()> {
-        let current_pid = crate::get_global_state().cpus.read()[0].scheduler.get_current_task().and_then(|task| task.lock().pid);
-
-        // change the size of the mapping to the given size
-        self.map
-            .lock()
-            .resize(&self.map, self.base, length.try_into().map_err(|_| Errno::ValueOverflow)?, current_pid == Some(self.pid))?;
-        Ok(())
-    }
-
-    fn read(&self, _position: i64, _buffer: Buffer, _callback: Box<dyn super::RequestCallback<usize>>) {
-        // read much like sysfs/mem
-        todo!();
-    }
-
-    fn write(&self, _position: i64, _buffer: Buffer, _callback: Box<dyn super::RequestCallback<usize>>) {
-        // write much like sysfs/mem
-        todo!();
-    }
-
-    fn get_page(&self, _position: i64, _callback: Box<dyn FnOnce(Option<crate::arch::PhysicalAddress>, bool)>) {
-        // get page much like sysfs/mem, gotta figure out how to do this without deadlocks
-        todo!();
     }
 }
 
@@ -514,8 +348,9 @@ impl FsName {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for FsName {
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::OtherRead,
@@ -525,13 +360,10 @@ impl FileDescriptor for FsName {
         })
     }
 
-    fn write(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn write(&self, _position: i64, buffer: Buffer) -> Result<usize> {
         const BUF_LEN: usize = 256;
         let mut buf = [0; BUF_LEN];
-        let bytes_written = match buffer.copy_into(&mut buf) {
-            Ok(bytes) => bytes,
-            Err(err) => return callback(Err(err), false),
-        };
+        let bytes_written = buffer.copy_into(&mut buf).await?;
 
         if let Ok(str) = core::str::from_utf8(&buf[..bytes_written]) && let Some(process) = crate::get_global_state().process_table.read().get(self.pid) {
             let filesystem = Arc::new(UserspaceFs::new());
@@ -539,7 +371,7 @@ impl FileDescriptor for FsName {
             process.environment.namespace.write().insert(str.to_string(), filesystem);
         }
 
-        callback(Ok(bytes_written), false);
+        Ok(bytes_written)
     }
 }
 
@@ -564,8 +396,9 @@ impl FsFromKernel {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for FsFromKernel {
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead,
@@ -575,8 +408,8 @@ impl FileDescriptor for FsFromKernel {
         })
     }
 
-    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        self.filesystem.wait_for_event(buffer, callback);
+    async fn read(&self, _position: i64, buffer: Buffer) -> Result<usize> {
+        self.filesystem.wait_for_event(buffer).await
     }
 }
 
@@ -606,8 +439,9 @@ impl FsToKernel {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for FsToKernel {
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerWrite,
@@ -617,39 +451,34 @@ impl FileDescriptor for FsToKernel {
         })
     }
 
-    fn read(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn read(&self, _position: i64, buffer: Buffer) -> Result<usize> {
         let response = self.response.lock().take();
         if let Some(response) = response {
-            response.read(buffer, callback);
+            response.read(buffer).await
         } else {
-            callback(Err(Errno::TryAgain), false);
+            Err(Errno::TryAgain)
         }
     }
 
-    fn write(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn write(&self, _position: i64, buffer: Buffer) -> Result<usize> {
         let response = self.response.lock().take();
         if let Some(response) = response {
-            response.write(buffer, callback);
+            response.write(buffer).await
         } else {
             let mut buf = [0; core::mem::size_of::<EventResponse>()];
-            let bytes_written = match buffer.copy_into(&mut buf) {
-                Ok(bytes) => bytes,
-                Err(err) => return callback(Err(err), false),
-            };
+            let bytes_written = buffer.copy_into(&mut buf).await?;
 
             if bytes_written < size_of::<EventResponse>() {
-                return callback(Err(Errno::TryAgain), false);
+                return Err(Errno::TryAgain);
             }
 
             // TODO: check fields to ensure validity of data
             let response = unsafe { &*(buf.as_ptr() as *const _ as *const EventResponse) };
-            match self.filesystem.respond(response) {
-                Ok(Some(response)) => *self.response.lock() = Some(response),
-                Ok(None) => (),
-                Err(err) => return callback(Err(err), false),
+            if let Some(response) = self.filesystem.respond(response)? {
+                *self.response.lock() = Some(response);
             };
 
-            callback(Ok(bytes_written), false);
+            Ok(bytes_written)
         }
     }
 }

@@ -2,8 +2,9 @@ use super::{ContiguousRegion, PageDirectory};
 use crate::{
     arch::{PhysicalAddress, PROPERTIES},
     mm::FrameReference,
+    process::Buffer,
 };
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use bitmask_enum::bitmask;
 use common::{Errno, Result};
 use log::{debug, error, trace};
@@ -157,14 +158,127 @@ impl ProcessMap {
     ///
     /// # Returns
     /// returns `true` if a page fault was successfully handled, `false` if it wasn't and the process should be killed
-    pub fn page_fault(&mut self, arc_self: &Arc<Mutex<Self>>, registers: &mut Registers, addr: usize, access_type: MemoryProtection) -> bool {
+    pub async fn page_fault(&mut self, arc_self: &Arc<Mutex<Self>>, addr: usize, access_type: MemoryProtection) -> bool {
         // find the mapping, check its permissions, and try to map it in
         trace!("page fault @ {addr:#x}");
-        if let Some(mapping) = self.map.iter().find(|m| m.region.contains(addr)) && (mapping.protection | !access_type) == !0 && mapping.fault_in(registers, &mut self.page_directory, arc_self, addr, access_type).is_ok() {
+        if let Some(mapping) = self.map.iter().find(|m| m.region.contains(addr)).cloned() && (mapping.protection | !access_type) == !0 && self.fault_in(arc_self, mapping, addr, access_type).await.is_ok() {
             true
         } else {
             false
         }
+    }
+
+    /// pages a mapping into memory on a page fault
+    ///
+    /// # Arguments
+    /// * `arc_self` - a reference counted pointer to this memory map, to allow for proper page referencing
+    /// * `mapping` - the mapping that needs a page in it faulted into memory
+    /// * `addr` - the virtual address that the page fault occurred at
+    /// * `access_type` - how the CPU tried to access the faulted page
+    async fn fault_in(&mut self, arc_self: &Arc<Mutex<ProcessMap>>, mapping: Mapping, addr: usize, access_type: MemoryProtection) -> Result<()> {
+        // align address to page size
+        let aligned_addr = (addr / PROPERTIES.page_size) * PROPERTIES.page_size;
+
+        let page = self.page_directory.get_page(aligned_addr);
+
+        // handle copy on write
+        if access_type & MemoryProtection::Write != MemoryProtection::None && let Some(page) = page.as_ref() && !page.writable && page.copy_on_write {
+            // allocate new page
+            let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
+                map: Arc::downgrade(arc_self),
+                addr: aligned_addr,
+            }))?;
+            let old_page = unsafe { core::slice::from_raw_parts(aligned_addr as *const u8, PROPERTIES.page_size) };
+
+            // copy data from old page into new page
+            unsafe {
+                super::map_memory(&mut self.page_directory, &[phys_addr], |slice| {
+                    slice.copy_from_slice(old_page)
+                })?;
+            }
+
+            // map in new page
+            self.page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(crate::mm::PageFrame {
+                addr: phys_addr,
+                present: true,
+                writable: true,
+                executable: mapping.protection & MemoryProtection::Execute != MemoryProtection::None,
+                user_mode: true,
+                ..Default::default()
+            }))?;
+            crate::arch::PageDirectory::flush_page(aligned_addr);
+
+            // remove reference to old page, freeing it if applicable
+            crate::get_global_state().page_manager.lock().free_frame(page.addr, Some(arc_self));
+        }
+
+        if page.is_none() {
+            // page needs to be mapped in, map it in
+            match &mapping.kind {
+                MappingKind::Anonymous => {
+                    // allocate and zero out new page
+                    let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
+                        map: Arc::downgrade(arc_self),
+                        addr: aligned_addr,
+                    }))?;
+                    Buffer::Page(phys_addr).map_in_immediate(|slice| slice.fill(0))?;
+
+                    self.page_directory.set_page(
+                        None::<&crate::arch::PageDirectory>,
+                        aligned_addr,
+                        Some(crate::mm::PageFrame {
+                            addr: phys_addr,
+                            present: true,
+                            writable: mapping.protection & MemoryProtection::Write != MemoryProtection::None,
+                            executable: mapping.protection & MemoryProtection::Execute != MemoryProtection::None,
+                            user_mode: true,
+                            ..Default::default()
+                        }),
+                    )?;
+                }
+                MappingKind::File { file_handle, file_offset } => {
+                    debug!("copying in file at {aligned_addr:#x} - {file_offset:#x} ({:?})", mapping.region);
+
+                    // copy in file data
+                    let base: i64 = mapping.region.base.try_into().map_err(|_| Errno::ValueOverflow)?;
+                    let addr: i64 = aligned_addr.try_into().map_err(|_| Errno::ValueOverflow)?;
+                    let region_offset = addr - base;
+
+                    debug!("region_offset is {region_offset:?}");
+
+                    assert!(region_offset >= 0, "region_offset can't be less than zero");
+
+                    let arc_map = arc_self.clone();
+                    let protection = mapping.protection;
+
+                    match file_handle.get_page(file_offset + region_offset).await {
+                        Some(addr) => {
+                            // add a reference to this page, tying it to this map
+                            crate::get_global_state().page_manager.lock().add_reference(addr, FrameReference {
+                                map: Arc::downgrade(&arc_map),
+                                addr: aligned_addr,
+                            });
+
+                            self.page_directory.set_page(
+                                None::<&crate::arch::PageDirectory>,
+                                aligned_addr,
+                                Some(crate::mm::PageFrame {
+                                    addr,
+                                    present: true,
+                                    writable: protection & MemoryProtection::Write != MemoryProtection::None,
+                                    executable: protection & MemoryProtection::Execute != MemoryProtection::None,
+                                    user_mode: true,
+                                    ..Default::default()
+                                }),
+                            )?;
+                        }
+                        None => error!("TODO: properly kill blocked page faulted process"), // this is fine since it'll just stay blocked so can't continue with invalid state
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// duplicates this memory map, creating a new identical memory map with all private mappings marked as copy on write
@@ -196,7 +310,7 @@ impl ProcessMap {
     /// * `base` - the base address of the region of memory to map in
     /// * `length` - the length of the region of memory to map in
     /// * `access_type` - how the region of memory to be mapped in will be accessed
-    pub fn map_in_area(&mut self, _arc_self: &Arc<Mutex<Self>>, base: usize, length: usize, access_type: MemoryProtection) -> Result<Vec<PhysicalAddress>> {
+    pub async fn map_in_area(&mut self, arc_self: &Arc<Mutex<Self>>, base: usize, length: usize, access_type: MemoryProtection) -> Result<Vec<PhysicalAddress>> {
         let region = super::ContiguousRegion::new(base, length).align_covering(crate::arch::PROPERTIES.page_size);
         let mut addrs = Vec::new();
 
@@ -211,9 +325,7 @@ impl ProcessMap {
                 }
 
                 addrs.push(page.addr);
-            } else
-            /*if !self.page_fault(arc_self, registers, addr, access_type)*/
-            {
+            } else if !self.page_fault(arc_self, addr, access_type).await {
                 // page couldn't be mapped in
                 return Err(Errno::BadAddress);
             }
@@ -267,148 +379,6 @@ impl Mapping {
     /// creates a new mapping of the specified kind with the specified region and protection
     pub fn new(kind: MappingKind, region: ContiguousRegion<usize>, protection: MemoryProtection) -> Self {
         Self { kind, region, protection }
-    }
-
-    /// pages this mapping into memory in the given page directory on a page fault
-    ///
-    /// # Arguments
-    /// * `page_directory` - the page directory that this mapping is mapped into
-    /// * `map` - a reference to the map that this mapping is mapped into
-    /// * `addr` - the virtual address that the page fault occurred at
-    /// * `access_type` - how the CPU tried to access the faulted page
-    fn fault_in(&self, registers: &mut Registers, page_directory: &mut impl PageDirectory, map: &Arc<Mutex<ProcessMap>>, addr: usize, access_type: MemoryProtection) -> Result<()> {
-        // align address to page size
-        let aligned_addr = (addr / PROPERTIES.page_size) * PROPERTIES.page_size;
-
-        let page = page_directory.get_page(aligned_addr);
-
-        // handle copy on write
-        if access_type & MemoryProtection::Write != MemoryProtection::None && let Some(page) = page.as_ref() && !page.writable && page.copy_on_write {
-            // allocate new page
-            let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
-                map: Arc::downgrade(map),
-                addr: aligned_addr,
-            }))?;
-            let old_page = unsafe { core::slice::from_raw_parts(aligned_addr as *const u8, PROPERTIES.page_size) };
-
-            // copy data from old page into new page
-            unsafe {
-                super::map_memory(page_directory, &[phys_addr], |slice| slice.copy_from_slice(old_page))?;
-            }
-
-            // map in new page
-            page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(crate::mm::PageFrame {
-                addr: phys_addr,
-                present: true,
-                writable: true,
-                executable: self.protection & MemoryProtection::Execute != MemoryProtection::None,
-                user_mode: true,
-                ..Default::default()
-            }))?;
-            crate::arch::PageDirectory::flush_page(aligned_addr);
-
-            // remove reference to old page, freeing it if applicable
-            crate::get_global_state().page_manager.lock().free_frame(page.addr, Some(map));
-        }
-
-        if page.is_none() {
-            // page needs to be mapped in, map it in
-            match &self.kind {
-                MappingKind::Anonymous => {
-                    // allocate and zero out new page
-                    let phys_addr = crate::get_global_state().page_manager.lock().alloc_frame(Some(super::FrameReference {
-                        map: Arc::downgrade(map),
-                        addr: aligned_addr,
-                    }))?;
-                    let mut page = crate::mm::PageFrame {
-                        addr: phys_addr,
-                        present: true,
-                        writable: true,
-                        executable: self.protection & MemoryProtection::Execute != MemoryProtection::None,
-                        user_mode: true,
-                        ..Default::default()
-                    };
-                    page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
-                    crate::arch::PageDirectory::flush_page(aligned_addr);
-
-                    // TODO: map page into kernel memory first to zero it out to prevent any multi-CPU race conditions
-                    unsafe {
-                        core::slice::from_raw_parts_mut(aligned_addr as *mut u8, PROPERTIES.page_size).fill(0);
-                    }
-
-                    // remap page as read-only if required
-                    if self.protection & MemoryProtection::Write == MemoryProtection::None {
-                        page.writable = false;
-                        page_directory.set_page(None::<&crate::arch::PageDirectory>, aligned_addr, Some(page))?;
-                        crate::arch::PageDirectory::flush_page(aligned_addr);
-                    }
-                }
-                MappingKind::File { file_handle, file_offset } => {
-                    debug!("copying in file at {aligned_addr:#x} - {file_offset:#x} ({:?})", self.region);
-
-                    // copy in file data
-                    let base: i64 = self.region.base.try_into().map_err(|_| Errno::ValueOverflow)?;
-                    let addr: i64 = aligned_addr.try_into().map_err(|_| Errno::ValueOverflow)?;
-                    let region_offset = addr - base;
-
-                    debug!("region_offset is {region_offset:?}");
-
-                    assert!(region_offset >= 0, "region_offset can't be less than zero");
-
-                    let map = map.clone();
-                    let protection = self.protection;
-
-                    crate::sched::block_until(registers, false, |_process, state| {
-                        file_handle.get_page(
-                            file_offset + region_offset,
-                            Box::new(move |res, blocked| {
-                                match res {
-                                    Some(addr) => {
-                                        // add a reference to this page, tying it to this map
-                                        crate::get_global_state().page_manager.lock().add_reference(addr, FrameReference {
-                                            map: Arc::downgrade(&map),
-                                            addr: aligned_addr,
-                                        });
-
-                                        if !blocked {
-                                            // this is Very Bad and depends on the fact that this is the last step in the faulting process, no other state is accessed after the map is re-locked
-                                            unsafe {
-                                                map.force_unlock();
-                                            }
-                                        }
-                                        map.lock()
-                                            .page_directory
-                                            .set_page(
-                                                None::<&crate::arch::PageDirectory>,
-                                                aligned_addr,
-                                                Some(crate::mm::PageFrame {
-                                                    addr,
-                                                    present: true,
-                                                    writable: protection & MemoryProtection::Write != MemoryProtection::None,
-                                                    executable: protection & MemoryProtection::Execute != MemoryProtection::None,
-                                                    user_mode: true,
-                                                    ..Default::default()
-                                                }),
-                                            )
-                                            .unwrap();
-
-                                        if !blocked {
-                                            crate::arch::PageDirectory::flush_page(aligned_addr);
-                                        }
-
-                                        state.bare_return(blocked);
-                                    }
-                                    None => error!("TODO: properly kill blocked page faulted process"), // this is fine since it'll just stay blocked so can't continue with invalid state
-                                }
-                            }),
-                        );
-                        Ok(())
-                    });
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// frees the page at the given address, removing it from the given page directory and allowing it to be allocated elsewhere if applicable

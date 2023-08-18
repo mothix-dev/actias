@@ -137,66 +137,57 @@ impl ProcessBuffer {
     }
 
     /// maps this buffer into memory and calls the given function with a slice over it
-    pub fn map_in<F: FnOnce(&[u8]) -> R, R>(&self, op: F) -> common::Result<R> {
-        let addrs = self.memory_map.lock().map_in_area(&self.memory_map, self.base, self.length, MemoryProtection::Read)?;
+    pub async fn map_in<F: FnOnce(&[u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+        let addrs = self.memory_map.lock().map_in_area(&self.memory_map, self.base, self.length, MemoryProtection::Read).await?;
 
-        unsafe {
-            if crate::sched::get_current_pid() == Ok(self.pid) {
-                // page directory most likely hasn't changed so just read directly from memory
-                let buf = core::slice::from_raw_parts(self.base as *mut u8, self.length);
-                Ok(op(buf))
-            } else {
-                crate::mm::map_memory(&mut self.memory_map.lock().page_directory, &addrs, |slice| {
-                    let aligned_addr = (self.base / PROPERTIES.page_size) * PROPERTIES.page_size;
-                    let offset = self.base - aligned_addr;
-
-                    op(&slice[offset..offset + self.length])
-                })
-                .map_err(Errno::from)
-            }
-        }
+        unsafe { self.map_in_addrs(addrs, |slice| op(slice)) }
     }
 
     /// maps this buffer into memory and calls the given function with a mutable slice over it
-    pub fn map_in_mut<F: FnOnce(&mut [u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+    pub async fn map_in_mut<F: FnOnce(&mut [u8]) -> R, R>(&self, op: F) -> common::Result<R> {
         let addrs = self
             .memory_map
             .lock()
-            .map_in_area(&self.memory_map, self.base, self.length, MemoryProtection::Read | MemoryProtection::Write)?;
+            .map_in_area(&self.memory_map, self.base, self.length, MemoryProtection::Read | MemoryProtection::Write)
+            .await?;
 
-        unsafe {
-            if crate::sched::get_current_pid() == Ok(self.pid) {
-                // TODO: check to make sure this is really the same process
-                let buf = core::slice::from_raw_parts_mut(self.base as *mut u8, self.length);
-                Ok(op(buf))
-            } else {
-                crate::mm::map_memory(&mut self.memory_map.lock().page_directory, &addrs, |slice| {
-                    let aligned_addr = (self.base / PROPERTIES.page_size) * PROPERTIES.page_size;
-                    let offset = self.base - aligned_addr;
+        unsafe { self.map_in_addrs(addrs, op) }
+    }
 
-                    op(&mut slice[offset..offset + self.length])
-                })
-                .map_err(Errno::from)
-            }
+    unsafe fn map_in_addrs<F: FnOnce(&mut [u8]) -> R, R>(&self, addrs: Vec<PhysicalAddress>, op: F) -> common::Result<R> {
+        if crate::sched::get_current_pid() == Ok(self.pid) {
+            // TODO: check to make sure this is really the same process
+            let buf = core::slice::from_raw_parts_mut(self.base as *mut u8, self.length);
+            Ok(op(buf))
+        } else {
+            crate::mm::map_memory(&mut self.memory_map.lock().page_directory, &addrs, |slice| {
+                let aligned_addr = (self.base / PROPERTIES.page_size) * PROPERTIES.page_size;
+                let offset = self.base - aligned_addr;
+
+                op(&mut slice[offset..offset + self.length])
+            })
+            .map_err(Errno::from)
         }
     }
 
     /// maps this buffer into memory and copies its contents into the given slice, returning the number of bytes copied
-    pub fn copy_into(&self, to_write: &mut [u8]) -> common::Result<usize> {
+    pub async fn copy_into(&self, to_write: &mut [u8]) -> common::Result<usize> {
         self.map_in(|buf| {
             let bytes_written = to_write.len().min(buf.len());
             to_write[..bytes_written].copy_from_slice(&buf[..bytes_written]);
             bytes_written
         })
+        .await
     }
 
     /// maps this buffer into memory and copies the contents of the given slice into it, returning the number of bytes copied
-    pub fn copy_from(&self, to_read: &[u8]) -> common::Result<usize> {
+    pub async fn copy_from(&self, to_read: &[u8]) -> common::Result<usize> {
         self.map_in_mut(|buf| {
             let bytes_read = to_read.len().min(buf.len());
             buf[..bytes_read].copy_from_slice(&to_read[..bytes_read]);
             bytes_read
         })
+        .await
     }
 }
 
@@ -208,9 +199,9 @@ pub enum Buffer {
 
 impl Buffer {
     /// maps this buffer into memory if applicable and copies its contents into the given slice, returning the number of bytes copied
-    pub fn copy_into(&self, to_write: &mut [u8]) -> common::Result<usize> {
+    pub async fn copy_into(&self, to_write: &mut [u8]) -> common::Result<usize> {
         match self {
-            Self::Process(buffer) => buffer.copy_into(to_write),
+            Self::Process(buffer) => buffer.copy_into(to_write).await,
             Self::Kernel(buffer) => {
                 let buffer = buffer.lock();
                 let bytes_written = to_write.len().min(buffer.len());
@@ -233,9 +224,9 @@ impl Buffer {
     }
 
     /// maps this buffer into memory if applicable and copies the contents of the given slice into it, returning the number of bytes copied
-    pub fn copy_from(&self, to_read: &[u8]) -> common::Result<usize> {
+    pub async fn copy_from(&self, to_read: &[u8]) -> common::Result<usize> {
         match self {
-            Self::Process(buffer) => buffer.copy_from(to_read),
+            Self::Process(buffer) => buffer.copy_from(to_read).await,
             Self::Kernel(buffer) => {
                 let mut buffer = buffer.lock();
                 let bytes_read = to_read.len().min(buffer.len());
@@ -257,9 +248,9 @@ impl Buffer {
     }
 
     /// maps this buffer into memory if required and calls the given function with a slice over it
-    pub fn map_in<F: FnOnce(&[u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+    pub async fn map_in<F: FnOnce(&[u8]) -> R, R>(&self, op: F) -> common::Result<R> {
         match self {
-            Self::Process(buffer) => buffer.map_in(op),
+            Self::Process(buffer) => buffer.map_in(op).await,
             Self::Kernel(buffer) => Ok(op(&buffer.lock())),
             Self::Page(phys_addr) => {
                 let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
@@ -269,14 +260,54 @@ impl Buffer {
     }
 
     /// maps this buffer into memory if required and calls the given function with a mutable slice over it
-    pub fn map_in_mut<F: FnOnce(&mut [u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+    pub async fn map_in_mut<F: FnOnce(&mut [u8]) -> R, R>(&self, op: F) -> common::Result<R> {
+        if let Self::Process(buffer) = self {
+            buffer.map_in_mut(op).await
+        } else {
+            self.map_in_immediate(op)
+        }
+    }
+
+    /// maps this buffer into memory if required and calls the given function with a mutable slice over it. if this buffer cannot be mapped in immediately, an error will be returned
+    pub fn map_in_immediate<F: FnOnce(&mut [u8]) -> R, R>(&self, op: F) -> common::Result<R> {
         match self {
-            Self::Process(buffer) => buffer.map_in_mut(op),
+            Self::Process(_) => Err(Errno::InvalidArgument),
             Self::Kernel(buffer) => Ok(op(&mut buffer.lock())),
             Self::Page(phys_addr) => {
                 let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
                 unsafe { crate::mm::map_memory(&mut page_directory, &[*phys_addr], op).map_err(Errno::from) }
             }
+        }
+    }
+
+    /// copies the contents of this buffer into the given buffer
+    pub async fn copy_into_buffer(&self, into: &Self) -> common::Result<usize> {
+        if let Self::Process(into) = into {
+            let addrs = into
+                .memory_map
+                .lock()
+                .map_in_area(&into.memory_map, into.base, into.length, MemoryProtection::Read | MemoryProtection::Write)
+                .await?;
+
+            self.map_in(|from| unsafe {
+                into.map_in_addrs(addrs, |to_write| {
+                    let bytes_written = to_write.len().min(from.len());
+                    to_write[..bytes_written].copy_from_slice(&from[..bytes_written]);
+                    bytes_written
+                })
+            })
+            .await
+            .and_then(|res| res)
+        } else {
+            self.map_in(|from| {
+                into.map_in_immediate(|to_write| {
+                    let bytes_written = to_write.len().min(from.len());
+                    to_write[..bytes_written].copy_from_slice(&from[..bytes_written]);
+                    bytes_written
+                })
+            })
+            .await
+            .and_then(|res| res)
         }
     }
 

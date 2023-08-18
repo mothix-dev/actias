@@ -116,19 +116,10 @@ fn close(fd: usize) -> Result<()> {
 }
 
 fn read(fd: usize, slice: &mut [u8]) -> Result<usize> {
-    // dirty hack to map the slice in before async page faults are functional
-    unsafe {
-        core::ptr::read_volatile(&slice[0]);
-        core::ptr::read_volatile(&slice[slice.len() - 1]);
-    }
     unsafe { syscall_3_args(common::Syscalls::Read, fd.try_into().unwrap(), slice.as_mut_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
 }
 
 fn write(fd: usize, slice: &[u8]) -> Result<usize> {
-    unsafe {
-        core::ptr::read_volatile(&slice[0]);
-        core::ptr::read_volatile(&slice[slice.len() - 1]);
-    }
     unsafe { syscall_3_args(common::Syscalls::Write, fd.try_into().unwrap(), slice.as_ptr() as u32, slice.len() as u32).map(|bytes| bytes.try_into().unwrap()) }
 }
 
@@ -141,10 +132,6 @@ fn write_message(message: &str) {
 }
 
 fn open(at: usize, path: &str, flags: OpenFlags) -> Result<usize> {
-    unsafe {
-        core::ptr::read_volatile(&path.as_bytes()[0]);
-        core::ptr::read_volatile(&path.as_bytes()[path.len() - 1]);
-    }
     unsafe {
         syscall_4_args(
             common::Syscalls::Open,

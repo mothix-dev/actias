@@ -6,7 +6,7 @@ use crate::{
     mm::PageDirectory,
     sched::{block_until, get_current_process},
 };
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use alloc::{string::ToString, sync::Arc, vec::Vec};
 use common::{Errno, FileStat, Result, Syscalls};
 use log::{error, trace};
 use spin::{Mutex, RwLock};
@@ -94,24 +94,31 @@ fn chdir(file_descriptor: usize) -> Result<()> {
 
 /// syscall handler for `chmod`
 fn chmod(registers: &mut Registers, file_descriptor: usize, permissions: usize) {
-    block_until(registers, true, |process, state| {
-        let permissions: u16 = permissions.try_into().map_err(|_| common::Errno::ValueOverflow)?;
-        process
-            .environment
-            .chmod(file_descriptor, permissions.into(), Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)));
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let permissions: u16 = match permissions.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+
+        let res = process.environment.chmod(file_descriptor, permissions.into()).await;
+        state.syscall_return(res.map(|_| 0));
     });
 }
 
 /// syscall handler for `chown`
 fn chown(registers: &mut Registers, file_descriptor: usize, owner: usize, group: usize) {
-    block_until(registers, true, |process, state| {
-        let owner = owner.try_into().map_err(|_| common::Errno::ValueOverflow)?;
-        let group = group.try_into().map_err(|_| common::Errno::ValueOverflow)?;
-        process
-            .environment
-            .chown(file_descriptor, owner, group, Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)));
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let owner = match owner.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+        let group = match group.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+
+        let res = process.environment.chown(file_descriptor, owner, group).await;
+        state.syscall_return(res.map(|_| 0));
     });
 }
 
@@ -142,24 +149,27 @@ fn open(registers: &mut Registers, at: usize, path: usize, path_len: usize, flag
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
-    block_until(registers, true, |process, state| {
-        let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
+    block_until(registers, true, |process, state| async move {
+        let flags: u32 = match flags.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+        let flags = match flags.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::InvalidArgument)),
+        };
 
-        buffer
-            .map_in(|buf| {
-                let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
-
-                FsEnvironment::open(
-                    process.environment.clone(),
-                    at,
-                    path.to_string(),
-                    flags.try_into().map_err(|_| common::Errno::InvalidArgument)?,
-                    Box::new(move |res, blocked| state.syscall_return(res, blocked)),
-                );
-
-                Ok(())
-            })
+        let path = match buffer
+            .map_in(|buf| core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument).map(|string| string.to_string()))
+            .await
             .and_then(|res| res)
+        {
+            Ok(path) => path,
+            Err(err) => return state.syscall_return(Err(err)),
+        };
+
+        let res = FsEnvironment::open(process.environment.clone(), at, path.to_string(), flags).await;
+        state.syscall_return(res);
     });
 }
 
@@ -174,26 +184,26 @@ fn read(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len: 
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
-    block_until(registers, true, |process, state| {
-        process
-            .environment
-            .read(file_descriptor, buffer.into(), Box::new(move |res, blocked| state.syscall_return(res, blocked)));
-
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let res = process.environment.read(file_descriptor, buffer.into()).await;
+        state.syscall_return(res);
     });
 }
 
 /// syscall handler for `seek`
 fn seek(registers: &mut Registers, file_descriptor: usize, offset: usize, kind: usize) {
-    block_until(registers, true, |process, state| {
-        let kind: u32 = kind.try_into().map_err(|_| common::Errno::ValueOverflow)?;
-        process.environment.seek(
-            file_descriptor,
-            (offset as isize) as i64,
-            kind.try_into().map_err(|_| common::Errno::InvalidArgument)?,
-            Box::new(move |res, blocked| state.syscall_return(res.map(|val| (val as isize) as usize), blocked)),
-        );
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let kind: u32 = match kind.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+        let kind = match kind.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::InvalidArgument)),
+        };
+
+        let res = process.environment.seek(file_descriptor, (offset as isize) as i64, kind).await;
+        state.syscall_return(res.map(|val| (val as isize) as usize));
     });
 }
 
@@ -205,31 +215,27 @@ fn stat(registers: &mut Registers, file_descriptor: usize, buf: usize) {
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
-    block_until(registers, true, |process, state| {
-        process.environment.stat(
-            file_descriptor,
-            Box::new(move |res, blocked| match res {
-                Ok(stat) => {
-                    let to_read = unsafe { core::slice::from_raw_parts(&stat as *const _ as *const u8, buf_len) };
-                    state.syscall_return(buffer.copy_from(to_read).map_err(Errno::from), blocked);
-                }
-                Err(err) => state.syscall_return(Err(err), blocked),
-            }),
-        );
-
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let res = process.environment.stat(file_descriptor).await;
+        state.syscall_return(match res {
+            Ok(stat) => {
+                let to_read = unsafe { core::slice::from_raw_parts(&stat as *const _ as *const u8, buf_len) };
+                buffer.copy_from(to_read).await.map_err(Errno::from)
+            }
+            Err(err) => Err(err),
+        });
     });
 }
 
 /// syscall handler for `truncate`
 fn truncate(registers: &mut Registers, file_descriptor: usize, len: usize) {
-    block_until(registers, true, |process, state| {
-        process.environment.truncate(
-            file_descriptor,
-            len.try_into().map_err(|_| common::Errno::ValueOverflow)?,
-            Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)),
-        );
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let len = match len.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+        let res = process.environment.truncate(file_descriptor, len).await;
+        state.syscall_return(res.map(|_| 0));
     });
 }
 
@@ -240,24 +246,27 @@ fn unlink(registers: &mut Registers, at: usize, path: usize, path_len: usize, fl
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
-    block_until(registers, true, |process, state| {
-        let flags: u32 = flags.try_into().map_err(|_| common::Errno::ValueOverflow)?;
+    block_until(registers, true, |process, state| async move {
+        let flags: u32 = match flags.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::ValueOverflow)),
+        };
+        let flags = match flags.try_into() {
+            Ok(val) => val,
+            Err(_) => return state.syscall_return(Err(Errno::InvalidArgument)),
+        };
 
-        buffer
-            .map_in(|buf| {
-                let path = core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument)?;
-
-                FsEnvironment::unlink(
-                    process.environment.clone(),
-                    at,
-                    path.to_string(),
-                    flags.try_into().map_err(|_| common::Errno::InvalidArgument)?,
-                    Box::new(move |res, blocked| state.syscall_return(res.map(|_| 0), blocked)),
-                );
-
-                Ok(())
-            })
+        let path = match buffer
+            .map_in(|buf| core::str::from_utf8(buf).map_err(|_| common::Errno::InvalidArgument).map(|string| string.to_string()))
+            .await
             .and_then(|res| res)
+        {
+            Ok(path) => path,
+            Err(err) => return state.syscall_return(Err(err)),
+        };
+
+        let res = FsEnvironment::unlink(process.environment.clone(), at, path.to_string(), flags).await;
+        state.syscall_return(res.map(|_| 0));
     });
 }
 
@@ -272,12 +281,9 @@ fn write(registers: &mut Registers, file_descriptor: usize, buf: usize, buf_len:
         Err(err) => return registers.syscall_return(Err(err as usize)),
     };
 
-    block_until(registers, true, |process, state| {
-        process
-            .environment
-            .write(file_descriptor, buffer.into(), Box::new(move |res, blocked| state.syscall_return(res, blocked)));
-
-        Ok(())
+    block_until(registers, true, |process, state| async move {
+        let res = process.environment.write(file_descriptor, buffer.into()).await;
+        state.syscall_return(res);
     });
 }
 

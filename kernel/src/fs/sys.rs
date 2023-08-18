@@ -7,9 +7,9 @@ use crate::{
     process::Buffer,
 };
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use async_trait::async_trait;
 use common::{Errno, FileKind, FileMode, FileStat, OpenFlags, Permissions, Result};
 use log::{log, Level};
-use spin::Mutex;
 
 pub struct SysFsRoot;
 
@@ -23,8 +23,9 @@ macro_rules! make_sysfs {
     ( $($name:tt => $type:ident),+ $(,)? ) => {
         const SYS_FS_FILES: [&'static str; count!($($name)*)] = [$($name ,)*];
 
+        #[async_trait]
         impl FileDescriptor for SysFsRoot {
-            fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
+            async fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
                 if flags & OpenFlags::Create != OpenFlags::None {
                     return Err(Errno::ReadOnlyFilesystem);
                 }
@@ -36,11 +37,8 @@ macro_rules! make_sysfs {
             }
 
 
-            fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-                let position: usize = match position.try_into() {
-                    Ok(position) => position,
-                    Err(_) => return callback(Err(Errno::ValueOverflow), false),
-                };
+            async fn read(&self, position: i64, buffer: Buffer) -> Result<usize> {
+                let position: usize = position.try_into().map_err(|_| Errno::ValueOverflow)?;
 
                 let mut data = Vec::new();
                 if position < SYS_FS_FILES.len() {
@@ -50,11 +48,10 @@ macro_rules! make_sysfs {
                     data.push(0);
                 }
 
-                let res = buffer.copy_from(&data);
-                callback(res, false);
+                buffer.copy_from(&data).await
             }
 
-            fn stat(&self) -> Result<FileStat> {
+            async fn stat(&self) -> Result<FileStat> {
                 Ok(FileStat {
                     mode: FileMode {
                         permissions: Permissions::OwnerRead
@@ -88,8 +85,9 @@ impl LogDir {
 
 const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
+#[async_trait]
 impl FileDescriptor for LogDir {
-    fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
+    async fn open(&self, name: String, flags: OpenFlags) -> Result<Arc<dyn FileDescriptor>> {
         if flags & OpenFlags::Create != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -104,11 +102,8 @@ impl FileDescriptor for LogDir {
         }
     }
 
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let position: usize = match position.try_into() {
-            Ok(position) => position,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
+    async fn read(&self, position: i64, buffer: Buffer) -> Result<usize> {
+        let position: usize = position.try_into().map_err(|_| Errno::ValueOverflow)?;
 
         let mut data = Vec::new();
         if position < 5 {
@@ -118,11 +113,10 @@ impl FileDescriptor for LogDir {
             data.push(0);
         }
 
-        let res = buffer.copy_from(&data);
-        callback(res, false);
+        buffer.copy_from(&data).await
     }
 
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerExecute | Permissions::GroupRead | Permissions::GroupExecute | Permissions::OtherRead | Permissions::OtherExecute,
@@ -144,8 +138,9 @@ impl Logger {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for Logger {
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerWrite | Permissions::GroupWrite | Permissions::OtherWrite,
@@ -155,15 +150,15 @@ impl FileDescriptor for Logger {
         })
     }
 
-    fn write(&self, _position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let res = buffer
+    async fn write(&self, _position: i64, buffer: Buffer) -> Result<usize> {
+        buffer
             .map_in(|slice| {
                 log!(target: "sysfs/log", self.level, "{}", core::str::from_utf8(slice).map_err(|_| Errno::InvalidArgument)?);
                 Ok(slice.len())
             })
+            .await
             .map_err(Errno::from)
-            .and_then(|err| err);
-        callback(res, false);
+            .and_then(|err| err)
     }
 }
 
@@ -176,8 +171,9 @@ impl MemFile {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for MemFile {
-    fn stat(&self) -> Result<FileStat> {
+    async fn stat(&self) -> Result<FileStat> {
         Ok(FileStat {
             mode: FileMode {
                 permissions: Permissions::OwnerRead | Permissions::OwnerWrite | Permissions::GroupRead | Permissions::GroupWrite,
@@ -187,59 +183,56 @@ impl FileDescriptor for MemFile {
         })
     }
 
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn read(&self, position: i64, buffer: Buffer) -> Result<usize> {
         let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
-        let addr: PhysicalAddress = match position.try_into() {
-            Ok(addr) => addr,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
-        let length_phys: PhysicalAddress = match buffer.len().try_into() {
-            Ok(length) => length,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
+        let addr: PhysicalAddress = position.try_into().map_err(|_| Errno::ValueOverflow)?;
+        let length_phys: PhysicalAddress = buffer.len().try_into().map_err(|_| Errno::ValueOverflow)?;
         let region = ContiguousRegion::new(addr, length_phys);
         let aligned_region = region.align_covering(PROPERTIES.page_size.try_into().unwrap());
         let addrs = (aligned_region.base..=(aligned_region.base + aligned_region.length)).step_by(PROPERTIES.page_size).collect::<Vec<_>>();
         let offset = (addr - aligned_region.base).try_into().unwrap();
-        let callback = Arc::new(Mutex::new(Some(callback)));
 
-        let res = unsafe {
-            crate::mm::map_memory(&mut page_directory, &addrs, |slice| buffer.copy_from(&slice[offset..offset + slice.len()]))
+        buffer
+            .map_in_mut(|to_write| unsafe {
+                crate::mm::map_memory(&mut page_directory, &addrs, |from| {
+                    let from = &from[offset..];
+
+                    let bytes_written = to_write.len().min(from.len());
+                    to_write[..bytes_written].copy_from_slice(&from[..bytes_written]);
+                    bytes_written
+                })
                 .map_err(Errno::from)
-                .and_then(|res| res)
-        };
-        (callback.lock().take().unwrap())(res, false);
+            })
+            .await
+            .and_then(|res| res)
     }
 
-    fn write(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
+    async fn write(&self, position: i64, buffer: Buffer) -> Result<usize> {
         let mut page_directory = crate::mm::LockedPageDir(crate::get_global_state().page_directory.clone());
-        let addr: PhysicalAddress = match position.try_into() {
-            Ok(addr) => addr,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
-        let length_phys: PhysicalAddress = match buffer.len().try_into() {
-            Ok(length) => length,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
+        let addr: PhysicalAddress = position.try_into().map_err(|_| Errno::ValueOverflow)?;
+        let length_phys: PhysicalAddress = buffer.len().try_into().map_err(|_| Errno::ValueOverflow)?;
         let region = ContiguousRegion::new(addr, length_phys);
         let aligned_region = region.align_covering(PROPERTIES.page_size.try_into().unwrap());
         let addrs = (aligned_region.base..=(aligned_region.base + aligned_region.length)).step_by(PROPERTIES.page_size).collect::<Vec<_>>();
         let offset = (addr - aligned_region.base).try_into().unwrap();
-        let callback = Arc::new(Mutex::new(Some(callback)));
 
-        let res = unsafe {
-            crate::mm::map_memory(&mut page_directory, &addrs, |slice| {
-                let length = slice.len();
-                buffer.copy_into(&mut slice[offset..offset + length])
+        buffer
+            .map_in(|from| unsafe {
+                crate::mm::map_memory(&mut page_directory, &addrs, |to_write| {
+                    let to_write = &mut to_write[offset..];
+
+                    let bytes_written = to_write.len().min(from.len());
+                    to_write[..bytes_written].copy_from_slice(&from[..bytes_written]);
+                    bytes_written
+                })
+                .map_err(Errno::from)
             })
-            .map_err(Errno::from)
+            .await
             .and_then(|res| res)
-        };
-        (callback.lock().take().unwrap())(res, false);
     }
 
-    fn get_page(&self, position: i64, callback: Box<dyn FnOnce(Option<crate::arch::PhysicalAddress>, bool)>) {
+    async fn get_page(&self, position: i64) -> Option<PhysicalAddress> {
         // TODO: restrict this to only reserved areas in the memory map
-        callback(position.try_into().ok(), false);
+        position.try_into().ok()
     }
 }

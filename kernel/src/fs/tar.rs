@@ -10,6 +10,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use async_trait::async_trait;
 use common::{Errno, OpenFlags};
 use core::{ffi::CStr, fmt, mem::size_of, str};
 use generic_array::{
@@ -443,19 +444,15 @@ impl Clone for TarFile {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for TarFile {
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        match position.try_into() {
-            Ok(position) => {
-                let end: usize = position + buffer.len();
-                let res = buffer.copy_from(&self.data[position..end.min(self.data.len())]);
-                callback(res, false);
-            }
-            Err(_) => callback(Err(Errno::ValueOverflow), false),
-        }
+    async fn read(&self, position: i64, buffer: Buffer) -> common::Result<usize> {
+        let position = position.try_into().map_err(|_| Errno::ValueOverflow)?;
+        let end: usize = position + buffer.len();
+        buffer.copy_from(&self.data[position..end.min(self.data.len())]).await
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
+    async fn stat(&self) -> common::Result<common::FileStat> {
         (&self.header).try_into()
     }
 }
@@ -487,8 +484,9 @@ impl Clone for TarDirectory {
     }
 }
 
+#[async_trait]
 impl FileDescriptor for TarDirectory {
-    fn open(&self, name: String, flags: OpenFlags) -> common::Result<Arc<dyn FileDescriptor>> {
+    async fn open(&self, name: String, flags: OpenFlags) -> common::Result<Arc<dyn FileDescriptor>> {
         if flags & (OpenFlags::Write | OpenFlags::Create) != OpenFlags::None {
             return Err(Errno::ReadOnlyFilesystem);
         }
@@ -505,11 +503,8 @@ impl FileDescriptor for TarDirectory {
         Err(Errno::NoSuchFileOrDir)
     }
 
-    fn read(&self, position: i64, buffer: Buffer, callback: Box<dyn super::RequestCallback<usize>>) {
-        let position: usize = match position.try_into() {
-            Ok(position) => position,
-            Err(_) => return callback(Err(Errno::ValueOverflow), false),
-        };
+    async fn read(&self, position: i64, buffer: Buffer) -> common::Result<usize> {
+        let position: usize = position.try_into().map_err(|_| Errno::ValueOverflow)?;
 
         let mut data = Vec::new();
 
@@ -520,11 +515,10 @@ impl FileDescriptor for TarDirectory {
             data.push(0);
         }
 
-        let res = buffer.copy_from(&data);
-        callback(res, false);
+        buffer.copy_from(&data).await
     }
 
-    fn stat(&self) -> common::Result<common::FileStat> {
+    async fn stat(&self) -> common::Result<common::FileStat> {
         if let Some(header) = self.header.as_ref() {
             header.try_into()
         } else {

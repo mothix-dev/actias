@@ -1,8 +1,9 @@
 //! userspace filesystem support
 
-use super::{HandleNum, RequestCallback};
-use crate::{arch::PhysicalAddress, array::ConsistentIndexArray, process::Buffer};
+use super::HandleNum;
+use crate::{arch::PhysicalAddress, array::ConsistentIndexArray, futures::Callback, process::Buffer};
 use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+use async_trait::async_trait;
 use common::{Errno, EventKind, EventResponse, FileStat, FilesystemEvent, GroupId, OpenFlags, Permissions, ResponseData, UnlinkFlags, UserId};
 use core::mem::size_of;
 use crossbeam::queue::SegQueue;
@@ -10,19 +11,19 @@ use log::debug;
 use spin::Mutex;
 
 enum CallbackKind {
-    NoValue(Box<dyn RequestCallback<()>>),
-    Handle(Box<dyn RequestCallback<HandleNum>>),
-    CopyFrom(Buffer, Box<dyn RequestCallback<usize>>),
-    CopyTo(Buffer, Box<dyn RequestCallback<usize>>),
+    NoValue(Arc<Callback<common::Result<()>>>),
+    Handle(Arc<Callback<common::Result<HandleNum>>>),
+    CopyFrom(Buffer, Arc<Callback<common::Result<usize>>>),
+    CopyTo(Buffer, Arc<Callback<common::Result<usize>>>),
 }
 
 impl CallbackKind {
-    fn callback_error(self, error: Errno, blocked: bool) {
+    fn callback_error(self, error: Errno) {
         match self {
-            Self::NoValue(callback) => callback(Err(error), blocked),
-            Self::Handle(callback) => callback(Err(error), blocked),
-            Self::CopyFrom(_, callback) => callback(Err(error), blocked),
-            Self::CopyTo(_, callback) => callback(Err(error), blocked),
+            Self::NoValue(callback) => callback.call(Err(error)),
+            Self::Handle(callback) => callback.call(Err(error)),
+            Self::CopyFrom(_, callback) => callback.call(Err(error)),
+            Self::CopyTo(_, callback) => callback.call(Err(error)),
         }
     }
 }
@@ -36,7 +37,7 @@ pub struct UserspaceFs {
     send_queue: SegQueue<Vec<u8>>,
 
     /// queue of tasks that are blocked waiting for events
-    waiting_queue: SegQueue<(Buffer, Box<dyn RequestCallback<usize>>)>,
+    waiting_queue: SegQueue<(Buffer, Arc<Callback<common::Result<usize>>>)>,
 }
 
 unsafe impl Send for UserspaceFs {}
@@ -69,12 +70,13 @@ impl UserspaceFs {
     }
 
     /// queues a callback reading filesystem events, or calls it immediately if there are queued events
-    pub fn wait_for_event(&self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+    pub async fn wait_for_event(&self, buffer: Buffer) -> common::Result<usize> {
         if let Some(data) = self.send_queue.pop() {
-            let res = buffer.copy_from(&data);
-            callback(res, false);
+            buffer.copy_from(&data).await
         } else {
-            self.waiting_queue.push((buffer, callback));
+            let callback = Arc::new(Callback::new());
+            self.waiting_queue.push((buffer, callback.clone()));
+            (&*callback).await
         }
     }
 
@@ -86,18 +88,18 @@ impl UserspaceFs {
 
         if let Some(callback) = callback {
             match response.data {
-                ResponseData::Error { error } => callback.callback_error(error, true),
+                ResponseData::Error { error } => callback.callback_error(error),
                 ResponseData::Handle { handle } => match callback {
-                    CallbackKind::Handle(callback) => callback(Ok(handle), true),
-                    _ => callback.callback_error(Errno::TryAgain, true),
+                    CallbackKind::Handle(callback) => callback.call(Ok(handle)),
+                    _ => callback.callback_error(Errno::TryAgain),
                 },
                 ResponseData::None => {
                     if matches!(callback, CallbackKind::CopyFrom(_, _) | CallbackKind::CopyTo(_, _)) {
                         return Ok(Some(ResponseInProgress { callback }));
                     } else {
                         match callback {
-                            CallbackKind::NoValue(callback) => callback(Ok(()), true),
-                            _ => callback.callback_error(Errno::TryAgain, true),
+                            CallbackKind::NoValue(callback) => callback.call(Ok(())),
+                            _ => callback.callback_error(Errno::TryAgain),
                         }
                     }
                 }
@@ -109,7 +111,7 @@ impl UserspaceFs {
         }
     }
 
-    fn make_request(&self, handle: HandleNum, kind: EventKind, string_option: Option<String>, callback: Option<CallbackKind>) {
+    async fn make_request(&self, handle: HandleNum, kind: EventKind, string_option: Option<String>, callback: Option<CallbackKind>) {
         // TODO: handle this sanely
         let id = callback
             .map(|callback| self.in_progress.lock().add(callback).expect("ran out of memory while trying to queue new filesystem event"))
@@ -122,13 +124,13 @@ impl UserspaceFs {
 
         let data = match Self::make_data(event, string_option) {
             Ok(data) => data,
-            Err(_) => return self.in_progress.lock().remove(id).unwrap().callback_error(Errno::OutOfMemory, false),
+            Err(_) => return self.in_progress.lock().remove(id).unwrap().callback_error(Errno::OutOfMemory),
         };
 
         // send the event to a waiting task, or just push it onto the queue if there are none
         if let Some((buffer, callback)) = self.waiting_queue.pop() {
-            let res = buffer.copy_from(&data);
-            callback(res, true);
+            let res = buffer.copy_from(&data).await;
+            callback.call(res);
         } else {
             self.send_queue.push(data);
         }
@@ -141,70 +143,87 @@ impl Default for UserspaceFs {
     }
 }
 
+#[async_trait]
 impl super::Filesystem for UserspaceFs {
     fn get_root_dir(&self) -> super::HandleNum {
         0
     }
 
-    fn chmod(&self, handle: HandleNum, permissions: Permissions, callback: Box<dyn RequestCallback<()>>) {
-        self.make_request(handle, EventKind::Chmod { permissions }, None, Some(CallbackKind::NoValue(callback)));
+    async fn chmod(&self, handle: HandleNum, permissions: Permissions) -> common::Result<()> {
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Chmod { permissions }, None, Some(CallbackKind::NoValue(callback.clone()))).await;
+        (&*callback).await
     }
 
-    fn chown(&self, handle: HandleNum, owner: UserId, group: GroupId, callback: Box<dyn RequestCallback<()>>) {
-        self.make_request(handle, EventKind::Chown { owner, group }, None, Some(CallbackKind::NoValue(callback)));
+    async fn chown(&self, handle: HandleNum, owner: UserId, group: GroupId) -> common::Result<()> {
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Chown { owner, group }, None, Some(CallbackKind::NoValue(callback.clone()))).await;
+        (&*callback).await
     }
 
-    fn close(&self, handle: HandleNum) {
+    async fn close(&self, handle: HandleNum) {
         if handle != 0 {
-            self.make_request(handle, EventKind::Close, None, None);
+            self.make_request(handle, EventKind::Close, None, None).await;
         }
     }
 
-    fn open(&self, handle: HandleNum, name: String, flags: OpenFlags, callback: Box<dyn RequestCallback<HandleNum>>) {
-        self.make_request(handle, EventKind::Open { name_length: name.len(), flags }, Some(name), Some(CallbackKind::Handle(callback)));
+    async fn open(&self, handle: HandleNum, name: String, flags: OpenFlags) -> common::Result<HandleNum> {
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Open { name_length: name.len(), flags }, Some(name), Some(CallbackKind::Handle(callback.clone())))
+            .await;
+        (&*callback).await
     }
 
-    fn read(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
-        self.make_request(handle, EventKind::Read { position, length: buffer.len() }, None, Some(CallbackKind::CopyTo(buffer, callback)));
+    async fn read(&self, handle: HandleNum, position: i64, buffer: Buffer) -> common::Result<usize> {
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Read { position, length: buffer.len() }, None, Some(CallbackKind::CopyTo(buffer, callback.clone())))
+            .await;
+        (&*callback).await
     }
 
-    fn stat(&self, handle: HandleNum, callback: Box<dyn RequestCallback<FileStat>>) {
+    async fn stat(&self, handle: HandleNum) -> common::Result<FileStat> {
         let buffer = Arc::new(Mutex::new(vec![0; size_of::<FileStat>()].into_boxed_slice()));
 
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Stat, None, Some(CallbackKind::CopyTo(buffer.clone().into(), callback.clone())))
+            .await;
+
+        let bytes_read = (&*callback).await?;
+
+        if bytes_read < size_of::<FileStat>() {
+            Err(Errno::TryAgain)
+        } else {
+            // TODO: validate fields
+            Ok(unsafe { *(buffer.lock().as_ptr() as *const FileStat) })
+        }
+    }
+
+    async fn truncate(&self, handle: HandleNum, length: i64) -> common::Result<()> {
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Truncate { length }, None, Some(CallbackKind::NoValue(callback.clone()))).await;
+        (&*callback).await
+    }
+
+    async fn unlink(&self, handle: HandleNum, name: String, flags: UnlinkFlags) -> common::Result<()> {
+        let callback = Arc::new(Callback::new());
+        self.make_request(handle, EventKind::Unlink { name_length: name.len(), flags }, Some(name), Some(CallbackKind::NoValue(callback.clone())))
+            .await;
+        (&*callback).await
+    }
+
+    async fn write(&self, handle: HandleNum, position: i64, buffer: Buffer) -> common::Result<usize> {
+        let callback = Arc::new(Callback::new());
         self.make_request(
             handle,
-            EventKind::Stat,
+            EventKind::Write { position, length: buffer.len() },
             None,
-            Some(CallbackKind::CopyTo(
-                buffer.clone().into(),
-                Box::new(move |res, blocked| match res {
-                    Ok(bytes_read) => {
-                        if bytes_read < size_of::<FileStat>() {
-                            callback(Err(Errno::TryAgain), blocked);
-                        } else {
-                            let stat = unsafe { *(buffer.lock().as_ptr() as *const FileStat) };
-                            callback(Ok(stat), blocked);
-                        }
-                    }
-                    Err(err) => callback(Err(err), blocked),
-                }),
-            )),
-        );
+            Some(CallbackKind::CopyFrom(buffer, callback.clone())),
+        )
+        .await;
+        (&*callback).await
     }
 
-    fn truncate(&self, handle: HandleNum, length: i64, callback: Box<dyn RequestCallback<()>>) {
-        self.make_request(handle, EventKind::Truncate { length }, None, Some(CallbackKind::NoValue(callback)));
-    }
-
-    fn unlink(&self, handle: HandleNum, name: String, flags: UnlinkFlags, callback: Box<dyn RequestCallback<()>>) {
-        self.make_request(handle, EventKind::Unlink { name_length: name.len(), flags }, Some(name), Some(CallbackKind::NoValue(callback)));
-    }
-
-    fn write(&self, handle: HandleNum, position: i64, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
-        self.make_request(handle, EventKind::Write { position, length: buffer.len() }, None, Some(CallbackKind::CopyFrom(buffer, callback)));
-    }
-
-    fn get_page(&self, _handle: super::HandleNum, _offset: i64, _callback: Box<dyn FnOnce(Option<PhysicalAddress>, bool)>) {
+    async fn get_page(&self, _handle: super::HandleNum, _offset: i64) -> Option<PhysicalAddress> {
         todo!();
     }
 }
@@ -214,25 +233,25 @@ pub struct ResponseInProgress {
 }
 
 impl ResponseInProgress {
-    pub fn write(self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+    pub async fn write(self, buffer: Buffer) -> common::Result<usize> {
         match self.callback {
-            CallbackKind::CopyTo(target_buffer, target_callback) => {
-                let res = target_buffer.map_in_mut(|slice| buffer.copy_into(slice)).and_then(|res| res);
-                callback(res, false);
-                target_callback(res, true);
+            CallbackKind::CopyTo(target_buffer, callback) => {
+                let res = buffer.copy_into_buffer(&target_buffer).await;
+                callback.call(res);
+                res
             }
-            _ => callback(Err(Errno::TryAgain), true),
+            _ => Err(Errno::TryAgain),
         }
     }
 
-    pub fn read(self, buffer: Buffer, callback: Box<dyn RequestCallback<usize>>) {
+    pub async fn read(self, buffer: Buffer) -> common::Result<usize> {
         match self.callback {
-            CallbackKind::CopyFrom(target_buffer, target_callback) => {
-                let res = buffer.map_in_mut(|slice| target_buffer.copy_into(slice)).and_then(|res| res);
-                callback(res, false);
-                target_callback(res, true);
+            CallbackKind::CopyFrom(target_buffer, callback) => {
+                let res = target_buffer.copy_into_buffer(&buffer).await;
+                callback.call(res);
+                res
             }
-            _ => callback(Err(Errno::TryAgain), true),
+            _ => Err(Errno::TryAgain),
         }
     }
 }

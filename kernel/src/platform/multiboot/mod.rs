@@ -7,7 +7,7 @@ use crate::{
         interrupts::InterruptRegisters,
         PhysicalAddress, PROPERTIES,
     },
-    mm::MemoryRegion,
+    mm::{MemoryRegion, PageDirectory},
     platform::bootloader::ModuleEntry,
 };
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec};
@@ -243,14 +243,19 @@ pub fn kmain() {
                         unsafe {
                             asm!("sti");
                         }
-                        let memory_map = task.lock().memory_map.clone();
-                        if memory_map.lock().page_fault(&memory_map, regs, fault_addr, error_code.into()) {
-                            return;
-                        } else {
-                            let mut task = task.lock();
-                            debug!("page fault in process {}", task.pid.unwrap_or_default());
-                            task.exec_mode = crate::sched::ExecMode::Exited;
-                        }
+                        crate::sched::block_until(regs, false, |_, state| async move {
+                            let memory_map = task.lock().memory_map.clone();
+                            if memory_map.lock().page_fault(&memory_map, fault_addr, error_code.into()).await {
+                                if !state.must_requeue() {
+                                    crate::arch::PageDirectory::flush_page((fault_addr / PROPERTIES.page_size) * PROPERTIES.page_size);
+                                }
+                                state.bare_return();
+                            } else {
+                                let mut task = task.lock();
+                                debug!("page fault in process {}", task.pid.unwrap_or_default());
+                                task.exec_mode = crate::sched::ExecMode::Exited;
+                            }
+                        });
                     }
 
                     scheduler.context_switch(regs);
@@ -316,94 +321,73 @@ pub fn kmain() {
             .write()
             .insert("procfs".to_string(), Arc::new(crate::fs::kernel::KernelFs::new(Arc::new(crate::fs::proc::ProcRoot))));
 
-        if let Some(region) = initrd_region {
-            let filesystem = crate::fs::tar::parse_tar(region);
-            environment
-                .namespace
-                .write()
-                .insert("initrd".to_string(), Arc::new(crate::fs::kernel::KernelFs::new(Arc::new(filesystem))));
-
-            crate::fs::FsEnvironment::open(
-                environment.clone(),
-                0,
-                "/../initrd".to_string(),
-                common::OpenFlags::Read | common::OpenFlags::AtCWD,
-                Box::new(move |res, _| assert!(res == Ok(0))),
-            );
-            environment.chroot(0).unwrap();
-            environment.chdir(0).unwrap();
-            environment.close(0).unwrap();
-        }
-
-        crate::fs::FsEnvironment::open(
-            environment.clone(),
-            0,
-            "/init".to_string(),
-            common::OpenFlags::Read | common::OpenFlags::AtCWD,
-            Box::new(move |res, _| assert!(res == Ok(0))),
-        );
-        crate::fs::FsEnvironment::open(
-            environment.clone(),
-            0,
-            "/../sysfs/log/info".to_string(),
-            common::OpenFlags::Write | common::OpenFlags::AtCWD,
-            Box::new(move |res, _| assert!(res == Ok(1))),
-        );
-        crate::fs::FsEnvironment::open(
-            environment.clone(),
-            0,
-            "/../sysfs/log/error".to_string(),
-            common::OpenFlags::Write | common::OpenFlags::AtCWD,
-            Box::new(move |res, _| assert!(res == Ok(2))),
-        );
-
-        crate::exec::exec(
-            environment.get_open_file(0).unwrap(),
-            Box::new(move |res, _blocked| {
-                let (arc_map, entry) = res.unwrap();
-
-                let global_state = crate::get_global_state();
-                let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
-                let stack_size = 0x1000 * 4;
-                let split_addr = crate::arch::PROPERTIES.kernel_region.base;
-
-                {
-                    let mut map = arc_map.lock();
-                    map.add_mapping(
-                        &arc_map,
-                        crate::mm::Mapping::new(
-                            crate::mm::MappingKind::Anonymous,
-                            crate::mm::ContiguousRegion::new(split_addr - stack_size, stack_size),
-                            crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
-                        ),
-                        false,
-                        true,
-                    )
-                    .unwrap();
-                }
-
-                let task_a = Arc::new(Mutex::new(crate::sched::Task {
-                    registers: InterruptRegisters::from_fn(entry as *const _, stack_ptr, true),
-                    niceness: 0,
-                    exec_mode: crate::sched::ExecMode::Running,
-                    cpu_time: 0,
-                    memory_map: arc_map.clone(),
-                    pid: None,
-                }));
-                let pid_a = global_state
-                    .process_table
+        crate::futures::AsyncTask::new(Box::pin(async move {
+            if let Some(region) = initrd_region {
+                let filesystem = crate::fs::tar::parse_tar(region);
+                environment
+                    .namespace
                     .write()
-                    .insert(crate::process::Process {
-                        threads: spin::RwLock::new(vec![task_a.clone()]),
-                        memory_map: arc_map,
-                        environment,
-                        filesystem: None.into(),
-                    })
-                    .unwrap();
-                task_a.lock().pid = Some(pid_a);
-                scheduler.push_task(task_a);
-            }),
-        );
+                    .insert("initrd".to_string(), Arc::new(crate::fs::kernel::KernelFs::new(Arc::new(filesystem))));
+
+                let res = crate::fs::FsEnvironment::open(environment.clone(), 0, "/../initrd".to_string(), common::OpenFlags::Read | common::OpenFlags::AtCWD).await;
+                assert!(res == Ok(0));
+                environment.chroot(0).unwrap();
+                environment.chdir(0).unwrap();
+                environment.close(0).unwrap();
+            }
+
+            let res = crate::fs::FsEnvironment::open(environment.clone(), 0, "/init".to_string(), common::OpenFlags::Read | common::OpenFlags::AtCWD).await;
+            assert!(res == Ok(0));
+
+            let res = crate::fs::FsEnvironment::open(environment.clone(), 0, "/../sysfs/log/info".to_string(), common::OpenFlags::Write | common::OpenFlags::AtCWD).await;
+            assert!(res == Ok(1));
+
+            let res = crate::fs::FsEnvironment::open(environment.clone(), 0, "/../sysfs/log/error".to_string(), common::OpenFlags::Write | common::OpenFlags::AtCWD).await;
+            assert!(res == Ok(2));
+
+            let (arc_map, entry) = crate::exec::exec(environment.get_open_file(0).unwrap()).await.unwrap();
+
+            let global_state = crate::get_global_state();
+            let stack_ptr = (PROPERTIES.kernel_region.base - 1) as *mut u8;
+            let stack_size = 0x1000 * 4;
+            let split_addr = crate::arch::PROPERTIES.kernel_region.base;
+
+            {
+                let mut map = arc_map.lock();
+                map.add_mapping(
+                    &arc_map,
+                    crate::mm::Mapping::new(
+                        crate::mm::MappingKind::Anonymous,
+                        crate::mm::ContiguousRegion::new(split_addr - stack_size, stack_size),
+                        crate::mm::MemoryProtection::Read | crate::mm::MemoryProtection::Write,
+                    ),
+                    false,
+                    true,
+                )
+                .unwrap();
+            }
+
+            let task_a = Arc::new(Mutex::new(crate::sched::Task {
+                registers: InterruptRegisters::from_fn(entry as *const _, stack_ptr, true),
+                niceness: 0,
+                exec_mode: crate::sched::ExecMode::Running,
+                cpu_time: 0,
+                memory_map: arc_map.clone(),
+                pid: None,
+            }));
+            let pid_a = global_state
+                .process_table
+                .write()
+                .insert(crate::process::Process {
+                    threads: spin::RwLock::new(vec![task_a.clone()]),
+                    memory_map: arc_map,
+                    environment,
+                    filesystem: None.into(),
+                })
+                .unwrap();
+            task_a.lock().pid = Some(pid_a);
+            scheduler.push_task(task_a);
+        }));
 
         //crate::fs::print_tree(&environment.get_fs_list());
     }

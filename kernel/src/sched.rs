@@ -3,8 +3,8 @@
 
 use crate::{
     arch::{bsp::RegisterContext, PROPERTIES},
+    futures::AsyncTask,
     mm::{PageDirTracker, PageDirectory},
-    process::Process,
     timer::{Timeout, Timer},
 };
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
@@ -15,6 +15,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use crossbeam::queue::SegQueue;
+use futures::Future;
 use log::trace;
 use spin::Mutex;
 
@@ -315,8 +316,7 @@ pub extern "C" fn wait_around() -> ! {
 pub struct BlockedState {
     current_task: Arc<Mutex<Task>>,
     scheduler: Arc<Scheduler>,
-    blocked_flag: Arc<AtomicBool>,
-    was_blocked: bool,
+    must_requeue: Arc<AtomicBool>,
 }
 
 impl BlockedState {
@@ -326,38 +326,41 @@ impl BlockedState {
     }
 
     /// returns the given value to the task and resumes execution
-    pub fn syscall_return(self, result: common::Result<usize>, blocked: bool) {
-        if self.blocked_flag.swap(false, core::sync::atomic::Ordering::SeqCst) {
-            {
-                let mut task_guard = self.current_task.lock();
-                task_guard.exec_mode = ExecMode::Running;
-                task_guard.registers.syscall_return(result.map_err(|e| e as usize));
+    pub fn syscall_return(self, result: common::Result<usize>) {
+        {
+            let mut task_guard = self.current_task.lock();
+            if task_guard.exec_mode == ExecMode::Running {
+                return;
             }
 
-            // if this request blocked, push the task back onto the queue so it'll execute Soon™
-            if blocked {
-                self.scheduler.push_task(self.current_task);
-            }
+            task_guard.exec_mode = ExecMode::Running;
+            task_guard.registers.syscall_return(result.map_err(|e| e as usize));
+        }
+
+        // if this request blocked, push the task back onto the queue so it'll execute Soon™
+        if self.must_requeue.load(Ordering::SeqCst) {
+            self.scheduler.push_task(self.current_task);
         }
     }
 
     /// resumes execution of the task without returning a value
-    pub fn bare_return(self, blocked: bool) {
-        if self.blocked_flag.swap(false, core::sync::atomic::Ordering::SeqCst) {
-            self.current_task.lock().exec_mode = ExecMode::Running;
-
-            // if this request blocked, push the task back onto the queue so it'll execute Soon™
-            if blocked {
-                self.scheduler.push_task(self.current_task);
+    pub fn bare_return(self) {
+        {
+            let mut task_guard = self.current_task.lock();
+            if task_guard.exec_mode == ExecMode::Running {
+                return;
             }
 
-            self.blocked_flag.store(false, core::sync::atomic::Ordering::SeqCst);
+            task_guard.exec_mode = ExecMode::Running;
+        }
+
+        if self.must_requeue.load(Ordering::SeqCst) {
+            self.scheduler.push_task(self.current_task);
         }
     }
 
-    /// gets whether the task was blocked beforehand
-    pub fn was_blocked(&self) -> bool {
-        self.was_blocked
+    pub fn must_requeue(&self) -> bool {
+        self.must_requeue.load(Ordering::SeqCst)
     }
 }
 
@@ -368,7 +371,7 @@ impl BlockedState {
 /// * `callback` - a callback that's ran to set up the request, is given a reference to the process for convenience and a state that's used to send the result back to the process when the operation completes.
 /// if the callback returns an error, that error will be passed back to the process so it can immediately return back as normal
 #[allow(clippy::clone_on_copy)]
-pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl FnOnce(&Process, BlockedState) -> common::Result<()>) {
+pub fn block_until<F: Future<Output = ()> + Send + 'static>(registers: &mut Registers, is_syscall: bool, callback: impl FnOnce(ProcessGuard<'static>, BlockedState) -> F) {
     let global_state = crate::get_global_state();
 
     // TODO: detect current CPU
@@ -378,7 +381,6 @@ pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl F
         Some(task) => task,
         None => unreachable!(),
     };
-    current_task.lock().registers = registers.clone();
 
     let pid = match current_task.lock().pid {
         Some(pid) => pid,
@@ -390,28 +392,35 @@ pub fn block_until(registers: &mut Registers, is_syscall: bool, callback: impl F
         }
     };
 
-    if let Some(process) = global_state.process_table.read().get(pid) {
-        // set the process as blocked so if the write call blocks it won't keep executing
-        let was_blocked = core::mem::replace(&mut current_task.lock().exec_mode, ExecMode::Blocked) == ExecMode::Blocked;
+    if global_state.process_table.read().contains(pid) {
+        {
+            let mut current_task = current_task.lock();
 
-        // keeps track of whether the request blocks or not so that
-        let blocked_flag = Arc::new(AtomicBool::new(true));
+            // set the process as blocked so if the write call blocks it won't keep executing
+            current_task.exec_mode = ExecMode::Blocked;
 
-        if let Err(err) = callback(process, BlockedState {
-            current_task: current_task.clone(),
-            scheduler: scheduler.clone(),
-            blocked_flag: blocked_flag.clone(),
-            was_blocked,
-        }) {
-            current_task.lock().exec_mode = ExecMode::Running;
-            if is_syscall {
-                registers.syscall_return(Err(err as usize));
-            }
-            return;
+            // save the current registers since the only way to update them is thru the task struct
+            current_task.registers = registers.clone();
         }
 
+        let must_requeue = Arc::new(AtomicBool::new(false));
+
+        AsyncTask::new(Box::pin(callback(
+            ProcessGuard {
+                guard: global_state.process_table.read(),
+                pid,
+            },
+            BlockedState {
+                current_task: current_task.clone(),
+                scheduler: scheduler.clone(),
+                must_requeue: must_requeue.clone(),
+            },
+        )));
+
+        must_requeue.store(true, Ordering::SeqCst);
+
         // if the request didn't block, simply load the latest version of the task's registers and return as normal
-        if !blocked_flag.load(core::sync::atomic::Ordering::SeqCst) {
+        if current_task.lock().exec_mode == ExecMode::Running {
             *registers = current_task.lock().registers;
         } else {
             scheduler.context_switch(registers);
@@ -442,7 +451,7 @@ pub fn get_current_pid() -> Result<usize> {
 
     let current_task = match scheduler.get_current_task() {
         Some(task) => task,
-        None => unreachable!(),
+        None => return Err(Errno::NoSuchProcess),
     };
 
     let pid = current_task.lock().pid.ok_or(Errno::NoSuchProcess)?;
