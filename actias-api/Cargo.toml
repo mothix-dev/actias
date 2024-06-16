@@ -1,0 +1,8 @@
+[package]
+name = "actias-api"
+version = "0.1.0"
+edition = "2021"
+description = "API for interacting with the Actias microkernel"
+license = "ISC"
+
+[dependencies]

@@ -1,0 +1,3 @@
+[workspace]
+members = ["actias", "actias-api"]
+resolver = "2"
