@@ -17,7 +17,8 @@
 #![warn(clippy::trivially_copy_pass_by_ref)]
 #![warn(clippy::redundant_closure_for_method_calls)]
 
-pub mod platform;
+pub mod logger;
+pub mod arch;
 
 use log::error;
 

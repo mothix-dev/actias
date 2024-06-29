@@ -1,5 +1,6 @@
+use crate::logger::Logger;
 use core::{fmt, fmt::Write};
-use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
+use log::{LevelFilter, SetLoggerError};
 use x86::io::{inb, outb};
 
 /// Write a string to the output channel
@@ -42,43 +43,8 @@ impl Write for SerialWriter {
     }
 }
 
-/// simple logger implementation over serial
-struct Logger {
-    max_level: LevelFilter,
-}
-
-impl Log for Logger {
-    fn enabled(&self, _metadata: &Metadata) -> bool {
-        //metadata.level() <= self.max_level
-        true
-    }
-
-    #[allow(unused_must_use)]
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let level = record.level();
-            let width = 5;
-            let target = record.target();
-            let args = record.args();
-
-            write!(&mut SerialWriter, "{level:width$} ");
-            if let Some(path) = record.module_path() {
-                if target != path {
-                    write!(&mut SerialWriter, "({target}) ");
-                }
-                write!(&mut SerialWriter, "[{path}] ");
-            } else {
-                write!(&mut SerialWriter, "[?] ({target}) ");
-            }
-            writeln!(&mut SerialWriter, "{args}");
-        }
-    }
-
-    fn flush(&self) {}
-}
-
 /// our logger that we will log things with
-static LOGGER: Logger = Logger { max_level: LevelFilter::Info };
+static LOGGER: Logger<SerialWriter> = Logger::new(LevelFilter::Info, SerialWriter);
 
 /// initialize the logger, setting the max level in the process
 pub fn init() -> Result<(), SetLoggerError> {

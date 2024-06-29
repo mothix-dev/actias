@@ -5,13 +5,10 @@ edition = "2021"
 description = "the Actias microkernel"
 license = "ISC"
 
-[features]
-default = []
-platform-multiboot = []
-
 [dependencies]
 actias-api = { path = "../actias-api" }
 log = "0.4"
+spin = "0.9"
 
 [target.'cfg(target_arch = "x86")'.dependencies]
 x86 = "0.52"
